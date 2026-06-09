@@ -80,7 +80,7 @@
       "RMS",
       "Peak-to-Peak"
     ],
-    "fft_window_function": "hanning",
+    "fft_window_function": "",
     "available_fft_windows": [
       "hanning",
       "hamming",

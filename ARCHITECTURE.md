@@ -1,62 +1,188 @@
-# Test Data Analyser Architecture Notes
+# Test Data Analyser — Architecture
 
-This revision continues the staged refactor away from a single monolithic `gui.py` file.
+The Test Data Analyser is a **PySide6 / Qt** desktop application built on a
+framework-independent core. The engineering and data logic lives in layers that
+import no UI toolkit, with a thin Qt UI on top. This makes the logic
+unit-testable without a GUI and keeps the UI swappable.
 
-## Current layout
+> The application was migrated from an original Tkinter implementation. That
+> staged migration is recorded in [MIGRATION_PROGRESS.md](MIGRATION_PROGRESS.md);
+> this document describes only the **current** architecture.
 
-- `gui.py` exposes the public `TestDataAnalyserGUI` class used by `main.py`.
-- `gui_base.py` contains the previously monolithic GUI implementation, renamed to `TestDataAnalyserGUIBase` for compatibility.
-- `label_profiles.py` owns per-plot label state and auto-label behaviour.
-- `profile_state.py` owns plot profile creation, switching, capture/apply, duplication, rename/delete, and JSON session save/load.
-- `engineering_notes.py` owns the structured Engineering Notes tab, note capture/restoration, report text formatting, clipboard copy, and note clearing.
-- `raw_data.py` owns Raw Data tab state refresh, selected-data framing/filtering, row display limits, blank-row removal, and selected-data export.
-- `analysis.py` owns statistics, selected-data ranges, range preview, and axis-limit fill from data.
-- `limits.py` owns requirement/limit line CRUD, limit point editing, limit plotting, active limit ranges, and margin-to-limit reporting.
-- `cursor_tools.py` owns the live cursor readout, locked point comparison (Point Compare), cursor table/text rendering, and using locked points as the analysis window.
-- `plotting.py` owns figure/canvas management, plot data preparation, plot and FFT generation (including secondary Y-axis handling), legend/panel handling, and figure/output saving.
-- `calculated_channels.py` owns Maths Channel creation, safe formula evaluation, calculated channel CRUD, recalculation, and dataframe/UI refresh after derived columns change.
-- `multi_run.py` owns the Runs / Comparison tab, multi-file/multi-run loading, run activation, comparison plotting, comparison statistics, and run metadata session integration.
-- `raw_data_editor.py` owns inline Raw Data cell editing and refresh of dataframe-dependent analysis views after edits.
-- `data_loading.py` owns file/sheet loading, column population/classification, the dataframe caches, Y-channel checkbox rebuild, Y/secondary-Y selection, the debounced axis-selection handler, and column-derived axis labels.
-- `models.py` owns framework-independent dataclasses for plot data and plot profile/session state normalisation.
+## Layers
 
-## Why this is safe
+```
+┌──────────────────────────────────────────────────────────────┐
+│  qt_app/    PySide6 UI — main window, panels, theme, adapters │
+└───────────────────────────┬──────────────────────────────────┘
+                            ▼
+   viewmodels/  UI-independent coordinators over AppState + services
+                            ▼
+   services/    pure engineering / data logic (numpy/pandas/Matplotlib OK)
+                            ▼
+   domain/      framework-independent dataclasses (no UI, no logic)
+                            ▼
+   core/        shared infrastructure (config, data I/O, filters, settings, utils)
+```
 
-The extracted mixins are placed before `TestDataAnalyserGUIBase` in the method-resolution order, so the app uses extracted modules as the source of truth. `gui_base.py` remains only for behaviour that has not yet been extracted.
+The dependency direction only ever points downward. **Only `qt_app/` imports
+PySide6.** `domain/`, `services/`, and `viewmodels/` must never import a UI
+toolkit, open a dialog, or show a message box; they return values or a structured
+`OperationResult`.
 
-## Included behaviour improvement
+## Packages
 
-Axis/title labels are treated as per-plot-profile state. If the user manually edits an axis label, subsequent X/Y channel changes will not overwrite that label for that plot. Pressing **Auto Labels** intentionally returns label fields to automatic generation.
+### `core/` — shared infrastructure
 
-## Domain model extraction
+Low-level, cross-cutting modules every other layer can use:
 
-`models.py` now contains framework-independent dataclasses for plot profile and session state, including axis limits, analysis windows, filters, legend settings, raw-data view settings, manual label flags, engineering notes, and requirement/limit lines.
+- `config.py` — Eaton brand colours, the app `__version__`, the domain keyword
+  config (`DOMAIN_CONFIG`), limit-colour presets, and the theme palette helper.
+- `data_io.py` — file/sheet discovery and loading (`get_excel_sheets`,
+  `load_data`) and numeric coercion (`numeric_series`, `NUMERIC_EXTRACT_RE`).
+- `filters.py` — sampling-rate estimation and the zero-phase low-pass
+  (Butterworth) filter used by the plot canvas.
+- `settings_manager.py` — `SettingsManager`, the persisted user-settings store.
+- `utils.py` — column-name helpers (natural sort, grouped-column matching,
+  keyword inference).
 
-The Tkinter mixins still store active plot profiles as dictionaries for compatibility with the current UI and saved session JSON, but profile data is normalised through model helpers at creation, apply, save, and load boundaries. This keeps current behaviour stable while establishing a domain boundary that can be reused by a future PySide6 or other UI implementation.
+### `domain/` — framework-independent models
 
-## Recommended next extraction passes
+Plain dataclasses that mirror the on-disk JSON shapes, each with
+`from_dict()`/`to_dict()` helpers that tolerate missing keys so previously saved
+sessions keep loading:
 
-The major behaviour clusters have now been extracted into focused mixins, and
-the dead duplicate copies left behind by earlier passes have been removed from
-`gui_base.py`.
+- `models.py` — the runtime `PlotData` container.
+- `settings.py` — per-plot view/setting structures (`AxisLimits`,
+  `AnalysisWindow`, `FilterSettings`, `LegendSettings`, `RawDataViewSettings`,
+  `ManualLabelFlags`).
+- `engineering_notes.py` — `EngineeringNotes` (accepts the structured dict form
+  and the historical free-text string form).
+- `limits.py` — `LimitPoint`, `LimitLine`.
+- `plot_profile.py` — `PlotProfile` plus `plot_profile_from_dict`,
+  `plot_profile_to_dict`, and `normalise_plot_profile`.
+- `run_model.py` — `RunMetadata`, `ComparisonSettings`,
+  `CalculatedChannelDefinition`.
+- `session.py` — `SessionState`, the top-level analysis-session model.
+- `conversions.py` — shared, defensive value-coercion helpers.
 
-`gui_base.py` (`TestDataAnalyserGUIBase`) is now considered the stable
-**foundation** and is *not* a target for further extraction. It retains only
-shared infrastructure that every mixin builds on:
+Import these directly, e.g. `from test_data_analyser.domain import PlotData`.
 
-- window/app lifecycle and Eaton styling (`__init__`, `_apply_eaton_style`);
-- the app chrome and master widget tree (`_build_modern_*`, `_build_ui`,
-  `_build_left_controls`, `_build_right_panel`);
-- shared helpers reached across mixins via `self`: cached numeric conversion
-  (`_get_numeric`), generic table/text helpers (`_set_text_widget`,
-  `_clear_treeview`), and the axis-limit helper cluster (`parse_limit`,
-  `_axis_upper_margin`, `manual_limits`, `secondary_manual_limits`,
-  `limits_have_visible_data`, `toggle_axis_entries`, `apply_auto_axis_limits`);
-- the analysis-window helpers (`copy_axis_limits_to_analysis_window`,
-  `clear_analysis_window`).
+### `services/` — pure engineering/data logic
 
-Future passes, if desired, could separate the pure plotting/data-preparation
-logic in `plotting.py` further from Tkinter event handling, or split the
-widget-construction code in `gui_base.py` into a dedicated UI-builder module.
+Reusable logic with no UI imports. Services may use numpy/pandas/Matplotlib but
+must not embed in a canvas or show dialogs; they return values or an
+`OperationResult` (`services/results.py`, fields: `ok`, `message`, `warnings`,
+`errors`, `payload`).
 
-The staged approach keeps the app runnable while steadily reducing the size and risk of future edits.
+- `statistics_service.py` — count/min/max/mean/median/std/RMS/peak-to-peak, the
+  statistics DataFrame, and selected-data X/Y ranges.
+- `limits_service.py` — limit-line normalisation, active limit ranges,
+  applies-to resolution, and the margin-to-limit summary (`LimitMarginSummary`
+  rows plus display text).
+- `maths_channel_service.py` — the restricted-AST `MathsChannelEvaluator`, the
+  allowed-function set, and calculated-channel definition normalisation.
+- `plotting_data_service.py` — analysis-window data preparation (no Matplotlib).
+- `plot_render_service.py` — Matplotlib-aware colour-cycle resolution and the
+  secondary-axis cycle (no Qt).
+- `fft_service.py` — window functions and averaged FFT spectra.
+- `raw_data_service.py` — selected-data framing/filtering, blank-row removal,
+  row-limit parsing, and edit coercion.
+- `run_comparison_service.py` — enabled-run filtering, common-X range,
+  per-channel comparison framing, comparison statistics, and run serialisation.
+- `cursor_service.py` — nearest plotted sample and the locked-point/delta
+  comparison table.
+- `settings_service.py` — defensive settings access and theme resolution.
+- `session_service.py` — session dict assembly/normalisation through
+  `SessionState` plus JSON save/load.
+
+### `viewmodels/` — UI-independent coordinators
+
+ViewModels coordinate domain state and services, expose plain Python data, and
+return `OperationResult`. They hold no Qt objects, open no dialogs, and show no
+message boxes.
+
+- `app_state.py` — `AppState`: the single source of truth (dataframe, source
+  file/sheet, plot profiles, runs + active index, calculated channels, limit
+  lines + active index, engineering notes, comparison settings, settings
+  manager).
+- `data_loading_vm.py` — file/sheet loading into the state.
+- `plot_workspace_vm.py` — plot-data preparation, selected ranges, statistics,
+  and FFT (pulls numeric series from the state directly).
+- `raw_data_vm.py` — Raw Data selection/filtering, row-limit parsing, edit
+  coercion, cell edits with undo, and selected-data export.
+- `maths_channels_vm.py` — validate/apply/recalculate/delete calculated
+  channels, mutating the state's dataframe/definitions in place.
+- `limits_vm.py` — limit-line + point CRUD, colour-preset helpers, active
+  ranges, and the margin-to-limit summary.
+- `runs_comparison_vm.py` — run CRUD (load/remove/duplicate/rename/set-active/
+  toggle), comparison settings, comparison-item preparation, and statistics.
+- `engineering_notes_vm.py` — the structured note fields, get/set/clear, and the
+  compiled report text.
+- `cursor_compare_vm.py` — locked comparison points, the comparison table, and
+  the analysis window derived from the first two points.
+- `settings_vm.py` — settings get/set/save, theme info, and option lists.
+- `main_window_vm.py` — the top-level coordinator owning `AppState` and every
+  feature viewmodel, plus session build/save/load and full restore
+  (`capture_working_state`, `restore_session`).
+
+### `qt_app/` — the PySide6 UI
+
+The only package that imports PySide6.
+
+- `main_qt.py` — the `QApplication` entry point.
+- `main_window.py` — `MainWindow`: the Eaton-branded header, the axis/data
+  controls, the Matplotlib plot canvas, the lower tabs, the File/Edit menus
+  (Open, Save/Load Session, Settings), and the wiring between every panel and the
+  viewmodels.
+- `theme.py` — the centralised Eaton Qt stylesheet/palette, sourced from
+  `core/config.py` and honouring light/dark.
+- `widgets/` — one thin panel per feature: `data_file_panel`,
+  `axis_selection_panel`, `plot_workspace`, `statistics_panel`, `raw_data_panel`,
+  `maths_channels_panel`, `limits_panel`, `engineering_notes_panel`,
+  `runs_comparison_panel`, `cursor_compare_panel`, and `settings_dialog`.
+- `adapters/` — the Qt/Matplotlib boundary objects (no business logic):
+  `pandas_table_model` (reusable `QAbstractTableModel`),
+  `editable_raw_data_model` (inline-editing subclass),
+  `matplotlib_qt_adapter` (owns the `FigureCanvasQTAgg` + toolbar),
+  `qt_file_dialogs`, and `qt_message_service`.
+
+## Key flows
+
+- **Plotting.** `MainWindow._generate_plot()` reads the axis panel (X, primary &
+  secondary Y, plot kind, analysis window, filter), asks `PlotWorkspace` to
+  render through `PlotWorkspaceViewModel` + `plot_render_service`, draws limit
+  overlays, and refreshes statistics, raw data, margins, and the cursor state.
+- **Signals.** Panels communicate with the main window via Qt signals
+  (`fileLoaded`, `channelsChanged`, `limitsChanged`, `comparisonRequested`,
+  `cursorPointsChanged`, `analysisWindowRequested`, `statusMessage`); the main
+  window owns cross-panel refreshes.
+- **Cursor.** `PlotWorkspace` owns the Matplotlib click/key wiring and the
+  locked-point markers; `CursorCompareViewModel` owns the point list and table
+  data, so the logic stays GUI-free.
+- **Sessions.** `capture_working_state()` folds the top-level limit lines,
+  engineering notes, and axis selection into a plot profile; `restore_session()`
+  reloads the file and runs, recalculates maths channels, and returns the saved
+  selection (plus warnings) for the UI to re-apply.
+
+## Branding
+
+Axis/title labels are treated as per-plot-profile state: a manually edited label
+is preserved across subsequent X/Y channel changes for that plot, and auto-label
+behaviour can return label fields to automatic generation. Eaton brand colours,
+the version string, and the theme palette all live in `core/config.py` and are
+the single source of truth for both the Qt theme and the plot colour cycles.
+
+## Testing
+
+All tests are framework-independent and run headless via
+`python -m unittest discover -s tests`:
+
+- `tests/test_domain_models.py` — `from_dict`/`to_dict` round-trips and session
+  normalisation.
+- `tests/test_services.py` — statistics, limits, maths formulas, FFT, raw data,
+  run comparison, and cursor logic.
+- `tests/test_viewmodels.py` — every viewmodel, plus session save/restore.
+- `tests/test_qt_adapters.py` — the table models, every migrated panel, the axis
+  controls, plot parity, and the cursor wiring, under the Qt **offscreen**
+  platform (skipped automatically when PySide6 is absent).
