@@ -1,0 +1,45 @@
+# Python cache
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# VS Code local config
+.vscode/
+
+# Build/package output
+build/
+dist/
+*.egg-info/
+
+# Test/cache output
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Logs
+*.log
+
+# Environment/secrets
+.env
+*.env
+
+# Temporary files
+tmp/
+temp/
+outputs/
+exports/
+
+# Excel temp files
+~$*.xlsx
+~$*.xls
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -1,0 +1,93 @@
+{
+  "plot_appearance": {
+    "default_line_width": 1.5,
+    "colour_cycle": "eaton",
+    "available_colour_cycles": [
+      "eaton",
+      "matplotlib",
+      "colourblind_safe"
+    ],
+    "default_marker_style": "None",
+    "grid_visible": true,
+    "font_size_title": 11,
+    "font_size_axis_label": 12,
+    "font_size_tick_label": 10,
+    "font_size_legend": 10,
+    "plot_background_colour": "#FFFFFF"
+  },
+  "axis_scaling": {
+    "auto_scale_mode": "padded",
+    "auto_scale_pad_percent": 5,
+    "scientific_notation_enabled": false,
+    "scientific_notation_threshold": 1.0,
+    "decimal_places_statistics": 2,
+    "decimal_places_cursor": 2
+  },
+  "data_import": {
+    "default_delimiter": "auto",
+    "available_delimiters": [
+      "auto",
+      ",",
+      "\t",
+      ";",
+      "|"
+    ],
+    "default_encoding": "utf-8",
+    "available_encodings": [
+      "utf-8",
+      "latin-1",
+      "cp1252",
+      "ascii"
+    ],
+    "header_row_index": 0,
+    "skip_rows": 0,
+    "decimal_separator": "."
+  },
+  "export": {
+    "default_image_format": "png",
+    "available_image_formats": [
+      "png",
+      "svg",
+      "pdf"
+    ],
+    "default_dpi": 300,
+    "default_export_directory": "",
+    "include_statistics_in_export": false,
+    "auto_timestamp_filenames": true
+  },
+  "general_ui": {
+    "theme": "light",
+    "legend_threshold": 2,
+    "startup_behaviour": "last_session",
+    "available_startup_behaviours": [
+      "blank",
+      "last_session",
+      "prompt"
+    ],
+    "auto_save_enabled": true,
+    "auto_save_interval_minutes": 5,
+    "confirm_before_delete": true,
+    "show_tooltips": true
+  },
+  "engineering_analysis": {
+    "default_statistics_columns": [
+      "Count",
+      "Min",
+      "Max",
+      "Mean",
+      "Median",
+      "Std Dev",
+      "RMS",
+      "Peak-to-Peak"
+    ],
+    "fft_window_function": "hanning",
+    "available_fft_windows": [
+      "hanning",
+      "hamming",
+      "blackman",
+      "rectangular"
+    ],
+    "fft_overlap_percent": 50,
+    "significant_figures_maths": 6
+  }
+}
