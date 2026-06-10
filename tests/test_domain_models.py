@@ -12,17 +12,29 @@ from __future__ import annotations
 
 import unittest
 
+from test_data_analyser.core.utils import classify_channel_name
 from test_data_analyser.domain import (
     AxisLimits,
     CalculatedChannelDefinition,
     ComparisonSettings,
     EngineeringNotes,
+    LegendSettings,
     LimitLine,
     PlotProfile,
     RunMetadata,
     SessionState,
     normalise_plot_profile,
 )
+
+
+class ChannelClassificationTests(unittest.TestCase):
+    def test_engineering_channel_names_are_classified(self) -> None:
+        self.assertEqual(classify_channel_name("Outlet Pressure"), "Pressure")
+        self.assertEqual(classify_channel_name("Current on Phase A"), "Current")
+        self.assertEqual(classify_channel_name("TC25 Structural Interface Temperature 240 Deg (C)"), "Temperature")
+        self.assertEqual(classify_channel_name("Voltage"), "Voltage")
+        self.assertEqual(classify_channel_name("Main Pump RPM"), "Speed")
+        self.assertEqual(classify_channel_name("Mystery Signal"), "Other Numeric")
 
 
 class AxisLimitsTests(unittest.TestCase):
@@ -35,6 +47,15 @@ class AxisLimitsTests(unittest.TestCase):
             AxisLimits.from_dict({}).to_dict(),
             {"xmin": "", "xmax": "", "ymin": "", "ymax": "", "y2min": "", "y2max": ""},
         )
+
+
+class LegendSettingsTests(unittest.TestCase):
+    def test_display_mode_round_trip(self) -> None:
+        data = {"max_inline_entries": 8, "location": "upper right", "display_mode": "graph"}
+        self.assertEqual(LegendSettings.from_dict(data).to_dict(), data)
+
+    def test_missing_display_mode_defaults_to_panel(self) -> None:
+        self.assertEqual(LegendSettings.from_dict({}).display_mode, "panel")
 
 
 class EngineeringNotesTests(unittest.TestCase):

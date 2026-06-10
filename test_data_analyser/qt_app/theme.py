@@ -40,12 +40,18 @@ def build_stylesheet(theme_name: str = "light") -> str:
     QFrame#EatonHeader {{
         background-color: {EATON_HEADER_BLUE};
     }}
+    QFrame#EatonHeader QLabel {{
+        background-color: {EATON_HEADER_BLUE};
+        border: none;
+    }}
     QLabel#EatonHeaderTitle {{
+        background-color: {EATON_HEADER_BLUE};
         color: {EATON_WHITE};
         font-size: 16pt;
         font-weight: 600;
     }}
     QLabel#EatonHeaderSubtitle {{
+        background-color: {EATON_HEADER_BLUE};
         color: {EATON_WHITE};
         font-size: 9pt;
     }}
@@ -61,6 +67,20 @@ def build_stylesheet(theme_name: str = "light") -> str:
     }}
     QLabel#PlaceholderText {{
         color: {secondary};
+    }}
+    QGroupBox {{
+        border: 1px solid {border};
+        border-radius: 6px;
+        margin-top: 10px;
+        padding: 8px 8px 6px 8px;
+        font-weight: 600;
+    }}
+    QGroupBox::title {{
+        subcontrol-origin: margin;
+        subcontrol-position: top left;
+        left: 10px;
+        padding: 0 4px;
+        color: {EATON_DARK_BLUE};
     }}
     QPushButton {{
         background-color: {card};
@@ -105,18 +125,54 @@ def build_stylesheet(theme_name: str = "light") -> str:
     QTabWidget::pane {{
         border: 1px solid {border};
         background-color: {card};
+        top: -1px;
     }}
     QTabBar::tab {{
         background-color: {bg};
         color: {text};
-        padding: 6px 14px;
+        padding: 5px 12px;
         border: 1px solid {border};
         border-bottom: none;
-        border-top-left-radius: 4px;
-        border-top-right-radius: 4px;
+        border-top-left-radius: 3px;
+        border-top-right-radius: 3px;
+        margin-right: 2px;
     }}
     QTabBar::tab:selected {{
         background-color: {EATON_BLUE};
+        color: {EATON_WHITE};
+    }}
+    QTabWidget#AnalysisTabs::pane {{
+        background-color: {card};
+        border: 1px solid {border};
+        border-radius: 4px;
+        top: -1px;
+    }}
+    QTabWidget#AnalysisTabs QTabBar::tab {{
+        border: 1px solid {border};
+        border-bottom: none;
+        border-top-left-radius: 3px;
+        border-top-right-radius: 3px;
+    }}
+    QTabBar#HeaderTabs {{
+        background-color: {EATON_HEADER_BLUE};
+    }}
+    QTabBar#HeaderTabs::tab {{
+        background-color: transparent;
+        color: rgba(255, 255, 255, 0.72);
+        padding: 8px 18px;
+        margin-right: 2px;
+        border: none;
+        border-bottom: 3px solid transparent;
+        font-size: 10.5pt;
+        font-weight: 600;
+    }}
+    QTabBar#HeaderTabs::tab:selected {{
+        background-color: transparent;
+        color: {EATON_WHITE};
+        border-bottom: 3px solid {EATON_WHITE};
+    }}
+    QTabBar#HeaderTabs::tab:hover {{
+        background-color: transparent;
         color: {EATON_WHITE};
     }}
     QStatusBar {{

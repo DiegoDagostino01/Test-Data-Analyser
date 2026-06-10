@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...viewmodels.runs_comparison_vm import RunsComparisonViewModel
-from ..adapters import qt_file_dialogs, qt_message_service
+from ..adapters import qt_file_dialogs, qt_message_service, qt_widget_helpers
 from ..adapters.pandas_table_model import PandasTableModel
 
 SelectionProvider = Callable[[], tuple[str, list[str], Optional[float], Optional[float]]]
@@ -180,9 +180,11 @@ class RunsComparisonPanel(QWidget):
     # Run CRUD actions
     # ------------------------------------------------------------------
     def _add_run(self) -> None:
-        path = qt_file_dialogs.open_data_file(self)
+        manager = getattr(getattr(self.vm, "state", None), "settings_manager", None)
+        path = qt_file_dialogs.open_data_file(self, qt_widget_helpers.last_data_directory(manager))
         if not path:
             return
+        qt_widget_helpers.remember_data_directory(manager, path)
         sheets = self.vm.get_sheets(path)
         sheet_name: Optional[str] = None
         if sheets:

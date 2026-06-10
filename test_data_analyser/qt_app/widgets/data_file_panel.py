@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...viewmodels.data_loading_vm import DataLoadingViewModel
-from ..adapters import qt_file_dialogs
+from ..adapters import qt_file_dialogs, qt_widget_helpers
 
 
 class DataFilePanel(QFrame):
@@ -62,9 +62,11 @@ class DataFilePanel(QFrame):
     # Actions
     # ------------------------------------------------------------------
     def open_file(self) -> None:
-        filename = qt_file_dialogs.open_data_file(self)
+        manager = getattr(getattr(self.vm, "state", None), "settings_manager", None)
+        filename = qt_file_dialogs.open_data_file(self, qt_widget_helpers.last_data_directory(manager))
         if not filename:
             return
+        qt_widget_helpers.remember_data_directory(manager, filename)
         self._current_path = filename
         sheets = self.vm.get_sheets(filename)
         if sheets:

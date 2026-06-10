@@ -11,6 +11,7 @@ Run with:
 from __future__ import annotations
 
 import os
+import tempfile
 import unittest
 
 import pandas as pd
@@ -19,10 +20,25 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
     from PySide6.QtCore import Qt
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import (
+        QApplication,
+        QGroupBox,
+        QPushButton,
+        QScrollArea,
+        QSizePolicy,
+        QStackedWidget,
+        QTabBar,
+        QTabWidget,
+    )
 
+    from test_data_analyser.core.config import EATON_HEADER_BLUE
+    from test_data_analyser.core.settings_manager import SettingsManager
+    from test_data_analyser.qt_app import theme
+    from test_data_analyser.qt_app.adapters import matplotlib_qt_adapter, qt_file_dialogs, qt_message_service
     from test_data_analyser.qt_app.adapters.editable_raw_data_model import EditableRawDataTableModel
     from test_data_analyser.qt_app.adapters.pandas_table_model import PandasTableModel
+    from test_data_analyser.qt_app.main_window import MainWindow
+    from test_data_analyser.qt_app.widgets.no_wheel_combo_box import NoWheelComboBox
     from test_data_analyser.viewmodels.app_state import AppState
     from test_data_analyser.viewmodels.cursor_compare_vm import CursorCompareViewModel
     from test_data_analyser.viewmodels.engineering_notes_vm import EngineeringNotesViewModel
@@ -204,6 +220,11 @@ class MathsChannelsPanelTests(unittest.TestCase):
         self.assertEqual(self.panel.formula_edit.toPlainText(), "")
         self.assertIsNone(self.panel._selected_name)
 
+    def test_dense_content_is_scroll_wrapped(self) -> None:
+        self.assertIsInstance(self.panel.content_scroll, QScrollArea)
+        self.assertFalse(self.panel.content_splitter.childrenCollapsible())
+        self.assertGreaterEqual(self.panel.content_splitter.minimumHeight(), 340)
+
 
 @unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
 class LimitsPanelTests(unittest.TestCase):
@@ -272,6 +293,15 @@ class LimitsPanelTests(unittest.TestCase):
         self.panel.vm.add_point("2", "10")
         self.panel.refresh_margins()
         self.assertIn("PASS", self.panel.summary_text.toPlainText())
+
+    def test_dense_content_is_scroll_wrapped(self) -> None:
+        self.assertIsInstance(self.panel.content_scroll, QScrollArea)
+        self.assertFalse(self.panel.content_splitter.childrenCollapsible())
+        self.assertGreaterEqual(self.panel.content_splitter.minimumHeight(), 380)
+
+    def test_margin_summary_is_separate_panel(self) -> None:
+        self.assertIsNot(self.panel.summary_panel.parentWidget(), self.panel)
+        self.assertEqual(self.panel.summary_text.parentWidget(), self.panel.summary_panel)
 
     def test_limits_changed_emitted_on_add(self) -> None:
         emitted = []
@@ -376,8 +406,20 @@ class AxisSelectionPanelTests(unittest.TestCase):
         self.panel.set_columns(["Time", "A", "B"], "Time")
 
     def test_set_columns_populates_both_lists(self) -> None:
-        self.assertEqual(self.panel.y_list.count(), 2)
-        self.assertEqual(self.panel.secondary_y_list.count(), 2)
+        self.assertEqual(self._checkable_count(self.panel.y_list), 2)
+        self.assertEqual(self._checkable_count(self.panel.secondary_y_list), 2)
+
+    @staticmethod
+    def _checkable_count(widget) -> int:
+        return sum(
+            1
+            for row in range(widget.count())
+            if widget.item(row).flags() & Qt.ItemFlag.ItemIsUserCheckable
+        )
+
+    def test_primary_and_secondary_lists_have_equal_sizing(self) -> None:
+        self.assertEqual(self.panel.y_list.minimumHeight(), self.panel.secondary_y_list.minimumHeight())
+        self.assertEqual(self.panel.y_list.maximumHeight(), self.panel.secondary_y_list.maximumHeight())
 
     def test_secondary_selection(self) -> None:
         for row in range(self.panel.secondary_y_list.count()):
@@ -408,6 +450,42 @@ class AxisSelectionPanelTests(unittest.TestCase):
                 item.setCheckState(Qt.CheckState.Checked)
         self.panel.update_columns(["Time", "A", "B", "C"])
         self.assertEqual(self.panel.selected_secondary_y(), ["B"])
+
+    def test_axes_figure_options_are_not_duplicated_in_left_panel(self) -> None:
+        group_titles = [group.title() for group in self.panel.findChildren(QGroupBox)]
+        self.assertNotIn("Plot Labels", group_titles)
+        self.assertNotIn("Axis Limits", group_titles)
+
+    def test_channel_group_filter_preserves_checked_items(self) -> None:
+        self.panel.set_columns(["Time", "Outlet Pressure", "Current on Phase A", "Voltage"], "Time")
+        for row in range(self.panel.y_list.count()):
+            item = self.panel.y_list.item(row)
+            if item.text() == "Current on Phase A":
+                item.setCheckState(Qt.CheckState.Checked)
+        self.panel.group_combo.setCurrentText("Pressure")
+        self.assertEqual(self.panel.y_list.count(), 1)
+        self.assertEqual(self.panel.y_list.item(0).text(), "Outlet Pressure")
+        self.assertEqual(self.panel.selected_y(), ["Current on Phase A"])
+        self.panel.group_combo.setCurrentText("All")
+        group_headers = [self.panel.y_list.item(row).text() for row in range(self.panel.y_list.count())]
+        self.assertIn("Pressure", group_headers)
+        self.assertIn("Current", group_headers)
+        checked = [
+            self.panel.y_list.item(row).text()
+            for row in range(self.panel.y_list.count())
+            if self.panel.y_list.item(row).checkState() == Qt.CheckState.Checked
+        ]
+        self.assertEqual(checked, ["Current on Phase A"])
+
+
+class _PaddingSettingsVM:
+    """Settings-VM stand-in returning controlled axis-padding values."""
+
+    def __init__(self, overrides: dict | None = None) -> None:
+        self._overrides = overrides or {}
+
+    def get(self, section, key, default=None):
+        return self._overrides.get((section, key), default)
 
 
 @unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
@@ -447,6 +525,227 @@ class PlotWorkspaceParityTests(unittest.TestCase):
     def test_filter_requires_cutoff(self) -> None:
         result = self.panel.generate_plot("Time", ["A"], use_filter=True, cutoff=None)
         self.assertFalse(result.ok)
+
+    def test_plot_labels_and_axis_limits_are_applied(self) -> None:
+        result = self.panel.generate_plot(
+            "Time",
+            ["A"],
+            title="Pump Run",
+            x_label="Seconds",
+            y_label="Pressure",
+            axis_limits={"xmin": 0.2, "xmax": 0.8, "ymin": -0.5, "ymax": 0.5},
+            auto_fit_axes=False,
+        )
+        self.assertTrue(result.ok, result.message)
+        self.assertEqual(self.panel.canvas.axes.get_title(), "Pump Run")
+        self.assertEqual(self.panel.canvas.axes.get_xlabel(), "Seconds")
+        self.assertEqual(self.panel.canvas.axes.get_ylabel(), "Pressure")
+        self.assertEqual(tuple(round(value, 1) for value in self.panel.canvas.axes.get_xlim()), (0.2, 0.8))
+        self.assertEqual(tuple(round(value, 1) for value in self.panel.canvas.axes.get_ylim()), (-0.5, 0.5))
+
+    def test_legend_panel_includes_secondary_channels_without_canvas_legend(self) -> None:
+        result = self.panel.generate_plot("Time", ["A", "B"], secondary_y=["B"])
+        self.assertTrue(result.ok, result.message)
+        self.assertFalse(self.panel.legend_panel.isHidden())
+        self.assertIsNone(self.panel.canvas.axes.get_legend())
+        self.assertEqual(self.panel.legend_table.rowCount(), 2)
+        table_labels = [self.panel.legend_table.item(row, 1).text() for row in range(self.panel.legend_table.rowCount())]
+        self.assertIn("A", table_labels)
+        self.assertIn("B [Right Y]", table_labels)
+
+    def test_graph_legend_mode_hides_panel_and_draws_canvas_legend(self) -> None:
+        self.panel.set_legend_display("graph")
+        result = self.panel.generate_plot("Time", ["A", "B"], secondary_y=["B"])
+        self.assertTrue(result.ok, result.message)
+        self.assertTrue(self.panel.legend_panel.isHidden())
+        legend = self.panel.canvas.axes.get_legend()
+        self.assertIsNotNone(legend)
+        assert legend is not None
+        labels = [text.get_text() for text in legend.get_texts()]
+        self.assertIn("A", labels)
+        self.assertIn("B [Right Y]", labels)
+
+    def test_switching_back_to_panel_removes_canvas_legend(self) -> None:
+        self.panel.generate_plot("Time", ["A"])
+        self.panel.set_legend_display("graph")
+        self.assertIsNotNone(self.panel.canvas.axes.get_legend())
+        self.panel.set_legend_display("panel")
+        self.assertFalse(self.panel.legend_panel.isHidden())
+        self.assertIsNone(self.panel.canvas.axes.get_legend())
+
+    def test_figure_options_includes_legend_tab(self) -> None:
+        captured: dict[str, object] = {}
+        original_figure_edit = matplotlib_qt_adapter.figureoptions.figure_edit
+        original_fedit = matplotlib_qt_adapter._formlayout.fedit
+
+        def fake_figure_edit(axes, parent):
+            def apply(data):
+                captured["matplotlib_data"] = data
+
+            matplotlib_qt_adapter._formlayout.fedit(
+                [([("Title", "")], "Axes", "")],
+                title="Figure options",
+                parent=parent,
+                apply=apply,
+            )
+
+        def fake_fedit(data, title="", comment="", icon=None, parent=None, apply=None):
+            captured["tabs"] = [section[1] for section in data]
+            if apply is not None:
+                apply([["updated title"], ["graph"]])
+
+        matplotlib_qt_adapter.figureoptions.figure_edit = fake_figure_edit
+        matplotlib_qt_adapter._formlayout.fedit = fake_fedit
+        try:
+            self.panel.canvas.toolbar._figure_edit_with_legend(self.panel.canvas.axes)
+        finally:
+            matplotlib_qt_adapter.figureoptions.figure_edit = original_figure_edit
+            matplotlib_qt_adapter._formlayout.fedit = original_fedit
+
+        self.assertEqual(captured["tabs"], ["Axes", "Legend"])
+        self.assertEqual(captured["matplotlib_data"], [["updated title"]])
+        self.assertEqual(self.panel.legend_display(), "graph")
+
+    def test_panel_legend_is_rendered_into_saved_figure(self) -> None:
+        self.panel.generate_plot("Time", ["A", "B"], secondary_y=["B"])
+        self.assertIsNone(self.panel.canvas.axes.get_legend())
+        captured: dict[str, object] = {}
+        original_base_save = matplotlib_qt_adapter.NavigationToolbar2QT.save_figure
+
+        def fake_base_save(toolbar, *args):
+            legend = self.panel.canvas.axes.get_legend()
+            captured["labels"] = [text.get_text() for text in legend.get_texts()] if legend else None
+
+        matplotlib_qt_adapter.NavigationToolbar2QT.save_figure = fake_base_save
+        try:
+            self.panel.canvas.toolbar.save_figure()
+        finally:
+            matplotlib_qt_adapter.NavigationToolbar2QT.save_figure = original_base_save
+
+        labels = captured["labels"]
+        self.assertIsNotNone(labels)
+        assert labels is not None
+        self.assertIn("A", labels)
+        self.assertIn("B [Right Y]", labels)
+        # The temporary export legend is removed afterwards so the screen stays clean.
+        self.assertIsNone(self.panel.canvas.axes.get_legend())
+
+    def test_graph_legend_is_preserved_when_saving_figure(self) -> None:
+        self.panel.set_legend_display("graph")
+        self.panel.generate_plot("Time", ["A"])
+        self.assertIsNotNone(self.panel.canvas.axes.get_legend())
+        captured: dict[str, object] = {}
+        original_base_save = matplotlib_qt_adapter.NavigationToolbar2QT.save_figure
+
+        def fake_base_save(toolbar, *args):
+            captured["had_legend"] = self.panel.canvas.axes.get_legend() is not None
+
+        matplotlib_qt_adapter.NavigationToolbar2QT.save_figure = fake_base_save
+        try:
+            self.panel.canvas.toolbar.save_figure()
+        finally:
+            matplotlib_qt_adapter.NavigationToolbar2QT.save_figure = original_base_save
+
+        self.assertTrue(captured["had_legend"])
+        self.assertIsNotNone(self.panel.canvas.axes.get_legend())
+
+    def _panel_with_padding(self, overrides):
+        from test_data_analyser.qt_app.widgets.plot_workspace import PlotWorkspace
+
+        return PlotWorkspace(self.plot_vm, _PaddingSettingsVM(overrides))
+
+    def test_axis_padding_defaults_to_five_percent(self) -> None:
+        panel = self._panel_with_padding({})
+        panel.generate_plot("Time", ["A"])
+        xmin, xmax = panel.canvas.axes.get_xlim()
+        # Data X spans exactly [0, 1]; the default 5% padding expands both ends.
+        self.assertAlmostEqual(xmin, -0.05, places=3)
+        self.assertAlmostEqual(xmax, 1.05, places=3)
+
+    def test_disabling_x_padding_removes_x_margin(self) -> None:
+        panel = self._panel_with_padding({("axis_scaling", "pad_x_axis"): False})
+        panel.generate_plot("Time", ["A"])
+        xmin, xmax = panel.canvas.axes.get_xlim()
+        self.assertAlmostEqual(xmin, 0.0, places=6)
+        self.assertAlmostEqual(xmax, 1.0, places=6)
+
+    def test_custom_x_padding_percent_is_applied(self) -> None:
+        panel = self._panel_with_padding({("axis_scaling", "pad_x_percent"): 10})
+        panel.generate_plot("Time", ["A"])
+        xmin, xmax = panel.canvas.axes.get_xlim()
+        self.assertAlmostEqual(xmin, -0.10, places=3)
+        self.assertAlmostEqual(xmax, 1.10, places=3)
+
+    def test_current_axis_appearance_reads_live_axes(self) -> None:
+        self.panel.generate_plot("Time", ["A"])
+        # Simulate Figure Options edits applied directly to the axes.
+        self.panel.canvas.axes.set_title("Edited Title")
+        self.panel.canvas.axes.set_xlabel("Edited X")
+        self.panel.canvas.axes.set_ylabel("Edited Y")
+        self.panel.canvas.axes.set_xlim(0.1, 0.9)
+        self.panel.canvas.axes.set_ylim(-2.0, 2.0)
+
+        appearance = self.panel.current_axis_appearance()
+        self.assertEqual(appearance["title"], "Edited Title")
+        self.assertEqual(appearance["x_label"], "Edited X")
+        self.assertEqual(appearance["y_label"], "Edited Y")
+        self.assertFalse(appearance["auto_fit_axes"])
+        self.assertAlmostEqual(float(appearance["axis_limits"]["xmin"]), 0.1, places=3)
+        self.assertAlmostEqual(float(appearance["axis_limits"]["xmax"]), 0.9, places=3)
+        self.assertAlmostEqual(float(appearance["axis_limits"]["ymin"]), -2.0, places=3)
+        self.assertAlmostEqual(float(appearance["axis_limits"]["ymax"]), 2.0, places=3)
+
+    def test_current_axis_appearance_empty_without_plot(self) -> None:
+        self.assertEqual(self.panel.current_axis_appearance().get("title", None), "")
+
+    def test_save_plot_png_writes_file(self) -> None:
+        self.panel.generate_plot("Time", ["A"])
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "plot.png")
+            result = self.panel.save_plot_png(path)
+            self.assertTrue(result.ok, result.message)
+            self.assertTrue(os.path.exists(path))
+
+    def test_save_plot_png_appends_extension(self) -> None:
+        self.panel.generate_plot("Time", ["A"])
+        with tempfile.TemporaryDirectory() as directory:
+            base = os.path.join(directory, "plot")
+            result = self.panel.save_plot_png(base)
+            self.assertTrue(result.ok, result.message)
+            self.assertTrue(os.path.exists(base + ".png"))
+
+    def test_save_plot_png_requires_a_plot(self) -> None:
+        result = self.panel.save_plot_png("unused.png")
+        self.assertFalse(result.ok)
+
+
+@unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
+class SettingsDialogTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from test_data_analyser.qt_app.widgets.settings_dialog import SettingsDialog
+
+        self._tmp = tempfile.TemporaryDirectory()
+        manager = SettingsManager(os.path.join(self._tmp.name, "settings.json"))
+        self.vm = SettingsViewModel(manager)
+        self.dialog = SettingsDialog(self.vm)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_axis_padding_fields_present(self) -> None:
+        self.assertIn(("axis_scaling", "pad_x_axis"), self.dialog._editors)
+        self.assertIn(("axis_scaling", "pad_x_percent"), self.dialog._editors)
+        self.assertIn(("axis_scaling", "pad_y_axis"), self.dialog._editors)
+        self.assertIn(("axis_scaling", "pad_y_percent"), self.dialog._editors)
+
+    def test_save_persists_axis_padding_and_combo_fields(self) -> None:
+        self.dialog._editors[("axis_scaling", "pad_x_axis")].setChecked(False)
+        self.dialog._editors[("axis_scaling", "pad_y_percent")].setValue(12.0)
+        self.dialog._on_save()
+        self.assertFalse(self.vm.get("axis_scaling", "pad_x_axis"))
+        self.assertEqual(self.vm.get("axis_scaling", "pad_y_percent"), 12.0)
+        # The combo save path must not raise (regression guard for QComboBox import).
+        self.assertIn(self.vm.get("general_ui", "theme"), ("light", "dark"))
 
 
 @unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
@@ -506,6 +805,439 @@ class CursorComparePanelTests(unittest.TestCase):
         self.plot._on_canvas_click(self._Event(0.1, self.plot.canvas.axes))
         self.plot.generate_plot("Time", ["A"])
         self.assertEqual(len(self.cursor_vm.points), 0)
+
+
+@unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
+class NoWheelComboBoxTests(unittest.TestCase):
+    """The critical comboboxes ignore mouse-wheel scrolling to avoid accidental changes."""
+
+    def test_plot_kind_combo_is_no_wheel(self) -> None:
+        from test_data_analyser.qt_app.widgets.axis_selection_panel import AxisSelectionPanel
+
+        panel = AxisSelectionPanel()
+        self.assertIsInstance(panel.plot_kind_combo, NoWheelComboBox)
+        self.assertIsInstance(panel.x_combo, NoWheelComboBox)
+
+    def test_wheel_event_is_ignored_and_selection_unchanged(self) -> None:
+        combo = NoWheelComboBox()
+        combo.addItems(["Line", "Scatter", "Line + Markers"])
+        combo.setCurrentIndex(1)
+
+        class _StubWheelEvent:
+            def __init__(self) -> None:
+                self.ignored = False
+
+            def ignore(self) -> None:
+                self.ignored = True
+
+        event = _StubWheelEvent()
+        combo.wheelEvent(event)  # type: ignore[arg-type]
+        self.assertTrue(event.ignored)
+        self.assertEqual(combo.currentIndex(), 1)
+
+
+@unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
+class OpenDataFileInitialDirTests(unittest.TestCase):
+    """File dialog wrappers accept initial directories without breaking callers."""
+
+    def setUp(self) -> None:
+        self._original_dialog = qt_file_dialogs.QFileDialog
+        self.captured: dict[str, object] = {}
+
+        outer = self
+
+        class _FakeDialog:
+            @staticmethod
+            def getOpenFileName(parent, caption, directory, filt):
+                outer.captured["caption"] = caption
+                outer.captured["directory"] = directory
+                return ("C:/data/file.csv", filt)
+
+            @staticmethod
+            def getSaveFileName(parent, caption, directory, filt):
+                outer.captured["caption"] = caption
+                outer.captured["directory"] = directory
+                return ("C:/sessions/analysis.json", filt)
+
+        qt_file_dialogs.QFileDialog = _FakeDialog
+
+    def tearDown(self) -> None:
+        qt_file_dialogs.QFileDialog = self._original_dialog
+
+    def test_initial_directory_is_passed_through(self) -> None:
+        result = qt_file_dialogs.open_data_file(None, "C:/data")
+        self.assertEqual(result, "C:/data/file.csv")
+        self.assertEqual(self.captured["directory"], "C:/data")
+
+    def test_default_directory_is_blank(self) -> None:
+        result = qt_file_dialogs.open_data_file(None)
+        self.assertEqual(result, "C:/data/file.csv")
+        self.assertEqual(self.captured["directory"], "")
+
+    def test_open_session_initial_directory_is_passed_through(self) -> None:
+        result = qt_file_dialogs.open_session_file(None, "C:/sessions")
+        self.assertEqual(result, "C:/data/file.csv")
+        self.assertEqual(self.captured["caption"], "Load analysis session")
+        self.assertEqual(self.captured["directory"], "C:/sessions")
+
+    def test_save_session_initial_directory_is_passed_through(self) -> None:
+        result = qt_file_dialogs.save_session_file(None, "C:/sessions")
+        self.assertEqual(result, "C:/sessions/analysis.json")
+        self.assertEqual(self.captured["caption"], "Save analysis session")
+        self.assertEqual(self.captured["directory"], "C:/sessions")
+
+
+@unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
+class MainWindowLayoutTests(unittest.TestCase):
+    """The main window builds offscreen with top tabs and a smooth splitter."""
+
+    def _window(self) -> "MainWindow":
+        directory = tempfile.mkdtemp()
+        manager = SettingsManager(os.path.join(directory, "settings.json"))
+        return MainWindow(manager)
+
+    def test_header_logo_builds(self) -> None:
+        window = self._window()
+        logo = window._build_logo_label()
+        self.assertIsNotNone(logo)
+        assert logo is not None  # narrow for the type checker
+        self.assertFalse(logo.pixmap().isNull())
+
+    def test_splitter_is_not_collapsible(self) -> None:
+        window = self._window()
+        self.assertFalse(window.right_splitter.childrenCollapsible())
+
+    def test_panes_have_minimum_heights(self) -> None:
+        window = self._window()
+        self.assertGreaterEqual(window.plot_workspace.minimumHeight(), 260)
+        self.assertGreaterEqual(window.lower_stack.minimumHeight(), 150)
+
+    def test_header_nav_has_four_groups(self) -> None:
+        window = self._window()
+        self.assertIsInstance(window.header_tab_bar, QTabBar)
+        labels = [window.header_tab_bar.tabText(i) for i in range(window.header_tab_bar.count())]
+        self.assertEqual(labels, ["PLOT", "ANALYSIS", "REQUIREMENTS", "NOTES"])
+        self.assertIsInstance(window.lower_stack, QStackedWidget)
+        self.assertEqual(window.lower_stack.count(), 4)
+        self.assertEqual(window.right_panel.layout().itemAt(0).widget(), window.right_splitter)
+
+    def test_header_nav_switches_lower_stack(self) -> None:
+        window = self._window()
+        window.header_tab_bar.setCurrentIndex(1)
+        self.assertIs(window.lower_stack.currentWidget(), window.analysis_tabs)
+        window.header_tab_bar.setCurrentIndex(3)
+        self.assertIs(window.lower_stack.currentWidget(), window.notes_panel)
+
+    def test_plot_group_has_generate_and_save_actions(self) -> None:
+        window = self._window()
+        self.assertEqual(window.lower_stack.currentIndex(), 0)
+        self.assertIs(window.lower_stack.currentWidget(), window.plot_group)
+        self.assertIsInstance(window.generate_plot_button, QPushButton)
+        self.assertIsInstance(window.save_plot_button, QPushButton)
+        plot_labels = [window.plot_tabs.tabText(i) for i in range(window.plot_tabs.count())]
+        self.assertEqual(plot_labels, ["Runs / Comparison", "Point Compare"])
+
+    def test_analysis_group_reaches_maths_panel(self) -> None:
+        window = self._window()
+        window.header_tab_bar.setCurrentIndex(1)
+        window.analysis_tabs.setCurrentIndex(2)
+        self.assertIs(window.analysis_tabs.currentWidget(), window.maths_panel)
+
+    def test_requirements_group_has_margin_sub_tab(self) -> None:
+        window = self._window()
+        window.header_tab_bar.setCurrentIndex(2)
+        self.assertIs(window.lower_stack.currentWidget(), window.requirements_tabs)
+        labels = [window.requirements_tabs.tabText(i) for i in range(window.requirements_tabs.count())]
+        margin_index = labels.index("Margin to Limit")
+        window.requirements_tabs.setCurrentIndex(margin_index)
+        self.assertIs(window.requirements_tabs.currentWidget(), window.limits_panel.summary_panel)
+
+    def test_header_tab_styling_present(self) -> None:
+        stylesheet = theme.build_stylesheet("light")
+        self.assertIn("QTabBar#HeaderTabs", stylesheet)
+
+    def test_header_labels_use_header_background(self) -> None:
+        stylesheet = theme.build_stylesheet("light")
+        self.assertIn("QFrame#EatonHeader QLabel", stylesheet)
+        self.assertIn(f"background-color: {EATON_HEADER_BLUE};", stylesheet)
+
+    def test_left_controls_are_scrollable(self) -> None:
+        window = self._window()
+        self.assertIsInstance(window.left_scroll, QScrollArea)
+        self.assertTrue(window.left_scroll.widgetResizable())
+        self.assertEqual(window.left_scroll.horizontalScrollBarPolicy(), Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.assertEqual(window.axis_panel.sizePolicy().verticalPolicy(), QSizePolicy.Policy.Expanding)
+
+    def test_load_session_uses_remembered_session_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session_dir = os.path.join(directory, "sessions")
+            os.mkdir(session_dir)
+            manager = SettingsManager(os.path.join(directory, "settings.json"))
+            manager.set("general_ui", "last_session_directory", session_dir)
+            window = MainWindow(manager)
+
+            original = qt_file_dialogs.open_session_file
+            captured: dict[str, str] = {}
+
+            def fake_open(parent, initial_dir=""):
+                captured["initial_dir"] = initial_dir
+                return None
+
+            qt_file_dialogs.open_session_file = fake_open
+            try:
+                window.load_session()
+            finally:
+                qt_file_dialogs.open_session_file = original
+            self.assertEqual(captured["initial_dir"], session_dir)
+
+    def test_save_session_updates_remembered_session_directory(self) -> None:
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            initial_dir = os.path.join(directory, "initial")
+            selected_dir = os.path.join(directory, "selected")
+            os.mkdir(initial_dir)
+            os.mkdir(selected_dir)
+            manager = SettingsManager(os.path.join(directory, "settings.json"))
+            manager.set("general_ui", "last_session_directory", initial_dir)
+            window = MainWindow(manager)
+
+            original_save_dialog = qt_file_dialogs.save_session_file
+            original_show_result = qt_message_service.show_result
+            captured: dict[str, str] = {}
+            save_path = os.path.join(selected_dir, "analysis.json")
+
+            class _Result:
+                ok = True
+                message = "Saved."
+
+            def fake_save_dialog(parent, initial_dir=""):
+                captured["initial_dir"] = initial_dir
+                return save_path
+
+            qt_file_dialogs.save_session_file = fake_save_dialog
+            qt_message_service.show_result = lambda *args, **kwargs: None
+            window.vm.capture_working_state = lambda **kwargs: None
+            window.vm.save_session = lambda path: _Result()
+            try:
+                window.save_session()
+            finally:
+                qt_file_dialogs.save_session_file = original_save_dialog
+                qt_message_service.show_result = original_show_result
+
+            self.assertEqual(captured["initial_dir"], initial_dir)
+            self.assertEqual(
+                manager.get("general_ui", "last_session_directory"),
+                str(Path(save_path).resolve().parent),
+            )
+
+
+@unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
+class MainWindowSessionRestoreTests(unittest.TestCase):
+    """Saving then loading a session restores the plot and all analysis panels."""
+
+    def _make_window(self, directory: str) -> "MainWindow":
+        manager = SettingsManager(os.path.join(directory, "settings.json"))
+        return MainWindow(manager)
+
+    def _save_session(self, window, session_path: str) -> None:
+        original_dialog = qt_file_dialogs.save_session_file
+        original_show = qt_message_service.show_result
+        qt_file_dialogs.save_session_file = lambda parent, initial_dir="": session_path
+        qt_message_service.show_result = lambda *args, **kwargs: None
+        try:
+            window.save_session()
+        finally:
+            qt_file_dialogs.save_session_file = original_dialog
+            qt_message_service.show_result = original_show
+
+    def _load_session(self, window, session_path: str) -> None:
+        original_dialog = qt_file_dialogs.open_session_file
+        original_warn = qt_message_service.warning
+        qt_file_dialogs.open_session_file = lambda parent, initial_dir="": session_path
+        qt_message_service.warning = lambda *args, **kwargs: None
+        try:
+            window.load_session()
+        finally:
+            qt_file_dialogs.open_session_file = original_dialog
+            qt_message_service.warning = original_warn
+
+    def test_saved_plot_and_panels_restore_on_load(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data_path = os.path.join(directory, "data.csv")
+            pd.DataFrame({"Time": [0.0, 1.0, 2.0, 3.0], "A": [1.0, 2.0, 3.0, 4.0]}).to_csv(data_path, index=False)
+            session_path = os.path.join(directory, "session.json")
+
+            source = self._make_window(directory)
+            source.vm.data_loading.load_file(data_path, None)
+            source._on_file_loaded(source.vm.state.column_names())
+            source.vm.maths_channels.apply_channel("Sum", "A + A")
+            source._on_channels_changed()
+            source.vm.state.limit_lines = [
+                {
+                    "name": "Max",
+                    "type": "Upper Limit",
+                    "applies_to": "All selected Y channels",
+                    "color": "#005A8C",
+                    "points": [{"x": 0, "y": 10}, {"x": 3, "y": 10}],
+                }
+            ]
+            source.limits_panel.refresh()
+            source.vm.engineering_notes.update_field("objective", "Verify response")
+            source.axis_panel.apply_selection(source.vm.state.column_names(), "Time", ["A"], [])
+            source._on_generate_plot()
+            self.assertTrue(source._plot_generated)
+            self.assertTrue(source.plot_workspace.canvas.axes.get_lines())
+
+            self._save_session(source, session_path)
+            self.assertTrue(os.path.exists(session_path))
+
+            target = self._make_window(directory)
+            self.assertFalse(target.plot_workspace.canvas.axes.get_lines())
+            self._load_session(target, session_path)
+
+            # Plot regenerated from the saved session.
+            self.assertTrue(target._plot_generated)
+            self.assertTrue(target.plot_workspace.canvas.axes.get_lines())
+            # Maths channel restored into the dataframe and panel table.
+            self.assertIn("Sum", target.vm.state.df.columns)
+            self.assertGreaterEqual(target.maths_panel.model.rowCount(), 1)
+            # Limit line restored into state and the panel table.
+            self.assertEqual(len(target.vm.state.limit_lines), 1)
+            self.assertGreaterEqual(target.limits_panel.lines_model.rowCount(), 1)
+            # Engineering notes restored into state and the editor field.
+            self.assertEqual(target.vm.engineering_notes.get_notes()["objective"], "Verify response")
+            self.assertEqual(target.notes_panel._editors["objective"].toPlainText(), "Verify response")
+
+    def test_session_without_plot_leaves_canvas_clean(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data_path = os.path.join(directory, "data.csv")
+            pd.DataFrame({"Time": [0.0, 1.0, 2.0], "A": [1.0, 2.0, 3.0]}).to_csv(data_path, index=False)
+            session_path = os.path.join(directory, "session.json")
+
+            source = self._make_window(directory)
+            source.vm.data_loading.load_file(data_path, None)
+            source._on_file_loaded(source.vm.state.column_names())
+            source.axis_panel.apply_selection(source.vm.state.column_names(), "Time", ["A"], [])
+            # No _on_generate_plot call: nothing was plotted.
+            self._save_session(source, session_path)
+
+            target = self._make_window(directory)
+            self._load_session(target, session_path)
+            self.assertFalse(target._plot_generated)
+            self.assertFalse(target.plot_workspace.canvas.axes.get_lines())
+
+    def test_save_plot_handler_writes_png_via_dialog(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data_path = os.path.join(directory, "data.csv")
+            pd.DataFrame({"Time": [0.0, 1.0, 2.0, 3.0], "A": [1.0, 2.0, 3.0, 4.0]}).to_csv(data_path, index=False)
+            out_path = os.path.join(directory, "export.png")
+
+            window = self._make_window(directory)
+            window.vm.data_loading.load_file(data_path, None)
+            window._on_file_loaded(window.vm.state.column_names())
+            window.axis_panel.apply_selection(window.vm.state.column_names(), "Time", ["A"], [])
+            window._on_generate_plot()
+
+            original = qt_file_dialogs.save_image_file
+            qt_file_dialogs.save_image_file = lambda parent, initial_dir="": out_path
+            try:
+                window._save_plot_png()
+            finally:
+                qt_file_dialogs.save_image_file = original
+            self.assertTrue(os.path.exists(out_path))
+
+    def test_figure_options_appearance_persists_across_session(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data_path = os.path.join(directory, "data.csv")
+            pd.DataFrame({"Time": [0.0, 1.0, 2.0, 3.0], "A": [1.0, 2.0, 3.0, 4.0]}).to_csv(data_path, index=False)
+            session_path = os.path.join(directory, "session.json")
+
+            source = self._make_window(directory)
+            source.vm.data_loading.load_file(data_path, None)
+            source._on_file_loaded(source.vm.state.column_names())
+            source.axis_panel.apply_selection(source.vm.state.column_names(), "Time", ["A"], [])
+            source._on_generate_plot()
+            # Simulate the user editing title/labels/limits via Figure Options.
+            ax = source.plot_workspace.canvas.axes
+            ax.set_title("Custom Title")
+            ax.set_xlabel("Custom X")
+            ax.set_ylabel("Custom Y")
+            ax.set_xlim(0.5, 2.5)
+            ax.set_ylim(-1.0, 9.0)
+            self._save_session(source, session_path)
+
+            target = self._make_window(directory)
+            self._load_session(target, session_path)
+            tax = target.plot_workspace.canvas.axes
+            self.assertTrue(target._plot_generated)
+            self.assertEqual(tax.get_title(), "Custom Title")
+            self.assertEqual(tax.get_xlabel(), "Custom X")
+            self.assertEqual(tax.get_ylabel(), "Custom Y")
+            self.assertAlmostEqual(tax.get_xlim()[0], 0.5, places=2)
+            self.assertAlmostEqual(tax.get_xlim()[1], 2.5, places=2)
+            self.assertAlmostEqual(tax.get_ylim()[0], -1.0, places=2)
+            self.assertAlmostEqual(tax.get_ylim()[1], 9.0, places=2)
+
+
+class LastDataDirectoryHelperTests(unittest.TestCase):
+    """The last-data-directory helpers are pure Python and need no PySide6."""
+
+    def test_remember_then_read_round_trip(self) -> None:
+        from pathlib import Path
+
+        from test_data_analyser.core.settings_manager import SettingsManager as Manager
+        from test_data_analyser.qt_app.adapters import qt_widget_helpers
+
+        with tempfile.TemporaryDirectory() as directory:
+            manager = Manager(os.path.join(directory, "settings.json"))
+            data_file = os.path.join(directory, "run.csv")
+            with open(data_file, "w", encoding="utf-8") as handle:
+                handle.write("Time,A\n0,1\n")
+            qt_widget_helpers.remember_data_directory(manager, data_file)
+            self.assertEqual(
+                qt_widget_helpers.last_data_directory(manager),
+                str(Path(data_file).resolve().parent),
+            )
+
+    def test_missing_directory_falls_back_to_blank(self) -> None:
+        from test_data_analyser.core.settings_manager import SettingsManager as Manager
+        from test_data_analyser.qt_app.adapters import qt_widget_helpers
+
+        with tempfile.TemporaryDirectory() as directory:
+            manager = Manager(os.path.join(directory, "settings.json"))
+            manager.set("data_import", "last_data_directory", os.path.join(directory, "does_not_exist"))
+            self.assertEqual(qt_widget_helpers.last_data_directory(manager), "")
+
+    def test_none_manager_is_safe(self) -> None:
+        from test_data_analyser.qt_app.adapters import qt_widget_helpers
+
+        self.assertEqual(qt_widget_helpers.last_data_directory(None), "")
+        qt_widget_helpers.remember_data_directory(None, "C:/whatever/file.csv")  # no raise
+
+    def test_session_directory_round_trip(self) -> None:
+        from pathlib import Path
+
+        from test_data_analyser.core.settings_manager import SettingsManager as Manager
+        from test_data_analyser.qt_app.adapters import qt_widget_helpers
+
+        with tempfile.TemporaryDirectory() as directory:
+            manager = Manager(os.path.join(directory, "settings.json"))
+            session_file = os.path.join(directory, "analysis.json")
+            qt_widget_helpers.remember_session_directory(manager, session_file)
+            self.assertEqual(
+                qt_widget_helpers.last_session_directory(manager),
+                str(Path(session_file).resolve().parent),
+            )
+
+    def test_missing_session_directory_falls_back_to_blank(self) -> None:
+        from test_data_analyser.core.settings_manager import SettingsManager as Manager
+        from test_data_analyser.qt_app.adapters import qt_widget_helpers
+
+        with tempfile.TemporaryDirectory() as directory:
+            manager = Manager(os.path.join(directory, "settings.json"))
+            manager.set("general_ui", "last_session_directory", os.path.join(directory, "does_not_exist"))
+            self.assertEqual(qt_widget_helpers.last_session_directory(manager), "")
 
 
 class SettingsOptionsHelperTests(unittest.TestCase):

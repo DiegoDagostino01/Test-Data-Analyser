@@ -77,6 +77,7 @@ class FilterSettings:
 class LegendSettings:
     max_inline_entries: object = 10
     location: str = "best"
+    display_mode: str = "panel"
 
     @classmethod
     def from_dict(cls, value: object) -> "LegendSettings":
@@ -84,6 +85,7 @@ class LegendSettings:
         return cls(
             max_inline_entries=data.get("max_inline_entries", 10),
             location=_string(data.get("location", "best"), "best"),
+            display_mode=_string(data.get("display_mode", "panel"), "panel"),
         )
 
     def to_dict(self) -> dict[str, object]:

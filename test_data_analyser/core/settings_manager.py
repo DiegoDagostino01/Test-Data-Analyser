@@ -25,6 +25,10 @@ DEFAULT_SETTINGS: dict[str, dict[str, Any]] = {
     "axis_scaling": {
         "auto_scale_mode": "padded",
         "auto_scale_pad_percent": 5,
+        "pad_x_axis": True,
+        "pad_x_percent": 5,
+        "pad_y_axis": True,
+        "pad_y_percent": 5,
         "scientific_notation_enabled": True,
         "scientific_notation_threshold": 1e4,
         "decimal_places_statistics": 4,
@@ -38,6 +42,7 @@ DEFAULT_SETTINGS: dict[str, dict[str, Any]] = {
         "header_row_index": 0,
         "skip_rows": 0,
         "decimal_separator": ".",
+        "last_data_directory": "",
     },
     "export": {
         "default_image_format": "png",
@@ -56,6 +61,7 @@ DEFAULT_SETTINGS: dict[str, dict[str, Any]] = {
         "auto_save_interval_minutes": 10,
         "confirm_before_delete": True,
         "show_tooltips": True,
+        "last_session_directory": "",
     },
     "engineering_analysis": {
         "default_statistics_columns": [
@@ -82,8 +88,11 @@ class SettingsManager:
     """Load, save, access, and reset application settings."""
 
     def __init__(self, settings_path: Optional[str | Path] = None) -> None:
-        app_dir = Path(__file__).resolve().parent.parent
-        self.settings_path = Path(settings_path) if settings_path is not None else app_dir / "settings.json"
+        # settings.json lives at the repository root (one level above the
+        # ``test_data_analyser`` package). ``__file__`` is ``core/settings_manager.py``,
+        # so three ``.parent`` hops are needed: core -> test_data_analyser -> repo root.
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        self.settings_path = Path(settings_path) if settings_path is not None else repo_root / "settings.json"
         self._callbacks: list[SettingsCallback] = []
         self._settings = self._load_or_create_settings()
 

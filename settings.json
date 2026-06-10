@@ -18,6 +18,10 @@
   "axis_scaling": {
     "auto_scale_mode": "padded",
     "auto_scale_pad_percent": 5,
+    "pad_x_axis": false,
+    "pad_x_percent": 5.0,
+    "pad_y_axis": true,
+    "pad_y_percent": 5.0,
     "scientific_notation_enabled": false,
     "scientific_notation_threshold": 1.0,
     "decimal_places_statistics": 2,
@@ -41,7 +45,8 @@
     ],
     "header_row_index": 0,
     "skip_rows": 0,
-    "decimal_separator": "."
+    "decimal_separator": ".",
+    "last_data_directory": "\\\\gbtitspfs01\\Projects\\777X\\27_Qualification\\Components\\39-0097-1100 OJ Pump\\10 - Qual Tests\\6.10 Locked Rotor\\Data"
   },
   "export": {
     "default_image_format": "png",
@@ -67,7 +72,8 @@
     "auto_save_enabled": true,
     "auto_save_interval_minutes": 5,
     "confirm_before_delete": true,
-    "show_tooltips": true
+    "show_tooltips": true,
+    "last_session_directory": "\\\\gbtitspfs01\\Projects\\777X\\27_Qualification\\Components\\39-0097-1100 OJ Pump\\10 - Qual Tests\\6.10 Locked Rotor\\Data"
   },
   "engineering_analysis": {
     "default_statistics_columns": [

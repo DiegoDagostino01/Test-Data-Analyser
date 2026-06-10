@@ -11,25 +11,32 @@ domain/services/viewmodels layers.
 """
 from __future__ import annotations
 
+import base64
 from typing import Optional
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSplitter,
+    QStackedWidget,
+    QTabBar,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from ..core.config import __version__
+from ..core.config import __version__, EATON_LOGO_PNG_BASE64
 from ..core.settings_manager import SettingsManager
 from ..viewmodels import MainWindowViewModel
 from . import theme
-from .adapters import qt_file_dialogs, qt_message_service
+from .adapters import qt_file_dialogs, qt_message_service, qt_widget_helpers
 from .widgets.axis_selection_panel import AxisSelectionPanel
 from .widgets.cursor_compare_panel import CursorComparePanel
 from .widgets.data_file_panel import DataFilePanel
@@ -44,10 +51,13 @@ from .widgets.statistics_panel import StatisticsPanel
 
 
 class MainWindow(QMainWindow):
+    HEADER_GROUPS = ("PLOT", "ANALYSIS", "REQUIREMENTS", "NOTES")
+
     def __init__(self, settings_manager: SettingsManager | None = None) -> None:
         super().__init__()
         self.settings_manager = settings_manager or SettingsManager()
         self.vm = MainWindowViewModel(self.settings_manager)
+        self._plot_generated = False
 
         self.setWindowTitle("Test Data Analyser — Eaton Edition")
         self.resize(1320, 840)
@@ -121,28 +131,60 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(8, 8, 8, 8)
         left_layout.addWidget(self.data_panel)
         left_layout.addWidget(self.axis_panel, stretch=1)
+        left.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
 
-        right_splitter = QSplitter(Qt.Vertical)
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        left_scroll.setWidget(left)
+        left_scroll.setMinimumWidth(320)
+        left_scroll.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        self.left_scroll = left_scroll
+
+        # Plot above, analysis notebook below. The lower tabs are attached to
+        # their content like the previous Tkinter notebook, while the splitter
+        # handles plot/data resizing.
+        self.plot_workspace.setMinimumHeight(260)
+        lower_panel = self._build_lower_groups()
+        right_splitter = QSplitter(Qt.Orientation.Vertical)
+        right_splitter.setChildrenCollapsible(False)
         right_splitter.addWidget(self.plot_workspace)
-        right_splitter.addWidget(self._build_lower_tabs())
+        right_splitter.addWidget(lower_panel)
         right_splitter.setStretchFactor(0, 3)
         right_splitter.setStretchFactor(1, 2)
+        right_splitter.setSizes([520, 260])
+        self.right_splitter = right_splitter
 
-        body_splitter = QSplitter(Qt.Horizontal)
-        body_splitter.addWidget(left)
-        body_splitter.addWidget(right_splitter)
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(8, 8, 8, 8)
+        right_layout.setSpacing(6)
+        right_layout.addWidget(right_splitter, stretch=1)
+        self.right_panel = right
+
+        body_splitter = QSplitter(Qt.Orientation.Horizontal)
+        body_splitter.addWidget(left_scroll)
+        body_splitter.addWidget(right)
         body_splitter.setStretchFactor(0, 1)
         body_splitter.setStretchFactor(1, 4)
 
         root.addWidget(body_splitter, stretch=1)
         self.setCentralWidget(central)
+        self.header_tab_bar.setCurrentIndex(0)
+        self._on_header_tab_changed(0)
 
     def _build_header(self) -> QFrame:
         header = QFrame()
         header.setObjectName("EatonHeader")
-        header.setFixedHeight(64)
+        header.setFixedHeight(76)
         layout = QHBoxLayout(header)
-        layout.setContentsMargins(20, 8, 20, 8)
+        layout.setContentsMargins(20, 6, 20, 0)
+        layout.setSpacing(14)
+
+        logo = self._build_logo_label()
+        if logo is not None:
+            layout.addWidget(logo, 0, Qt.AlignmentFlag.AlignVCenter)
 
         title_box = QVBoxLayout()
         title_box.setSpacing(0)
@@ -154,18 +196,121 @@ class MainWindow(QMainWindow):
         title_box.addWidget(subtitle)
         layout.addLayout(title_box)
         layout.addStretch(1)
+        layout.addWidget(self._build_header_tabs(), 0, Qt.AlignmentFlag.AlignBottom)
         return header
 
-    def _build_lower_tabs(self) -> QWidget:
-        self.lower_tabs = QTabWidget()
-        self.lower_tabs.addTab(self.statistics_panel, "Statistics")
-        self.lower_tabs.addTab(self.raw_data_panel, "Raw Data")
-        self.lower_tabs.addTab(self.maths_panel, "Maths Channels")
-        self.lower_tabs.addTab(self.limits_panel, "Requirements / Limits")
-        self.lower_tabs.addTab(self.notes_panel, "Engineering Notes")
-        self.lower_tabs.addTab(self.runs_panel, "Runs / Comparison")
-        self.lower_tabs.addTab(self.cursor_panel, "Point Compare")
-        return self.lower_tabs
+    def _build_header_tabs(self) -> QTabBar:
+        """Build the PLOT / ANALYSIS / REQUIREMENTS / NOTES nav in the header.
+
+        The tab bar drives the lower stacked panel so the graph stays visible at
+        all times and the body is freed from a separate tab strip.
+        """
+        self.header_tab_bar = QTabBar()
+        self.header_tab_bar.setObjectName("HeaderTabs")
+        self.header_tab_bar.setExpanding(False)
+        self.header_tab_bar.setDrawBase(False)
+        self.header_tab_bar.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        for label in self.HEADER_GROUPS:
+            self.header_tab_bar.addTab(label)
+        self.header_tab_bar.currentChanged.connect(self._on_header_tab_changed)
+        return self.header_tab_bar
+
+    def _build_logo_label(self) -> Optional[QLabel]:
+        """Build the Eaton branding logo, or ``None`` if it cannot be decoded.
+
+        The logo is decoded from the ``EATON_LOGO_PNG_BASE64`` constant in
+        ``core.config`` here in the Qt layer (the only place allowed to use
+        ``QPixmap``). On any failure the header falls back to the text title.
+        """
+        try:
+            raw = base64.b64decode(EATON_LOGO_PNG_BASE64)
+            pixmap = QPixmap()
+            if not pixmap.loadFromData(raw):
+                return None
+            label = QLabel()
+            label.setPixmap(pixmap.scaledToHeight(38, Qt.TransformationMode.SmoothTransformation))
+            label.setFixedHeight(44)
+            label.setObjectName("EatonHeaderLogo")
+            return label
+        except Exception:
+            return None
+
+    def _build_lower_groups(self) -> QWidget:
+        """Build the grouped lower panel driven by the header nav tabs.
+
+        Pages line up 1:1 with ``HEADER_GROUPS``: PLOT, ANALYSIS, REQUIREMENTS,
+        NOTES. Groups with more than one panel use a small sub-tab strip.
+        """
+        self.lower_stack = QStackedWidget()
+        self.lower_stack.setObjectName("AnalysisStack")
+
+        self.plot_group = self._build_plot_group()
+        self.analysis_tabs = self._build_group_tabs(
+            [
+                (self.statistics_panel, "Statistics"),
+                (self.raw_data_panel, "Raw Data"),
+                (self.maths_panel, "Maths Channels"),
+            ]
+        )
+        self.requirements_tabs = self._build_group_tabs(
+            [
+                (self.limits_panel, "Requirements / Limits"),
+                (self.limits_panel.summary_panel, "Margin to Limit"),
+            ]
+        )
+
+        self.lower_stack.addWidget(self.plot_group)
+        self.lower_stack.addWidget(self.analysis_tabs)
+        self.lower_stack.addWidget(self.requirements_tabs)
+        self.lower_stack.addWidget(self.notes_panel)
+        self.lower_stack.setMinimumHeight(150)
+
+        container = QFrame()
+        container.setObjectName("EatonPanel")
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(8, 8, 8, 8)
+        container_layout.addWidget(self.lower_stack)
+        container.setMinimumHeight(170)
+        return container
+
+    def _build_group_tabs(self, panels: list[tuple[QWidget, str]]) -> QTabWidget:
+        tabs = QTabWidget()
+        tabs.setObjectName("AnalysisTabs")
+        tabs.setDocumentMode(True)
+        tabs.setUsesScrollButtons(True)
+        for widget, label in panels:
+            tabs.addTab(widget, label)
+        return tabs
+
+    def _build_plot_group(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        actions = QHBoxLayout()
+        self.generate_plot_button = QPushButton("Generate Plot")
+        self.generate_plot_button.setObjectName("PrimaryButton")
+        self.generate_plot_button.clicked.connect(self._on_generate_plot)
+        self.save_plot_button = QPushButton("Save Plot (.png)")
+        self.save_plot_button.clicked.connect(self._save_plot_png)
+        actions.addWidget(self.generate_plot_button)
+        actions.addWidget(self.save_plot_button)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+
+        self.plot_tabs = self._build_group_tabs(
+            [
+                (self.runs_panel, "Runs / Comparison"),
+                (self.cursor_panel, "Point Compare"),
+            ]
+        )
+        layout.addWidget(self.plot_tabs, stretch=1)
+        return page
+
+    def _on_header_tab_changed(self, index: int) -> None:
+        if hasattr(self, "lower_stack"):
+            self.lower_stack.setCurrentIndex(index)
 
     # ------------------------------------------------------------------
     # Theme
@@ -186,28 +331,45 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Settings saved.")
 
     def save_session(self) -> None:
-        path = qt_file_dialogs.save_session_file(self)
+        initial_dir = qt_widget_helpers.last_session_directory(self.settings_manager)
+        path = qt_file_dialogs.save_session_file(self, initial_dir)
         if not path:
             return
+        qt_widget_helpers.remember_session_directory(self.settings_manager, path)
+        appearance = self.plot_workspace.current_axis_appearance() if self._plot_generated else {}
         self.vm.capture_working_state(
             x_column=self.axis_panel.x_column(),
             y_columns=self.axis_panel.selected_y(),
             secondary_y_columns=self.axis_panel.selected_secondary_y(),
+            plot_kind=self.axis_panel.plot_kind(),
+            legend_settings={"display_mode": self.plot_workspace.legend_display()},
+            analysis_window=self.axis_panel.analysis_window_texts(),
+            filter_settings=self.axis_panel.filter_setting_texts(),
+            title=appearance.get("title", ""),
+            x_label=appearance.get("x_label", ""),
+            y_label=appearance.get("y_label", ""),
+            secondary_y_label=appearance.get("secondary_y_label", ""),
+            axis_limits=appearance.get("axis_limits", {}),
+            auto_fit_axes=appearance.get("auto_fit_axes", True),
+            generated=self._plot_generated,
         )
         result = self.vm.save_session(path)
         qt_message_service.show_result(self, "Save Session", result)
         self.statusBar().showMessage(result.message)
 
     def load_session(self) -> None:
-        path = qt_file_dialogs.open_session_file(self)
+        initial_dir = qt_widget_helpers.last_session_directory(self.settings_manager)
+        path = qt_file_dialogs.open_session_file(self, initial_dir)
         if not path:
             return
+        qt_widget_helpers.remember_session_directory(self.settings_manager, path)
         result = self.vm.restore_session(path)
         if not result.ok:
             qt_message_service.error(self, "Load Session", result.message)
             self.statusBar().showMessage(result.message)
             return
-        self._apply_loaded_session(result.payload or {})
+        selection = result.payload if isinstance(result.payload, dict) else {}
+        self._apply_loaded_session(selection)
         if result.warnings:
             qt_message_service.warning(self, "Load Session", "\n".join(result.warnings))
         self.statusBar().showMessage(result.message)
@@ -220,6 +382,11 @@ class MainWindow(QMainWindow):
             selection.get("y_columns", []),
             selection.get("secondary_y_columns", []),
         )
+        profile = self.vm.state.active_plot_profile() or {}
+        self.axis_panel.apply_plot_settings(profile)
+        legend_settings = profile.get("legend", {}) if isinstance(profile, dict) else {}
+        display_mode = legend_settings.get("display_mode", "panel") if isinstance(legend_settings, dict) else "panel"
+        self.plot_workspace.set_legend_display(str(display_mode))
         self.statistics_panel.set_statistics(self.vm.plot_workspace.statistics([]))
         self.raw_data_panel.clear()
         self.maths_panel.clear_form()
@@ -229,9 +396,39 @@ class MainWindow(QMainWindow):
         self.runs_panel.refresh()
         self.plot_workspace.clear_cursor_markers()
         self.cursor_panel.refresh()
+        self._restore_generated_plot(profile)
+
+    def _restore_generated_plot(self, profile: dict) -> None:
+        """Re-render the plot that was on screen when the session was saved.
+
+        Only regenerates when the saved profile was flagged as generated and the
+        restored axis selection is plottable, so loading a session that was never
+        plotted leaves a clean canvas. The saved Figure Options appearance (title,
+        axis labels, and axis limits) is re-applied so the plot looks identical.
+        """
+        self._plot_generated = False
+        if not (isinstance(profile, dict) and profile.get("generated")):
+            return
+        appearance = {
+            "title": profile.get("title", ""),
+            "x_label": profile.get("x_label", ""),
+            "y_label": profile.get("y_label", ""),
+            "secondary_y_label": profile.get("secondary_y_label", ""),
+            "axis_limits": profile.get("axis_limits", {}),
+            "auto_fit_axes": profile.get("auto_fit_axes", True),
+        }
+        result = self._generate_plot(appearance)
+        if result is None or not result.ok:
+            return
+        self._plot_generated = True
+        self._update_statistics(self.axis_panel.all_selected_y())
+        self.raw_data_panel.refresh()
+        self.limits_panel.refresh_margins()
+        self.runs_panel.update_statistics()
 
     def _on_file_loaded(self, columns: list[str]) -> None:
         suggested_x = self.vm.data_loading.suggested_x_column(columns)
+        self._plot_generated = False
         self.axis_panel.set_columns(columns, suggested_x)
         self.statistics_panel.set_statistics(self.vm.plot_workspace.statistics([]))
         self.raw_data_panel.clear()
@@ -250,6 +447,7 @@ class MainWindow(QMainWindow):
             qt_message_service.warning(self, "Plot", result.message)
             self.statusBar().showMessage(result.message)
             return
+        self._plot_generated = True
         self._update_statistics(self.axis_panel.all_selected_y())
         self.raw_data_panel.refresh()
         self.limits_panel.refresh_margins()
@@ -289,10 +487,11 @@ class MainWindow(QMainWindow):
         self.runs_panel.set_status(message)
         self.statusBar().showMessage(message)
 
-    def _generate_plot(self):
+    def _generate_plot(self, appearance: dict | None = None):
         """Render the current axis selection onto the canvas (shared by plot/limit refresh).
 
         Returns the ``OperationResult`` or ``None`` when there is nothing selected.
+        ``appearance`` supplies saved Figure Options title/labels/limits on restore.
         """
         x_col = self.axis_panel.x_column()
         y_cols = self.axis_panel.all_selected_y()
@@ -311,7 +510,34 @@ class MainWindow(QMainWindow):
             use_filter=use_filter,
             cutoff=cutoff,
             order=order,
+            **self._appearance_kwargs(appearance),
         )
+
+    @staticmethod
+    def _appearance_kwargs(appearance: dict | None) -> dict:
+        """Translate a saved appearance dict into ``generate_plot`` keyword args."""
+        if not appearance:
+            return {}
+        raw_limits = appearance.get("axis_limits") or {}
+        axis_limits = {key: MainWindow._parse_limit(value) for key, value in raw_limits.items()}
+        return {
+            "title": str(appearance.get("title", "")),
+            "x_label": str(appearance.get("x_label", "")),
+            "y_label": str(appearance.get("y_label", "")),
+            "secondary_y_label": str(appearance.get("secondary_y_label", "")),
+            "axis_limits": axis_limits,
+            "auto_fit_axes": bool(appearance.get("auto_fit_axes", True)),
+        }
+
+    @staticmethod
+    def _parse_limit(value) -> Optional[float]:
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
 
     def _overlay_limit_lines(self) -> list[dict]:
         return self.vm.limits.normalise(self.vm.state.limit_lines)
@@ -344,6 +570,17 @@ class MainWindow(QMainWindow):
         result = self.plot_workspace.generate_fft(x_col, y_cols)
         if not result.ok:
             qt_message_service.warning(self, "FFT", result.message)
+        self.statusBar().showMessage(result.message)
+
+    def _save_plot_png(self) -> None:
+        path = qt_file_dialogs.save_image_file(self)
+        if not path:
+            return
+        result = self.plot_workspace.save_plot_png(path)
+        if not result.ok:
+            qt_message_service.warning(self, "Save Plot", result.message)
+            self.statusBar().showMessage(result.message)
+            return
         self.statusBar().showMessage(result.message)
 
     def _update_statistics(self, y_cols: list[str]) -> None:

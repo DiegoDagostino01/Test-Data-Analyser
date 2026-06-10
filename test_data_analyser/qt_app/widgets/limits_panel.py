@@ -17,11 +17,10 @@ from __future__ import annotations
 from typing import Callable, Optional
 
 import pandas as pd
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QColorDialog,
-    QComboBox,
     QFormLayout,
     QFrame,
     QGroupBox,
@@ -31,6 +30,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QTableView,
     QVBoxLayout,
@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...viewmodels.limits_vm import LimitsViewModel
+from .no_wheel_combo_box import NoWheelComboBox
 from ...viewmodels.plot_workspace_vm import PlotWorkspaceViewModel
 from ..adapters import qt_message_service
 from ..adapters.pandas_table_model import PandasTableModel
@@ -70,11 +71,23 @@ class LimitsPanel(QWidget):
         layout.addLayout(self._build_toolbar())
 
         splitter = QSplitter()
+        splitter.setChildrenCollapsible(False)
+        splitter.setMinimumHeight(380)
         splitter.addWidget(self._build_lines_table())
         splitter.addWidget(self._build_editor())
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 2)
-        layout.addWidget(splitter, stretch=1)
+        self.content_splitter = splitter
+
+        self.content_scroll = QScrollArea()
+        self.content_scroll.setWidgetResizable(True)
+        self.content_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.content_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.content_scroll.setWidget(splitter)
+        layout.addWidget(self.content_scroll, stretch=1)
+
+        self.summary_panel = self._build_summary_panel()
 
         self.refresh()
 
@@ -89,10 +102,7 @@ class LimitsPanel(QWidget):
         duplicate_button.clicked.connect(self._duplicate_line)
         delete_button = QPushButton("Delete Limit")
         delete_button.clicked.connect(self._delete_line)
-        refresh_button = QPushButton("Refresh Margins")
-        refresh_button.setObjectName("PrimaryButton")
-        refresh_button.clicked.connect(self.refresh_margins)
-        for button in (new_button, duplicate_button, delete_button, refresh_button):
+        for button in (new_button, duplicate_button, delete_button):
             toolbar.addWidget(button)
         toolbar.addStretch(1)
         return toolbar
@@ -113,6 +123,7 @@ class LimitsPanel(QWidget):
     def _build_editor(self) -> QWidget:
         editor = QFrame()
         editor.setObjectName("EatonPanel")
+        editor.setMinimumHeight(360)
         outer = QVBoxLayout(editor)
         outer.setContentsMargins(12, 12, 12, 12)
 
@@ -125,12 +136,12 @@ class LimitsPanel(QWidget):
         self.name_edit.editingFinished.connect(self._store_metadata)
         form.addRow("Name:", self.name_edit)
 
-        self.type_combo = QComboBox()
+        self.type_combo = NoWheelComboBox()
         self.type_combo.addItems(self.vm.limit_types())
         self.type_combo.currentIndexChanged.connect(self._store_metadata)
         form.addRow("Type:", self.type_combo)
 
-        self.applies_combo = QComboBox()
+        self.applies_combo = NoWheelComboBox()
         self.applies_combo.addItem("All selected Y channels")
         self.applies_combo.currentIndexChanged.connect(self._store_metadata)
         form.addRow("Applies to:", self.applies_combo)
@@ -138,7 +149,7 @@ class LimitsPanel(QWidget):
         colour_row = QWidget()
         colour_layout = QHBoxLayout(colour_row)
         colour_layout.setContentsMargins(0, 0, 0, 0)
-        self.colour_combo = QComboBox()
+        self.colour_combo = NoWheelComboBox()
         self.colour_combo.addItems(list(self.vm.colour_presets().keys()) + [_CUSTOM])
         self.colour_combo.activated.connect(self._on_colour_preset)
         self.colour_edit = QLineEdit()
@@ -157,19 +168,42 @@ class LimitsPanel(QWidget):
         outer.addLayout(form)
 
         outer.addWidget(self._build_points_group())
+        outer.addStretch(1)
+        return editor
 
-        summary_label = QLabel("Margin-to-Limit Summary")
-        summary_label.setObjectName("PanelHeading")
-        outer.addWidget(summary_label)
+    def _build_summary_panel(self) -> QWidget:
+        panel = QFrame()
+        panel.setObjectName("EatonPanel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(12, 12, 12, 12)
+
+        header = QHBoxLayout()
+        heading = QLabel("Margin-to-Limit Summary")
+        heading.setObjectName("PanelHeading")
+        refresh_button = QPushButton("Refresh Margins")
+        refresh_button.setObjectName("PrimaryButton")
+        refresh_button.clicked.connect(self.refresh_margins)
+        header.addWidget(heading)
+        header.addStretch(1)
+        header.addWidget(refresh_button)
+        layout.addLayout(header)
+
+        hint = QLabel(
+            "Define at least one limit line with two or more X/Y points, then generate a plot "
+            "or click Refresh Margins to calculate margins for the current selection."
+        )
+        hint.setObjectName("PlaceholderText")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
         self.summary_text = QPlainTextEdit()
         self.summary_text.setReadOnly(True)
-        self.summary_text.setMinimumHeight(110)
+        self.summary_text.setMinimumHeight(160)
         self.summary_text.setPlaceholderText(
-            "Define at least one limit line with two or more X/Y points, then "
-            "generate a plot and click Refresh Margins."
+            "Margin-to-limit results will appear here after a plot is generated or margins are refreshed."
         )
-        outer.addWidget(self.summary_text, stretch=1)
-        return editor
+        layout.addWidget(self.summary_text, stretch=1)
+        return panel
 
     def _build_points_group(self) -> QWidget:
         group = QGroupBox("X vs Y Limit Points — minimum 2 points to plot / calculate margin")

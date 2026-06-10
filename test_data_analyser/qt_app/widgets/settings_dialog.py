@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 
 from ...viewmodels.settings_vm import SettingsViewModel
 from ..adapters import qt_message_service
+from .no_wheel_combo_box import NoWheelComboBox
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,12 @@ FIELD_SPEC: dict[str, list[_Field]] = {
         _Field("axis_scaling", "decimal_places_statistics", "Statistics decimal places", "int", minimum=0, maximum=10),
         _Field("engineering_analysis", "fft_window_function", "FFT window", "combo"),
         _Field("engineering_analysis", "fft_overlap_percent", "FFT overlap %", "int", minimum=0, maximum=90),
+    ],
+    "Axis Padding": [
+        _Field("axis_scaling", "pad_x_axis", "Pad X-axis", "check"),
+        _Field("axis_scaling", "pad_x_percent", "X-axis padding %", "double", minimum=0, maximum=100),
+        _Field("axis_scaling", "pad_y_axis", "Pad Y-axis", "check"),
+        _Field("axis_scaling", "pad_y_percent", "Y-axis padding %", "double", minimum=0, maximum=100),
     ],
 }
 
@@ -89,7 +96,7 @@ class SettingsDialog(QDialog):
     def _build_editor(self, field: _Field) -> QWidget:
         current = self.vm.get(field.section, field.key)
         if field.kind == "combo":
-            combo = QComboBox()
+            combo = NoWheelComboBox()
             options = list(field.options) if field.options else (self.vm.options_for(field.section, field.key) or [])
             combo.addItems([str(option) for option in options])
             if current is not None and str(current) in [str(o) for o in options]:

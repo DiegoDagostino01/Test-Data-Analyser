@@ -561,12 +561,53 @@ class MainWindowViewModelTests(unittest.TestCase):
         vm = MainWindowViewModel()
         vm.state.limit_lines = [{"name": "L", "type": "Upper Limit", "points": []}]
         vm.state.engineering_notes = {"objective": "Verify response"}
-        vm.capture_working_state(x_column="Time", y_columns=["A"], secondary_y_columns=["B"])
+        vm.capture_working_state(
+            x_column="Time",
+            y_columns=["A"],
+            secondary_y_columns=["B"],
+            title="Pump Run",
+            x_label="Seconds",
+            y_label="Pressure",
+            secondary_y_label="Current",
+            plot_kind="Scatter",
+            auto_fit_axes=False,
+            axis_limits={"xmin": "0", "xmax": "10", "ymin": "", "ymax": "100"},
+            legend_settings={"display_mode": "graph"},
+            analysis_window={"start_x": "1", "end_x": "9"},
+            filter_settings={"enabled": True, "cutoff_hz": "50", "order": "4"},
+        )
         profile = vm.state.plot_profiles[0]
         self.assertEqual(profile["x_column"], "Time")
         self.assertEqual(profile["secondary_y_columns"], ["B"])
+        self.assertEqual(profile["title"], "Pump Run")
+        self.assertEqual(profile["x_label"], "Seconds")
+        self.assertEqual(profile["y_label"], "Pressure")
+        self.assertEqual(profile["secondary_y_label"], "Current")
+        self.assertEqual(profile["plot_kind"], "Scatter")
+        self.assertFalse(profile["auto_fit_axes"])
+        self.assertEqual(profile["axis_limits"]["xmax"], "10")
+        self.assertEqual(profile["legend"]["display_mode"], "graph")
+        self.assertEqual(profile["analysis_window"]["start_x"], "1")
+        self.assertTrue(profile["filter"]["enabled"])
         self.assertEqual(profile["engineering_notes"]["objective"], "Verify response")
         self.assertEqual(len(profile["limit_lines"]), 1)
+
+    def test_generated_flag_round_trips_through_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_path = Path(tmp) / "data.csv"
+            pd.DataFrame({"Time": [0.0, 1.0, 2.0], "A": [1.0, 2.0, 3.0]}).to_csv(data_path, index=False)
+
+            source = MainWindowViewModel()
+            source.data_loading.load_file(data_path, None)
+            source.capture_working_state(x_column="Time", y_columns=["A"], secondary_y_columns=[], generated=True)
+            self.assertTrue(source.state.plot_profiles[0]["generated"])
+
+            session_path = Path(tmp) / "s.json"
+            self.assertTrue(source.save_session(session_path).ok)
+
+            target = MainWindowViewModel()
+            self.assertTrue(target.restore_session(session_path).ok)
+            self.assertTrue(target.state.active_plot_profile()["generated"])
 
     def test_restore_session_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

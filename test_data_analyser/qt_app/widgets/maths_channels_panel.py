@@ -14,7 +14,7 @@ dependent panels (axis selection, raw data).
 from __future__ import annotations
 
 import pandas as pd
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QTableView,
     QVBoxLayout,
@@ -63,11 +64,21 @@ class MathsChannelsPanel(QWidget):
         layout.addLayout(self._build_toolbar())
 
         splitter = QSplitter()
+        splitter.setChildrenCollapsible(False)
+        splitter.setMinimumHeight(340)
         splitter.addWidget(self._build_form())
         splitter.addWidget(self._build_table())
         splitter.setStretchFactor(0, 2)
         splitter.setStretchFactor(1, 3)
-        layout.addWidget(splitter, stretch=1)
+        self.content_splitter = splitter
+
+        self.content_scroll = QScrollArea()
+        self.content_scroll.setWidgetResizable(True)
+        self.content_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.content_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.content_scroll.setWidget(splitter)
+        layout.addWidget(self.content_scroll, stretch=1)
 
         self.refresh()
 
@@ -95,6 +106,7 @@ class MathsChannelsPanel(QWidget):
     def _build_form(self) -> QWidget:
         frame = QFrame()
         frame.setObjectName("EatonPanel")
+        frame.setMinimumHeight(320)
         outer = QVBoxLayout(frame)
         outer.setContentsMargins(12, 12, 12, 12)
 
