@@ -117,18 +117,27 @@ when a session is loaded.
 ## Plot options
 
 The axis panel drives the primary plot canvas. Pick the X column and tick the Y
-channels; tick channels in the **secondary Y-axis** list to plot them against a
-right-hand axis (drawn on a Matplotlib `twinx` with an offset colour cycle and a
-merged legend). Choose the **plot kind** (Line, Scatter, or Line + Markers),
-optionally constrain the **analysis window** (X min/max), and enable the
-**low-pass filter** (cutoff Hz + order) to apply a zero-phase Butterworth filter
-per channel.
+channels; use the **channel group** filter to narrow long channel lists by
+engineering type (temperature, pressure, voltage, and so on). Tick channels in
+the **secondary Y-axis** list to plot them against a right-hand axis (drawn on a
+Matplotlib `twinx` with an offset colour cycle and a merged legend). Choose the
+**plot kind** (Line, Scatter, or Line + Markers), optionally constrain the
+**analysis window** (X min/max), and enable the **low-pass filter** (cutoff Hz +
+order) to apply a zero-phase Butterworth filter per channel. Channels that recur
+across plots keep a stable colour.
+
+Use the toolbar's **Figure Options** to fine-tune the plot: edit axis titles and
+limits with **auto-label** / **auto-fit** helpers, set per-axis major-tick
+spacing (and optionally align the secondary-Y grid to the primary), and switch
+the legend between the right-side **Legend** panel and an in-graph Matplotlib
+legend. Configurable axis padding (Edit ▸ Settings ▸ Axis Padding) keeps a
+margin around auto-fitted data, and saved figure exports include the legend.
 
 Use the **+** tab beside the plot tabs above the canvas to create additional
 plots. Each plot tab keeps its own X-axis selection, Y-axis selections, plot
-title, axis labels, limits, notes, and requirement overlays. Right-click a plot
-tab to duplicate, rename, or delete it; all plot tabs are saved and restored
-with analysis sessions.
+title, axis labels, limits, ticks, legend mode, notes, and requirement overlays.
+Right-click a plot tab to duplicate, rename, or delete it; all plot tabs are
+saved and restored with analysis sessions.
 
 ## Requirements / Limits
 
@@ -183,11 +192,11 @@ core/        shared infrastructure (config, data I/O, filters, settings, utils)
 
 | Package / module | Responsibility |
 | --- | --- |
-| `core/` | Shared infrastructure: `config.py` (Eaton brand colours, version, domain keyword config), `data_io.py` (file/sheet loading, numeric coercion), `filters.py` (sampling-rate estimate, low-pass filter), `settings_manager.py` (persisted settings), `utils.py` (column-name helpers). |
+| `core/` | Shared infrastructure: `config.py` (Eaton brand colours, version, domain keyword config, theme palettes), `data_io.py` (file/sheet loading, numeric coercion), `filters.py` (sampling-rate estimate, low-pass filter), `settings_manager.py` (persisted settings), `utils.py` (column-name helpers and engineering channel grouping). |
 | `domain/` | Framework-independent dataclasses (plot/profile/session state, requirement limits, engineering notes, runs, calculated channels) with JSON-compatible `from_dict`/`to_dict`. Import directly, e.g. `from test_data_analyser.domain import PlotData`. |
 | `services/` | Pure engineering/data logic (statistics, limits, maths channels, plotting data, plot-render colours, raw data, run comparison, cursor compare, settings, session). No UI imports; returns values or `OperationResult`. |
 | `viewmodels/` | UI-independent coordinators over `AppState` (data-loading, plot-workspace, raw-data, maths-channels, runs-comparison, limits, engineering-notes, cursor-compare, settings, and the aggregating main-window VM). Return `OperationResult`; never open dialogs or import Qt. |
-| `qt_app/` | The only place PySide6 is imported. `main_qt.py` entry point, `main_window.py`, Eaton `theme.py`, `widgets/` (the migrated panels), and `adapters/` (pandas table model, Matplotlib Qt canvas, file dialogs, message service). |
+| `qt_app/` | The only place PySide6 is imported. `main_qt.py` entry point, `main_window.py`, Eaton `theme.py`, `widgets/` (the migrated panels), and `adapters/` (pandas table model, Matplotlib Qt canvas with the legend-aware toolbar, file dialogs, message service, widget/directory helpers). |
 
 ### Project structure
 
@@ -208,9 +217,10 @@ test_data_analyser/
 └─ qt_app/      main_qt.py  main_window.py  theme.py
                 widgets/   (data file, axis selection, plot workspace, statistics,
                             raw data, maths channels, limits, engineering notes,
-                            runs comparison, cursor compare, settings dialog)
+                            runs comparison, cursor compare, settings dialog,
+                            no-wheel combo box)
                 adapters/  (pandas table model, matplotlib canvas, file dialogs,
-                            message service, editable raw-data model)
+                            message service, editable raw-data model, widget helpers)
 ```
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full layered design and rationale.
