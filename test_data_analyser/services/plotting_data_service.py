@@ -92,6 +92,7 @@ def prepare_plot_series(
                 plot_label = f"{plot_label} [Right Y]"
             prepared.append(
                 {
+                    "channel": label,
                     "label": plot_label,
                     "x": x_values,
                     "y": y_values,

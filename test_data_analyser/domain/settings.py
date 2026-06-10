@@ -38,6 +38,27 @@ class AxisLimits:
 
 
 @dataclass
+class AxisTickSettings:
+    x_major_tick: str = ""
+    y_major_tick: str = ""
+    y2_major_tick: str = ""
+    align_secondary_y_axis_grid: bool = False
+
+    @classmethod
+    def from_dict(cls, value: object) -> "AxisTickSettings":
+        data = _mapping(value)
+        return cls(
+            x_major_tick=_string(data.get("x_major_tick")),
+            y_major_tick=_string(data.get("y_major_tick")),
+            y2_major_tick=_string(data.get("y2_major_tick")),
+            align_secondary_y_axis_grid=bool(data.get("align_secondary_y_axis_grid", False)),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass
 class AnalysisWindow:
     start_x: str = ""
     end_x: str = ""

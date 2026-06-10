@@ -19,6 +19,7 @@ from test_data_analyser.services import (
     cursor_service,
     limits_service,
     maths_channel_service,
+    plot_render_service,
     plotting_data_service,
     raw_data_service,
     run_comparison_service,
@@ -193,6 +194,44 @@ class PlottingDataServiceTests(unittest.TestCase):
         x = pd.Series([0.0, 1.0, 2.0])
         result = plotting_data_service.apply_analysis_window(x, {"A": x}, {"A": x}, xmin=None, xmax=None)
         self.assertEqual(len(result.y_map["A"].dropna()), 3)
+
+
+class PlotRenderServiceTests(unittest.TestCase):
+    def test_persistent_channel_colours_empty_for_single_plot(self) -> None:
+        mapping = plot_render_service.persistent_channel_colour_map(
+            [["Voltage A", "Current A", "Pressure A"]],
+            ["red", "blue", "green"],
+        )
+        self.assertEqual(mapping, {})
+
+    def test_persistent_channel_colours_normalise_partial_repeats(self) -> None:
+        mapping = plot_render_service.persistent_channel_colour_map(
+            [
+                ["Motor Voltage", "Motor Current", "Outlet Pressure"],
+                [" motor voltage ", "MOTOR CURRENT", "Flow Rate"],
+            ],
+            ["red", "blue", "green"],
+        )
+        self.assertEqual(mapping[plot_render_service.normalise_channel_name("Motor Voltage")], "red")
+        self.assertEqual(mapping[plot_render_service.normalise_channel_name("Motor Current")], "blue")
+        self.assertNotIn(plot_render_service.normalise_channel_name("Outlet Pressure"), mapping)
+        self.assertNotIn(plot_render_service.normalise_channel_name("Flow Rate"), mapping)
+
+    def test_persistent_channel_colours_keep_same_engineering_type_distinct(self) -> None:
+        mapping = plot_render_service.persistent_channel_colour_map(
+            [
+                ["Supply Voltage", "Motor Voltage", "Control Voltage"],
+                ["Supply Voltage", "Motor Voltage", "Control Voltage"],
+            ],
+            ["red", "blue", "green"],
+        )
+        colours = [
+            mapping[plot_render_service.normalise_channel_name("Supply Voltage")],
+            mapping[plot_render_service.normalise_channel_name("Motor Voltage")],
+            mapping[plot_render_service.normalise_channel_name("Control Voltage")],
+        ]
+        self.assertEqual(colours, ["red", "blue", "green"])
+        self.assertEqual(len(set(colours)), 3)
 
 
 class RawDataServiceTests(unittest.TestCase):

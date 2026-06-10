@@ -15,6 +15,7 @@ import unittest
 from test_data_analyser.core.utils import classify_channel_name
 from test_data_analyser.domain import (
     AxisLimits,
+    AxisTickSettings,
     CalculatedChannelDefinition,
     ComparisonSettings,
     EngineeringNotes,
@@ -46,6 +47,28 @@ class AxisLimitsTests(unittest.TestCase):
         self.assertEqual(
             AxisLimits.from_dict({}).to_dict(),
             {"xmin": "", "xmax": "", "ymin": "", "ymax": "", "y2min": "", "y2max": ""},
+        )
+
+
+class AxisTickSettingsTests(unittest.TestCase):
+    def test_round_trip_preserves_values(self) -> None:
+        data = {
+            "x_major_tick": "0.5",
+            "y_major_tick": "100",
+            "y2_major_tick": "2.5",
+            "align_secondary_y_axis_grid": True,
+        }
+        self.assertEqual(AxisTickSettings.from_dict(data).to_dict(), data)
+
+    def test_missing_keys_default_to_auto_ticks(self) -> None:
+        self.assertEqual(
+            AxisTickSettings.from_dict({}).to_dict(),
+            {
+                "x_major_tick": "",
+                "y_major_tick": "",
+                "y2_major_tick": "",
+                "align_secondary_y_axis_grid": False,
+            },
         )
 
 

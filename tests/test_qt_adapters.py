@@ -35,7 +35,7 @@ try:
     )
     from PySide6.QtTest import QTest
 
-    from test_data_analyser.core.config import EATON_HEADER_BLUE
+    from test_data_analyser.core.config import EATON_HEADER_BLUE, EATON_PLOT_COLORS
     from test_data_analyser.core.settings_manager import SettingsManager
     from test_data_analyser.qt_app import theme
     from test_data_analyser.qt_app.adapters import matplotlib_qt_adapter, qt_file_dialogs, qt_message_service
@@ -43,6 +43,7 @@ try:
     from test_data_analyser.qt_app.adapters.pandas_table_model import PandasTableModel
     from test_data_analyser.qt_app.main_window import MainWindow
     from test_data_analyser.qt_app.widgets.no_wheel_combo_box import NoWheelComboBox
+    from test_data_analyser.services import plot_render_service
     from test_data_analyser.viewmodels.app_state import AppState
     from test_data_analyser.viewmodels.cursor_compare_vm import CursorCompareViewModel
     from test_data_analyser.viewmodels.engineering_notes_vm import EngineeringNotesViewModel
@@ -628,6 +629,34 @@ class PlotWorkspaceParityTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(len(self.panel.canvas.figure.axes), 2)
 
+    def test_single_plot_uses_default_colour_cycle_without_repeated_map(self) -> None:
+        result = self.panel.generate_plot("Time", ["A", "B"])
+        self.assertTrue(result.ok, result.message)
+        colours = [str(line.get_color()).lower() for line in self.panel.canvas.axes.get_lines()]
+        self.assertEqual(colours, [EATON_PLOT_COLORS[0].lower(), EATON_PLOT_COLORS[1].lower()])
+
+    def test_repeated_channel_colour_reserves_colour_for_partial_repeats(self) -> None:
+        channel_colours = {plot_render_service.normalise_channel_name("A"): EATON_PLOT_COLORS[0]}
+        result = self.panel.generate_plot("Time", ["B", "A"], channel_colours=channel_colours)
+        self.assertTrue(result.ok, result.message)
+
+        colours = [str(line.get_color()).lower() for line in self.panel.canvas.axes.get_lines()]
+        self.assertEqual(colours[1], EATON_PLOT_COLORS[0].lower())
+        self.assertNotEqual(colours[0], EATON_PLOT_COLORS[0].lower())
+        self.assertEqual(len(set(colours)), 2)
+
+    def test_repeated_secondary_channel_colour_matches_legend_handle(self) -> None:
+        channel_colours = {plot_render_service.normalise_channel_name("B"): EATON_PLOT_COLORS[3]}
+        result = self.panel.generate_plot("Time", ["A", "B"], secondary_y=["B"], channel_colours=channel_colours)
+        self.assertTrue(result.ok, result.message)
+
+        secondary_axes = self.panel.canvas.figure.axes[1]
+        secondary_colour = str(secondary_axes.get_lines()[0].get_color()).lower()
+        self.assertEqual(secondary_colour, EATON_PLOT_COLORS[3].lower())
+        handles, labels = self.panel._legend_handles_and_labels(self.panel.canvas.axes, secondary_axes)
+        handle_by_label = dict(zip(labels, handles))
+        self.assertEqual(str(handle_by_label["B [Right Y]"].get_color()).lower(), secondary_colour)
+
     def test_scatter_plot_kind(self) -> None:
         result = self.panel.generate_plot("Time", ["A"], plot_kind="Scatter")
         self.assertTrue(result.ok)
@@ -659,6 +688,62 @@ class PlotWorkspaceParityTests(unittest.TestCase):
         self.assertEqual(tuple(round(value, 1) for value in self.panel.canvas.axes.get_xlim()), (0.2, 0.8))
         self.assertEqual(tuple(round(value, 1) for value in self.panel.canvas.axes.get_ylim()), (-0.5, 0.5))
 
+    def test_major_tick_steps_are_applied_to_x_primary_y_and_secondary_y(self) -> None:
+        result = self.panel.generate_plot(
+            "Time",
+            ["A", "B"],
+            secondary_y=["B"],
+            axis_limits={"xmin": 0.0, "xmax": 1.0, "ymin": -1.0, "ymax": 1.0, "y2min": -100.0, "y2max": 100.0},
+            auto_fit_axes=False,
+            axis_tick_settings={"x_major_tick": "0.25", "y_major_tick": "0.5", "y2_major_tick": "50"},
+        )
+        self.assertTrue(result.ok, result.message)
+        secondary_axes = self.panel.canvas.figure.axes[1]
+
+        x_ticks = self._visible_ticks(self.panel.canvas.axes.get_xticks(), self.panel.canvas.axes.get_xlim())
+        y_ticks = self._visible_ticks(self.panel.canvas.axes.get_yticks(), self.panel.canvas.axes.get_ylim())
+        y2_ticks = self._visible_ticks(secondary_axes.get_yticks(), secondary_axes.get_ylim())
+        self.assertEqual(x_ticks, [0.0, 0.25, 0.5, 0.75, 1.0])
+        self.assertEqual(y_ticks, [-1.0, -0.5, 0.0, 0.5, 1.0])
+        self.assertEqual(y2_ticks, [-100.0, -50.0, 0.0, 50.0, 100.0])
+
+    def test_secondary_y_ticks_align_to_primary_grid_without_sharing_values(self) -> None:
+        result = self.panel.generate_plot(
+            "Time",
+            ["A", "B"],
+            secondary_y=["B"],
+            axis_limits={"ymin": -1.0, "ymax": 1.0, "y2min": 0.0, "y2max": 100.0},
+            auto_fit_axes=False,
+            axis_tick_settings={
+                "y_major_tick": "0.5",
+                "y2_major_tick": "40",
+                "align_secondary_y_axis_grid": True,
+            },
+        )
+        self.assertTrue(result.ok, result.message)
+        secondary_axes = self.panel.canvas.figure.axes[1]
+
+        primary_ticks = self._visible_ticks(self.panel.canvas.axes.get_yticks(), self.panel.canvas.axes.get_ylim())
+        secondary_ticks = self._visible_ticks(secondary_axes.get_yticks(), secondary_axes.get_ylim())
+        self.assertEqual(primary_ticks, [-1.0, -0.5, 0.0, 0.5, 1.0])
+        self.assertEqual(secondary_ticks, [0.0, 25.0, 50.0, 75.0, 100.0])
+        self.assertNotEqual(secondary_ticks, primary_ticks)
+        self.assertFalse(any(line.get_visible() for line in secondary_axes.get_ygridlines()))
+
+    def test_axis_tick_settings_do_not_require_secondary_axis(self) -> None:
+        result = self.panel.generate_plot(
+            "Time",
+            ["A"],
+            axis_tick_settings={"x_major_tick": "0.25", "align_secondary_y_axis_grid": True},
+        )
+        self.assertTrue(result.ok, result.message)
+        self.assertEqual(len(self.panel.canvas.figure.axes), 1)
+
+    @staticmethod
+    def _visible_ticks(ticks, limits) -> list[float]:
+        lower, upper = min(limits), max(limits)
+        return [round(float(tick), 6) for tick in ticks if lower <= float(tick) <= upper]
+
     def test_legend_panel_includes_secondary_channels_without_canvas_legend(self) -> None:
         result = self.panel.generate_plot("Time", ["A", "B"], secondary_y=["B"])
         self.assertTrue(result.ok, result.message)
@@ -675,6 +760,33 @@ class PlotWorkspaceParityTests(unittest.TestCase):
         self.assertIsNotNone(swatch)
         assert swatch is not None
         self.assertIn("background-color:", swatch.styleSheet())
+
+    def test_legend_entries_are_sorted_alphabetically(self) -> None:
+        result = self.panel.generate_plot("Time", ["B", "A"])
+        self.assertTrue(result.ok, result.message)
+        table_labels = [self.panel.legend_table.item(row, 1).text() for row in range(self.panel.legend_table.rowCount())]
+        self.assertEqual(table_labels, ["A", "B"])
+
+        self.panel.set_legend_display("graph")
+        legend = self.panel.canvas.axes.get_legend()
+        self.assertIsNotNone(legend)
+        assert legend is not None
+        graph_labels = [text.get_text() for text in legend.get_texts()]
+        self.assertEqual(graph_labels, ["A", "B"])
+
+    def test_legend_entries_use_natural_numeric_order(self) -> None:
+        source_df = self.state.df
+        self.assertIsNotNone(source_df)
+        assert source_df is not None
+        source_df["TC1"] = source_df["A"]
+        source_df["TC2"] = source_df["A"] + 1.0
+        source_df["TC10"] = source_df["A"] + 2.0
+
+        result = self.panel.generate_plot("Time", ["TC1", "TC10", "TC2"])
+
+        self.assertTrue(result.ok, result.message)
+        table_labels = [self.panel.legend_table.item(row, 1).text() for row in range(self.panel.legend_table.rowCount())]
+        self.assertEqual(table_labels, ["TC1", "TC2", "TC10"])
 
     def test_legend_panel_is_resizable_and_collapsible(self) -> None:
         splitter = self.panel.plot_legend_splitter
@@ -746,8 +858,9 @@ class PlotWorkspaceParityTests(unittest.TestCase):
         def fake_fedit(data, title="", comment="", icon=None, parent=None, apply=None):
             captured["tabs"] = [section[1] for section in data]
             captured["axes_fields"] = [field[0] for field in data[0][0]]
+            captured["axis_tick_fields"] = [field[0] for field in data[1][0]]
             if apply is not None:
-                apply([["updated title"], ["graph"]])
+                apply([["updated title"], ["0.25", "0.5", "50", True], ["graph"]])
 
         matplotlib_qt_adapter.figureoptions.figure_edit = fake_figure_edit
         matplotlib_qt_adapter._formlayout.fedit = fake_fedit
@@ -757,10 +870,61 @@ class PlotWorkspaceParityTests(unittest.TestCase):
             matplotlib_qt_adapter.figureoptions.figure_edit = original_figure_edit
             matplotlib_qt_adapter._formlayout.fedit = original_fedit
 
-        self.assertEqual(captured["tabs"], ["Axes", "Legend"])
-        self.assertNotIn("(Re-)Generate automatic legend", captured["axes_fields"])
+        self.assertEqual(captured["tabs"], ["Axis", "Axis Ticks", "Legend"])
+        axes_fields = captured["axes_fields"]
+        self.assertIsInstance(axes_fields, list)
+        self.assertNotIn("(Re-)Generate automatic legend", axes_fields)
+        self.assertEqual(
+            captured["axis_tick_fields"],
+            [
+                "X major tick step",
+                "Y major tick step",
+                "Secondary Y major tick step",
+                "Align secondary Y-axis grid with primary axis",
+            ],
+        )
         self.assertEqual(captured["matplotlib_data"], [["updated title", False]])
         self.assertEqual(self.panel.legend_display(), "graph")
+        self.assertEqual(
+            self.panel.axis_tick_setting_texts(),
+            {
+                "x_major_tick": "0.25",
+                "y_major_tick": "0.5",
+                "y2_major_tick": "50",
+                "align_secondary_y_axis_grid": True,
+            },
+        )
+
+    def test_figure_options_axis_ticks_tab_updates_workspace_settings(self) -> None:
+        self.panel.generate_plot("Time", ["A", "B"], secondary_y=["B"])
+        toolbar = self.panel.canvas.toolbar
+        toolbar._figure_edit_with_legend(self.panel.canvas.axes)
+        dialog = toolbar._fedit_dialog
+        try:
+            axis_ticks_form = next(
+                widget
+                for widget in dialog.formwidget.widgetlist
+                if any(label == "X major tick step" for label, _value in getattr(widget, "data", []))
+            )
+            fields = {label: widget for (label, _value), widget in zip(axis_ticks_form.data, axis_ticks_form.widgets)}
+            fields["X major tick step"].setText("0.25")
+            fields["Y major tick step"].setText("0.5")
+            fields["Secondary Y major tick step"].setText("50")
+            fields["Align secondary Y-axis grid with primary axis"].setChecked(True)
+
+            dialog.apply()
+
+            self.assertEqual(
+                self.panel.axis_tick_setting_texts(),
+                {
+                    "x_major_tick": "0.25",
+                    "y_major_tick": "0.5",
+                    "y2_major_tick": "50",
+                    "align_secondary_y_axis_grid": True,
+                },
+            )
+        finally:
+            dialog.close()
 
     def test_figure_options_auto_label_button_updates_axes_fields(self) -> None:
         self.panel.generate_plot("Time", ["A"])
@@ -812,6 +976,29 @@ class PlotWorkspaceParityTests(unittest.TestCase):
             line_y = [float(value) for value in source_df["A"].to_list()]
             self.assertAlmostEqual(float(fields["axes"]["y"]["min"].text()), min(line_y), places=5)
             self.assertAlmostEqual(float(fields["axes"]["y"]["max"].text()), max(line_y), places=5)
+        finally:
+            dialog.close()
+
+    def test_figure_options_secondary_y_axis_fields_apply_to_twin_axis(self) -> None:
+        self.panel.generate_plot("Time", ["A", "B"], secondary_y=["B"])
+        secondary_axes = self.panel.canvas.figure.axes[1]
+        toolbar = self.panel.canvas.toolbar
+        toolbar._figure_edit_with_legend(self.panel.canvas.axes)
+        dialog = toolbar._fedit_dialog
+        try:
+            axes_form = dialog.formwidget.widgetlist[0]
+            fields = toolbar._axes_form_fields(axes_form)
+            self.assertIn("secondary_y", fields["axes"])
+            buttons = {button.objectName(): button for button in axes_form.findChildren(QPushButton)}
+            self.assertIn("AxisAutoFitSecondaryYButton", buttons)
+
+            fields["axes"]["secondary_y"]["min"].setText("-125")
+            fields["axes"]["secondary_y"]["max"].setText("125")
+            fields["axes"]["secondary_y"]["label"].setText("Right Axis Current")
+            dialog.apply()
+
+            self.assertEqual(secondary_axes.get_ylabel(), "Right Axis Current")
+            self.assertEqual(tuple(round(value) for value in secondary_axes.get_ylim()), (-125, 125))
         finally:
             dialog.close()
 

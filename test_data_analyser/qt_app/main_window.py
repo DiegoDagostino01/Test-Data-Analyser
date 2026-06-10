@@ -588,6 +588,7 @@ class MainWindow(QMainWindow):
             plot_kind=self.axis_panel.plot_kind(),
             legend_settings={"display_mode": self.plot_workspace.legend_display()},
             analysis_window=self.axis_panel.analysis_window_texts(),
+            axis_ticks=self.plot_workspace.axis_tick_setting_texts(),
             filter_settings=self.axis_panel.filter_setting_texts(),
             title=appearance.get("title", ""),
             x_label=appearance.get("x_label", ""),
@@ -624,6 +625,8 @@ class MainWindow(QMainWindow):
             list(profile.get("secondary_y_columns", [])),
         )
         self.axis_panel.apply_plot_settings(profile)
+        axis_ticks = profile.get("axis_ticks", {}) if isinstance(profile, dict) else {}
+        self.plot_workspace.set_axis_tick_settings(axis_ticks if isinstance(axis_ticks, dict) else {})
         legend_settings = profile.get("legend", {}) if isinstance(profile, dict) else {}
         display_mode = legend_settings.get("display_mode", "panel") if isinstance(legend_settings, dict) else "panel"
         self.plot_workspace.set_legend_display(str(display_mode))
@@ -859,22 +862,27 @@ class MainWindow(QMainWindow):
         ``appearance`` supplies saved Figure Options title/labels/limits on restore.
         """
         x_col = self.axis_panel.x_column()
-        y_cols = self.axis_panel.all_selected_y()
+        primary_y = self.axis_panel.selected_y()
+        secondary_y = self.axis_panel.selected_secondary_y()
+        y_cols = primary_y + [column for column in secondary_y if column not in primary_y]
         if not x_col or not y_cols:
             return None
         xmin, xmax = self.axis_panel.analysis_window()
         use_filter, cutoff, order = self.axis_panel.filter_settings()
+        channel_colours = self.vm.persistent_plot_channel_colours(primary_y, secondary_y)
         return self.plot_workspace.generate_plot(
             x_col,
             y_cols,
             xmin,
             xmax,
             limit_lines=self._overlay_limit_lines(),
-            secondary_y=self.axis_panel.selected_secondary_y(),
+            secondary_y=secondary_y,
             plot_kind=self.axis_panel.plot_kind(),
             use_filter=use_filter,
             cutoff=cutoff,
             order=order,
+            channel_colours=channel_colours,
+            axis_tick_settings=self.plot_workspace.axis_tick_setting_texts(),
             **self._appearance_kwargs(appearance),
         )
 

@@ -22,6 +22,7 @@ from .session import SessionState
 from .settings import (
     AnalysisWindow,
     AxisLimits,
+    AxisTickSettings,
     FilterSettings,
     LegendSettings,
     ManualLabelFlags,
@@ -31,6 +32,7 @@ from .settings import (
 __all__ = [
     "AnalysisWindow",
     "AxisLimits",
+    "AxisTickSettings",
     "CalculatedChannelDefinition",
     "ComparisonSettings",
     "EngineeringNotes",

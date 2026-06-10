@@ -13,7 +13,7 @@ from typing import Any, Optional
 
 from ..core.config import __version__
 from ..domain import normalise_plot_profile
-from ..services import session_service
+from ..services import plot_render_service, session_service
 from ..services.results import OperationResult
 from .app_state import AppState
 from .cursor_compare_vm import CursorCompareViewModel
@@ -135,6 +135,33 @@ class MainWindowViewModel:
             counter += 1
         return f"{candidate} {counter}"
 
+    def persistent_plot_channel_colours(
+        self,
+        active_y_columns: list[str],
+        active_secondary_y_columns: list[str] | None = None,
+    ) -> dict[str, str]:
+        """Return stable colours for channels repeated across generated plot profiles."""
+        self.ensure_plot_profiles()
+        active_channels = plot_render_service.y_axis_channel_set(
+            active_y_columns,
+            active_secondary_y_columns or [],
+        )
+        channel_sets: list[list[str]] = []
+        for index, profile in enumerate(self.state.plot_profiles):
+            if index == self.state.active_plot_profile_index:
+                if active_channels:
+                    channel_sets.append(active_channels)
+                continue
+            if not profile.get("generated"):
+                continue
+            profile_channels = plot_render_service.y_axis_channel_set(
+                profile.get("y_columns", []),
+                profile.get("secondary_y_columns", []),
+            )
+            if profile_channels:
+                channel_sets.append(profile_channels)
+        return plot_render_service.persistent_channel_colour_map(channel_sets, self.settings.plot_colours())
+
     # ------------------------------------------------------------------
     # Session persistence
     # ------------------------------------------------------------------
@@ -203,6 +230,7 @@ class MainWindowViewModel:
         plot_kind: str = "Line",
         auto_fit_axes: bool = True,
         axis_limits: dict[str, Any] | None = None,
+        axis_ticks: dict[str, Any] | None = None,
         legend_settings: dict[str, Any] | None = None,
         analysis_window: dict[str, Any] | None = None,
         filter_settings: dict[str, Any] | None = None,
@@ -232,6 +260,7 @@ class MainWindowViewModel:
                 "plot_kind": plot_kind or "Line",
                 "auto_fit_axes": auto_fit_axes,
                 "axis_limits": dict(axis_limits or {}),
+                "axis_ticks": dict(axis_ticks or {}),
                 "legend": dict(legend_settings or {}),
                 "analysis_window": dict(analysis_window or {}),
                 "filter": dict(filter_settings or {}),

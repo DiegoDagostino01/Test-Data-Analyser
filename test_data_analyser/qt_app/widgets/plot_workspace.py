@@ -8,11 +8,14 @@ viewmodel. This panel only orchestrates rendering onto the canvas.
 from __future__ import annotations
 
 import os
+import math
+from collections.abc import Iterable
 from contextlib import contextmanager
 from typing import Any, Optional
 
 from cycler import cycler
 from matplotlib.colors import to_hex
+from matplotlib.ticker import MultipleLocator
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -28,6 +31,8 @@ from PySide6.QtWidgets import (
 )
 
 from ...core.config import EATON_DARK_BLUE
+from ...core.utils import natural_sort_key
+from ...services import plot_render_service
 from ...services.results import OperationResult
 from ...viewmodels.cursor_compare_vm import CursorCompareViewModel
 from ...viewmodels.plot_workspace_vm import PlotWorkspaceViewModel
@@ -56,6 +61,7 @@ class PlotWorkspace(QWidget):
         self._point_compare = False
         self._cursor_artists: list = []
         self._legend_display = LEGEND_DISPLAY_PANEL
+        self._axis_tick_settings = self._normalise_axis_tick_settings({})
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -64,6 +70,11 @@ class PlotWorkspace(QWidget):
         self.canvas.toolbar.set_legend_display_controller(self.legend_display, self.set_legend_display)
         self.canvas.toolbar.set_export_preparer(self._legend_export_context)
         self.canvas.toolbar.set_axis_padding_getter(self._axis_padding_settings)
+        self.canvas.toolbar.set_axis_tick_settings_controller(
+            self.axis_tick_setting_texts,
+            self.set_axis_tick_settings,
+            self.apply_axis_tick_settings_to_current_plot,
+        )
         self.legend_panel = self._build_legend_panel()
         self.plot_legend_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.plot_legend_splitter.setObjectName("PlotLegendSplitter")
@@ -116,6 +127,20 @@ class PlotWorkspace(QWidget):
     def set_legend_display(self, display: str) -> None:
         self._legend_display = LEGEND_DISPLAY_GRAPH if display == LEGEND_DISPLAY_GRAPH else LEGEND_DISPLAY_PANEL
         self._refresh_current_legend()
+
+    def axis_tick_setting_texts(self) -> dict[str, object]:
+        return dict(self._axis_tick_settings)
+
+    def set_axis_tick_settings(self, settings: dict[str, object]) -> None:
+        self._axis_tick_settings = self._normalise_axis_tick_settings(settings)
+
+    def apply_axis_tick_settings_to_current_plot(self) -> None:
+        axes = self.canvas.axes
+        if axes not in self.canvas.figure.axes:
+            return
+        self._apply_axis_tick_settings(axes, self._secondary_axes(), self._axis_tick_settings)
+        axes.grid(self._grid_visible(), alpha=0.35)
+        self.canvas.canvas.draw_idle()
 
     def current_axis_appearance(self) -> dict[str, Any]:
         """Read the title, axis labels, and axis limits from the live plot.
@@ -273,13 +298,21 @@ class PlotWorkspace(QWidget):
     def _colours(self) -> list[str]:
         resolver = getattr(self.settings_vm, "plot_colours", None)
         if callable(resolver):
-            return resolver()
+            resolved = resolver()
+            if isinstance(resolved, str):
+                return [resolved]
+            if isinstance(resolved, Iterable):
+                return [str(colour) for colour in resolved]
         return SettingsViewModel.plot_colours(self.settings_vm)
 
     def _secondary_colours(self, colours: list[str]) -> list[str]:
         resolver = getattr(self.settings_vm, "secondary_plot_colours", None)
         if callable(resolver):
-            return resolver(colours)
+            resolved = resolver(colours)
+            if isinstance(resolved, str):
+                return [resolved]
+            if isinstance(resolved, Iterable):
+                return [str(colour) for colour in resolved]
         return SettingsViewModel.secondary_plot_colours(self.settings_vm, colours)
 
     def _line_width(self) -> float:
@@ -297,6 +330,17 @@ class PlotWorkspace(QWidget):
             "pad_x_percent": self.settings_vm.get("axis_scaling", "pad_x_percent", 5),
             "pad_y_axis": bool(self.settings_vm.get("axis_scaling", "pad_y_axis", True)),
             "pad_y_percent": self.settings_vm.get("axis_scaling", "pad_y_percent", 5),
+        }
+
+    @staticmethod
+    def _normalise_axis_tick_settings(settings: dict[str, object] | None) -> dict[str, object]:
+        if not isinstance(settings, dict):
+            settings = {}
+        return {
+            "x_major_tick": str(settings.get("x_major_tick", "")).strip(),
+            "y_major_tick": str(settings.get("y_major_tick", "")).strip(),
+            "y2_major_tick": str(settings.get("y2_major_tick", "")).strip(),
+            "align_secondary_y_axis_grid": bool(settings.get("align_secondary_y_axis_grid", False)),
         }
 
     # ------------------------------------------------------------------
@@ -320,6 +364,8 @@ class PlotWorkspace(QWidget):
         use_filter: bool = False,
         cutoff: Optional[float] = None,
         order: int = 4,
+        channel_colours: Optional[dict[str, str]] = None,
+        axis_tick_settings: Optional[dict[str, object]] = None,
     ) -> OperationResult:
         try:
             data = self.plot_vm.prepare_plot_data(x_col, y_cols, xmin, xmax)
@@ -330,6 +376,7 @@ class PlotWorkspace(QWidget):
         self.canvas.clear()
         axes = self.canvas.axes
         colours = self._colours()
+        secondary_colours = self._secondary_colours(colours)
         axes.set_prop_cycle(cycler(color=colours))
         series_result = self.plot_vm.plot_series(
             data,
@@ -344,12 +391,21 @@ class PlotWorkspace(QWidget):
         secondary_axes = None
         if any(bool(item.get("secondary")) for item in series_items):
             secondary_axes = axes.twinx()
-            secondary_axes.set_prop_cycle(cycler(color=self._secondary_colours(colours)))
+            secondary_axes.set_prop_cycle(cycler(color=secondary_colours))
         line_width = self._line_width()
+        series_colours = self._series_colours(series_items, channel_colours, colours, secondary_colours)
         plotted = 0
-        for item in series_items:
+        for index, item in enumerate(series_items):
             target = secondary_axes if item.get("secondary") and secondary_axes is not None else axes
-            self._plot_series(target, item["x"], item["y"], str(item.get("label", "")), plot_kind, line_width)
+            self._plot_series(
+                target,
+                item["x"],
+                item["y"],
+                str(item.get("label", "")),
+                plot_kind,
+                line_width,
+                series_colours[index],
+            )
             plotted += 1
         if plotted == 0:
             return OperationResult.failure("No numeric data was available for the selected columns.")
@@ -362,6 +418,8 @@ class PlotWorkspace(QWidget):
             secondary_axes.set_ylabel(secondary_y_label.strip() or "Secondary Axis Signals")
         self._apply_axis_padding(axes, secondary_axes, auto_fit_axes)
         self._apply_axis_limits(axes, secondary_axes, axis_limits or {}, auto_fit_axes)
+        self.set_axis_tick_settings(axis_tick_settings if axis_tick_settings is not None else self._axis_tick_settings)
+        self._apply_axis_tick_settings(axes, secondary_axes, self._axis_tick_settings)
         axes.grid(self._grid_visible(), alpha=0.35)
         handles, labels = self._legend_handles_and_labels(axes, secondary_axes)
         self._apply_legend_display(axes, handles, labels)
@@ -372,22 +430,112 @@ class PlotWorkspace(QWidget):
         return OperationResult.success(f"Plotted {plotted} channel(s).")
 
     @staticmethod
-    def _plot_series(axes, x, y, label: str, plot_kind: str, line_width: float) -> None:
+    def _plot_series(axes, x, y, label: str, plot_kind: str, line_width: float, colour: str | None = None) -> None:
+        kwargs = {"label": label}
+        if colour:
+            kwargs["color"] = colour
         if plot_kind == "Scatter":
-            axes.scatter(x, y, s=14, label=label)
+            axes.scatter(x, y, s=14, **kwargs)
         elif plot_kind == "Line + Markers":
-            axes.plot(x, y, marker="o", markersize=3, linewidth=line_width, label=label)
+            axes.plot(x, y, marker="o", markersize=3, linewidth=line_width, **kwargs)
         else:
-            axes.plot(x, y, linewidth=line_width, label=label)
+            axes.plot(x, y, linewidth=line_width, **kwargs)
+
+    def _series_colours(
+        self,
+        series_items: list[dict[str, Any]],
+        channel_colours: Optional[dict[str, str]],
+        primary_colours: list[str],
+        secondary_colours: list[str],
+    ) -> list[str | None]:
+        persistent_colours = self._normalised_channel_colours(channel_colours or {})
+        manual_colours = [self._manual_series_colour(item) for item in series_items]
+        has_manual_colour = any(manual_colours)
+        has_repeated_channel = any(self._series_channel_key(item) in persistent_colours for item in series_items)
+        if not has_manual_colour and not has_repeated_channel:
+            return [None for _item in series_items]
+
+        reserved = {
+            self._colour_key(colour)
+            for item, manual_colour in zip(series_items, manual_colours)
+            for colour in (manual_colour or persistent_colours.get(self._series_channel_key(item)),)
+            if colour
+        }
+        assignments: list[str | None] = []
+        used: set[str] = set()
+        primary_index = 0
+        secondary_index = 0
+        for item, manual_colour in zip(series_items, manual_colours):
+            is_secondary = bool(item.get("secondary"))
+            channel_colour = manual_colour or persistent_colours.get(self._series_channel_key(item))
+            if not channel_colour:
+                cycle = secondary_colours if is_secondary else primary_colours
+                cycle_index = secondary_index if is_secondary else primary_index
+                channel_colour = self._next_distinct_colour(cycle, cycle_index, used | reserved)
+            assignments.append(channel_colour)
+            if channel_colour:
+                used.add(self._colour_key(channel_colour))
+            if is_secondary:
+                secondary_index += 1
+            else:
+                primary_index += 1
+        return assignments
 
     @staticmethod
-    def _legend_handles_and_labels(axes, secondary_axes):
+    def _normalised_channel_colours(channel_colours: dict[str, str]) -> dict[str, str]:
+        normalised: dict[str, str] = {}
+        for channel, colour in channel_colours.items():
+            key = plot_render_service.normalise_channel_name(channel)
+            colour_text = str(colour).strip()
+            if key and colour_text:
+                normalised[key] = colour_text
+        return normalised
+
+    @staticmethod
+    def _series_channel_key(item: dict[str, Any]) -> str:
+        return plot_render_service.normalise_channel_name(item.get("channel", item.get("label", "")))
+
+    @staticmethod
+    def _manual_series_colour(item: dict[str, Any]) -> str:
+        colour = item.get("colour", item.get("color"))
+        return "" if colour is None else str(colour).strip()
+
+    @classmethod
+    def _next_distinct_colour(cls, colours: list[str], start_index: int, blocked: set[str]) -> str | None:
+        if not colours:
+            return None
+        for offset in range(len(colours)):
+            colour = colours[(start_index + offset) % len(colours)]
+            if cls._colour_key(colour) not in blocked:
+                return colour
+        return colours[start_index % len(colours)]
+
+    @staticmethod
+    def _colour_key(colour: str) -> str:
+        try:
+            return to_hex(colour).lower()
+        except Exception:
+            return str(colour).strip().lower()
+
+    @classmethod
+    def _legend_handles_and_labels(cls, axes, secondary_axes):
         handles, labels = axes.get_legend_handles_labels()
         if secondary_axes is not None:
             extra_handles, extra_labels = secondary_axes.get_legend_handles_labels()
             handles += extra_handles
             labels += extra_labels
-        return handles, labels
+        return cls._sort_legend_handles_and_labels(handles, labels)
+
+    @staticmethod
+    def _sort_legend_handles_and_labels(handles, labels):
+        pairs = list(zip(handles, labels))
+        pairs.sort(key=lambda item: PlotWorkspace._legend_label_sort_key(item[1]))
+        return [handle for handle, _label in pairs], [label for _handle, label in pairs]
+
+    @staticmethod
+    def _legend_label_sort_key(label: str) -> list[object]:
+        text = str(label).replace(" [Right Y]", "")
+        return natural_sort_key(" ".join(text.split()))
 
     def _update_legend_table(self, handles, labels) -> None:
         self.legend_table.setRowCount(0)
@@ -507,6 +655,55 @@ class PlotWorkspace(QWidget):
         upper = current_max if maximum is None else maximum
         if lower < upper:
             setter(lower, upper)
+
+    @classmethod
+    def _apply_axis_tick_settings(cls, axes, secondary_axes, settings: dict[str, object]) -> None:
+        x_major_tick = cls._positive_float(settings.get("x_major_tick"))
+        y_major_tick = cls._positive_float(settings.get("y_major_tick"))
+        y2_major_tick = cls._positive_float(settings.get("y2_major_tick"))
+
+        if x_major_tick is not None:
+            axes.xaxis.set_major_locator(MultipleLocator(x_major_tick))
+        if y_major_tick is not None:
+            axes.yaxis.set_major_locator(MultipleLocator(y_major_tick))
+        if secondary_axes is not None and y2_major_tick is not None:
+            secondary_axes.yaxis.set_major_locator(MultipleLocator(y2_major_tick))
+        if secondary_axes is not None and bool(settings.get("align_secondary_y_axis_grid", False)):
+            cls._align_secondary_y_ticks_to_primary(axes, secondary_axes)
+
+    @staticmethod
+    def _positive_float(value: object) -> float | None:
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            number = float(text)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(number) or number <= 0:
+            return None
+        return number
+
+    @staticmethod
+    def _align_secondary_y_ticks_to_primary(axes, secondary_axes) -> None:
+        primary_min, primary_max = axes.get_ylim()
+        secondary_min, secondary_max = secondary_axes.get_ylim()
+        if primary_min == primary_max or secondary_min == secondary_max:
+            return
+        visible_lower = min(primary_min, primary_max)
+        visible_upper = max(primary_min, primary_max)
+        primary_ticks = [
+            tick
+            for tick in axes.get_yticks()
+            if visible_lower <= float(tick) <= visible_upper
+        ]
+        if len(primary_ticks) < 2:
+            return
+        secondary_ticks = [
+            secondary_min + ((float(tick) - primary_min) / (primary_max - primary_min)) * (secondary_max - secondary_min)
+            for tick in primary_ticks
+        ]
+        secondary_axes.set_yticks(secondary_ticks)
 
     @staticmethod
     def _draw_limit_lines(axes, limit_lines: Optional[list[dict]]) -> None:

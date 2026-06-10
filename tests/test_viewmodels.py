@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 
 from test_data_analyser.domain import PlotData
+from test_data_analyser.services import plot_render_service
 from test_data_analyser.viewmodels import (
     AppState,
     CursorCompareViewModel,
@@ -555,6 +556,31 @@ class MainWindowViewModelTests(unittest.TestCase):
         self.assertEqual(vm.state.plot_profiles[1]["title"], "Second Plot")
         self.assertEqual(vm.state.plot_profiles[1]["y_label"], "Current")
 
+    def test_persistent_plot_channel_colours_use_active_selection_for_repeats(self) -> None:
+        vm = MainWindowViewModel()
+        vm.state.plot_profiles = [
+            {
+                "name": "Plot 1",
+                "x_column": "Time",
+                "y_columns": ["Motor Voltage", "Motor Current"],
+                "generated": True,
+            },
+            {
+                "name": "Plot 2",
+                "x_column": "Time",
+                "y_columns": ["Stale Channel"],
+                "generated": True,
+            },
+        ]
+        vm.state.active_plot_profile_index = 1
+
+        mapping = vm.persistent_plot_channel_colours([" motor voltage "], ["Flow Rate"])
+
+        self.assertIn(plot_render_service.normalise_channel_name("Motor Voltage"), mapping)
+        self.assertNotIn(plot_render_service.normalise_channel_name("Motor Current"), mapping)
+        self.assertNotIn(plot_render_service.normalise_channel_name("Stale Channel"), mapping)
+        self.assertNotIn(plot_render_service.normalise_channel_name("Flow Rate"), mapping)
+
     def test_plot_profile_crud_keeps_valid_active_profile(self) -> None:
         vm = MainWindowViewModel()
         vm.ensure_plot_profiles()
@@ -639,6 +665,12 @@ class MainWindowViewModelTests(unittest.TestCase):
             plot_kind="Scatter",
             auto_fit_axes=False,
             axis_limits={"xmin": "0", "xmax": "10", "ymin": "", "ymax": "100"},
+            axis_ticks={
+                "x_major_tick": "0.5",
+                "y_major_tick": "25",
+                "y2_major_tick": "2.5",
+                "align_secondary_y_axis_grid": True,
+            },
             legend_settings={"display_mode": "graph"},
             analysis_window={"start_x": "1", "end_x": "9"},
             filter_settings={"enabled": True, "cutoff_hz": "50", "order": "4"},
@@ -653,6 +685,8 @@ class MainWindowViewModelTests(unittest.TestCase):
         self.assertEqual(profile["plot_kind"], "Scatter")
         self.assertFalse(profile["auto_fit_axes"])
         self.assertEqual(profile["axis_limits"]["xmax"], "10")
+        self.assertEqual(profile["axis_ticks"]["x_major_tick"], "0.5")
+        self.assertTrue(profile["axis_ticks"]["align_secondary_y_axis_grid"])
         self.assertEqual(profile["legend"]["display_mode"], "graph")
         self.assertEqual(profile["analysis_window"]["start_x"], "1")
         self.assertTrue(profile["filter"]["enabled"])

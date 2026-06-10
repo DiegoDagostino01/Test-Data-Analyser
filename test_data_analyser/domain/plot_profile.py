@@ -16,6 +16,7 @@ from .limits import LimitLine
 from .settings import (
     AnalysisWindow,
     AxisLimits,
+    AxisTickSettings,
     FilterSettings,
     LegendSettings,
     ManualLabelFlags,
@@ -37,6 +38,7 @@ class PlotProfile:
     grid: bool = True
     auto_fit_axes: bool = True
     axis_limits: AxisLimits = field(default_factory=AxisLimits)
+    axis_ticks: AxisTickSettings = field(default_factory=AxisTickSettings)
     analysis_window: AnalysisWindow = field(default_factory=AnalysisWindow)
     filter: FilterSettings = field(default_factory=FilterSettings)
     legend: LegendSettings = field(default_factory=LegendSettings)
@@ -63,6 +65,7 @@ class PlotProfile:
             grid=bool(data.get("grid", True)),
             auto_fit_axes=bool(data.get("auto_fit_axes", True)),
             axis_limits=AxisLimits.from_dict(data.get("axis_limits")),
+            axis_ticks=AxisTickSettings.from_dict(data.get("axis_ticks")),
             analysis_window=AnalysisWindow.from_dict(data.get("analysis_window")),
             filter=FilterSettings.from_dict(data.get("filter")),
             legend=LegendSettings.from_dict(data.get("legend")),
@@ -87,6 +90,7 @@ class PlotProfile:
             "grid": self.grid,
             "auto_fit_axes": self.auto_fit_axes,
             "axis_limits": self.axis_limits.to_dict(),
+            "axis_ticks": self.axis_ticks.to_dict(),
             "analysis_window": self.analysis_window.to_dict(),
             "filter": self.filter.to_dict(),
             "legend": self.legend.to_dict(),

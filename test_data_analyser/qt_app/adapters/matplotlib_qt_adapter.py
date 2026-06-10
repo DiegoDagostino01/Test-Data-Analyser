@@ -46,6 +46,9 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
         self._legend_display_setter: Callable[[str], None] | None = None
         self._export_preparer: Callable[[], Any] | None = None
         self._axis_padding_getter: Callable[[], dict[str, object]] | None = None
+        self._axis_tick_settings_getter: Callable[[], dict[str, object]] | None = None
+        self._axis_tick_settings_setter: Callable[[dict[str, object]], None] | None = None
+        self._axis_tick_settings_applier: Callable[[], None] | None = None
         self.addSeparator()
         self.edit_axis_button = QPushButton("Edit Axis")
         self.edit_axis_button.setObjectName("PrimaryButton")
@@ -75,6 +78,16 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
     def set_axis_padding_getter(self, getter: Callable[[], dict[str, object]]) -> None:
         self._axis_padding_getter = getter
 
+    def set_axis_tick_settings_controller(
+        self,
+        getter: Callable[[], dict[str, object]],
+        setter: Callable[[dict[str, object]], None],
+        applier: Callable[[], None],
+    ) -> None:
+        self._axis_tick_settings_getter = getter
+        self._axis_tick_settings_setter = setter
+        self._axis_tick_settings_applier = applier
+
     def save_figure(self, *args):
         preparer = self._export_preparer
         if preparer is None:
@@ -92,6 +105,8 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
         if not axes:
             QMessageBox.warning(self, "Error", "There are no Axes to edit.")
             return None
+        if self._is_primary_secondary_y_pair(axes):
+            return axes[0]
         if len(axes) == 1:
             return axes[0]
 
@@ -104,6 +119,15 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
         if not ok:
             return None
         return axes[titles.index(item)]
+
+    @staticmethod
+    def _is_primary_secondary_y_pair(axes: list) -> bool:
+        if len(axes) != 2:
+            return False
+        try:
+            return bool(axes[0].get_shared_x_axes().joined(axes[0], axes[1]))
+        except Exception:
+            return False
 
     @staticmethod
     def _axes_title(axes) -> str:
@@ -129,17 +153,31 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
             apply=None,
         ):
             form_data, removed_auto_legend = self._without_auto_legend_checkbox(data) if include_legend else (data, False)
+            form_data, secondary_axes = self._with_secondary_y_axis_fields(form_data, axes)
+            form_data = self._with_axis_tab_title(form_data)
+            include_axis_ticks = self._axis_tick_settings_getter is not None and self._axis_tick_settings_setter is not None
 
             def apply_with_legend(form_data: list[Any]) -> None:
                 form_sections = list(form_data)
                 legend_data = form_sections.pop() if include_legend and form_sections else []
+                axis_tick_data = form_sections.pop() if include_axis_ticks and form_sections else []
+                secondary_data = self._pop_secondary_y_axis_data(form_sections, secondary_axes is not None)
                 if apply is not None:
                     apply(self._restore_auto_legend_checkbox(form_sections, removed_auto_legend))
+                if secondary_axes is not None and secondary_data is not None:
+                    self._apply_secondary_y_axis_data(secondary_axes, secondary_data)
+                if include_axis_ticks:
+                    self._apply_axis_tick_form_data(axis_tick_data)
                 if include_legend:
                     self._apply_legend_form_data(legend_data)
 
+            extra_sections = []
+            if include_axis_ticks:
+                extra_sections.append((self._axis_tick_form_data(), "Axis Ticks", ""))
+            if include_legend:
+                extra_sections.append((self._legend_form_data(), "Legend", ""))
             result = original_fedit(
-                [*form_data, (self._legend_form_data(), "Legend", "")] if include_legend else form_data,
+                [*form_data, *extra_sections],
                 title=title,
                 comment=comment,
                 icon=icon,
@@ -156,6 +194,82 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
             _formlayout.fedit = original_fedit
 
     @staticmethod
+    def _with_axis_tab_title(data) -> list:
+        form_data = list(data)
+        if not form_data:
+            return form_data
+        axes_section = form_data[0]
+        if not (isinstance(axes_section, tuple) and len(axes_section) == 3):
+            return form_data
+        fields, title, comment = axes_section
+        if title == "Axes":
+            form_data[0] = (fields, "Axis", comment)
+        return form_data
+
+    def _with_secondary_y_axis_fields(self, data, axes) -> tuple[list, Any | None]:
+        secondary_axes = self._secondary_y_axes_for(axes)
+        if secondary_axes is None:
+            return list(data), None
+        form_data = list(data)
+        if not form_data:
+            return form_data, None
+        axes_section = form_data[0]
+        if not (isinstance(axes_section, tuple) and len(axes_section) == 3):
+            return form_data, None
+        fields, title, comment = axes_section
+        if title not in {"Axes", "Axis"} or not isinstance(fields, list):
+            return form_data, None
+        ymin, ymax = secondary_axes.get_ylim()
+        secondary_fields = [
+            (None, "<b>Secondary Y-Axis</b>"),
+            ("Min", float(ymin)),
+            ("Max", float(ymax)),
+            ("Label", secondary_axes.get_ylabel()),
+            ("Scale", [secondary_axes.get_yscale(), "linear", "log", "symlog", "logit"]),
+            (None, None),
+        ]
+        form_data[0] = ([*fields, *secondary_fields], title, comment)
+        return form_data, secondary_axes
+
+    def _secondary_y_axes_for(self, axes):
+        figure_axes = list(axes.get_figure().axes)
+        for candidate in figure_axes:
+            if candidate is axes:
+                continue
+            try:
+                if axes.get_shared_x_axes().joined(axes, candidate):
+                    return candidate
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    def _pop_secondary_y_axis_data(form_sections: list[Any], has_secondary_axis: bool) -> list[Any] | None:
+        if not has_secondary_axis or not form_sections or not isinstance(form_sections[0], list):
+            return None
+        general = list(form_sections[0])
+        if len(general) < 4:
+            return None
+        secondary_data = general[-4:]
+        form_sections[0] = general[:-4]
+        return secondary_data
+
+    @staticmethod
+    def _apply_secondary_y_axis_data(secondary_axes, values: list[Any]) -> None:
+        if len(values) != 4:
+            return
+        axis_min, axis_max, axis_label, axis_scale = values
+        if secondary_axes.yaxis.get_scale() != axis_scale:
+            secondary_axes.set_yscale(axis_scale)
+        secondary_axes.set_ylim(axis_min, axis_max, auto=False)
+        secondary_axes.set_ylabel(str(axis_label))
+        figure = secondary_axes.get_figure()
+        figure.canvas.draw()
+        toolbar = getattr(figure.canvas, "toolbar", None)
+        if toolbar is not None:
+            toolbar.push_current()
+
+    @staticmethod
     def _without_auto_legend_checkbox(data) -> tuple[list, bool]:
         form_data = list(data)
         if not form_data:
@@ -164,7 +278,7 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
         if not (isinstance(axes_section, tuple) and len(axes_section) == 3):
             return form_data, False
         fields, title, comment = axes_section
-        if title != "Axes" or not isinstance(fields, list) or not fields:
+        if title not in {"Axes", "Axis"} or not isinstance(fields, list) or not fields:
             return form_data, False
         last_field = fields[-1]
         if not (isinstance(last_field, tuple) and len(last_field) >= 2 and last_field[0] == _AUTO_LEGEND_FIELD):
@@ -215,6 +329,15 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
         auto_fit_y_button.setToolTip("Set Y-axis limits to the plotted data range using the configured Y padding.")
         auto_fit_y_button.clicked.connect(lambda: self._auto_fit_axis_form(axes, axes_form, "y"))
         helper_layout.addWidget(auto_fit_y_button)
+
+        if fields.get("axes", {}).get("secondary_y"):
+            auto_fit_secondary_y_button = QPushButton("Auto-fit Secondary Y", helper_row)
+            auto_fit_secondary_y_button.setObjectName("AxisAutoFitSecondaryYButton")
+            auto_fit_secondary_y_button.setToolTip(
+                "Set secondary Y-axis limits from the plotted right-axis data using the configured Y padding."
+            )
+            auto_fit_secondary_y_button.clicked.connect(lambda: self._auto_fit_axis_form(axes, axes_form, "secondary_y"))
+            helper_layout.addWidget(auto_fit_secondary_y_button)
         helper_layout.addStretch(1)
 
         axes_form.formlayout.addRow("Helpers", helper_row)
@@ -232,6 +355,9 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
                 if "X-Axis" in value:
                     current_axis = "x"
                     fields["axes"].setdefault(current_axis, {})
+                elif "Secondary Y-Axis" in value:
+                    current_axis = "secondary_y"
+                    fields["axes"].setdefault(current_axis, {})
                 elif "Y-Axis" in value:
                     current_axis = "y"
                     fields["axes"].setdefault(current_axis, {})
@@ -247,6 +373,15 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
         axis_fields = fields.get("axes", {})
         self._set_field_text(axis_fields.get("x", {}).get("label"), x_label)
         self._set_field_text(axis_fields.get("y", {}).get("label"), y_label)
+        secondary_axes = self._secondary_y_axes_for(axes)
+        if secondary_axes is not None:
+            secondary_y_labels = self._series_labels_for_axes(secondary_axes)
+            secondary_y_label = (
+                self._summarise_series_labels(secondary_y_labels)
+                or secondary_axes.get_ylabel()
+                or "Secondary Axis Signals"
+            )
+            self._set_field_text(axis_fields.get("secondary_y", {}).get("label"), secondary_y_label)
         self._update_dialog_buttons(axes_form)
 
     def _auto_fit_axis_form(self, axes, axes_form, axis_name: str) -> None:
@@ -254,7 +389,10 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
         axis_fields = fields.get("axes", {}).get(axis_name, {})
         if not axis_fields:
             return
-        lower, upper = self._auto_fit_limits(axes, axis_name)
+        target_axes = self._secondary_y_axes_for(axes) if axis_name == "secondary_y" else axes
+        if target_axes is None:
+            return
+        lower, upper = self._auto_fit_limits(target_axes, "y" if axis_name == "secondary_y" else axis_name)
         self._set_field_text(axis_fields.get("min"), self._format_limit(lower))
         self._set_field_text(axis_fields.get("max"), self._format_limit(upper))
         self._update_dialog_buttons(axes_form)
@@ -355,6 +493,8 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
         settings = self._axis_padding_getter() if self._axis_padding_getter is not None else {}
         if not isinstance(settings, dict):
             settings = {}
+        if axis_name == "secondary_y":
+            axis_name = "y"
         enabled = bool(settings.get(f"pad_{axis_name}_axis", True))
         if not enabled:
             return 0.0
@@ -382,6 +522,32 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
         getter = self._legend_display_getter
         display = self._normalise_legend_display(getter() if getter is not None else LEGEND_DISPLAY_PANEL)
         return [("Placement", [display, *LEGEND_DISPLAY_CHOICES])]
+
+    def _axis_tick_form_data(self) -> list[tuple[str, object]]:
+        getter = self._axis_tick_settings_getter
+        settings = getter() if getter is not None else {}
+        if not isinstance(settings, dict):
+            settings = {}
+        return [
+            ("X major tick step", str(settings.get("x_major_tick", ""))),
+            ("Y major tick step", str(settings.get("y_major_tick", ""))),
+            ("Secondary Y major tick step", str(settings.get("y2_major_tick", ""))),
+            ("Align secondary Y-axis grid with primary axis", bool(settings.get("align_secondary_y_axis_grid", False))),
+        ]
+
+    def _apply_axis_tick_form_data(self, axis_tick_data: list[object]) -> None:
+        if self._axis_tick_settings_setter is None:
+            return
+        values = list(axis_tick_data or [])
+        settings = {
+            "x_major_tick": str(values[0]).strip() if len(values) > 0 else "",
+            "y_major_tick": str(values[1]).strip() if len(values) > 1 else "",
+            "y2_major_tick": str(values[2]).strip() if len(values) > 2 else "",
+            "align_secondary_y_axis_grid": bool(values[3]) if len(values) > 3 else False,
+        }
+        self._axis_tick_settings_setter(settings)
+        if self._axis_tick_settings_applier is not None:
+            self._axis_tick_settings_applier()
 
     def _apply_legend_form_data(self, legend_data: list[object]) -> None:
         if not legend_data or self._legend_display_setter is None:

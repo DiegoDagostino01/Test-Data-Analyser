@@ -5,6 +5,8 @@ embedding and event handling remain in Qt adapters.
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 import matplotlib.pyplot as plt
 
 from ..core.config import EATON_PLOT_COLORS
@@ -31,3 +33,54 @@ def secondary_colour_cycle(colours: list[str]) -> list[str]:
     Offsetting keeps right-axis series visually distinct from left-axis series.
     """
     return colours[5:] + colours[:5] if len(colours) > 5 else colours
+
+
+def normalise_channel_name(channel: object) -> str:
+    """Return a stable comparison key for a plotted channel name."""
+    return " ".join(str(channel).strip().split()).casefold()
+
+
+def y_axis_channel_set(primary_y: Iterable[object] | None, secondary_y: Iterable[object] | None = None) -> list[str]:
+    """Return primary + secondary Y channels de-duplicated by normalised name."""
+    channels: list[str] = []
+    seen: set[str] = set()
+    primary_items = [] if primary_y is None else list(primary_y)
+    secondary_items = [] if secondary_y is None else list(secondary_y)
+    for channel in [*primary_items, *secondary_items]:
+        key = normalise_channel_name(channel)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        channels.append(str(channel).strip())
+    return channels
+
+
+def persistent_channel_colour_map(
+    channel_sets: Iterable[Iterable[object]],
+    colours: list[str],
+) -> dict[str, str]:
+    """Map repeated Y-axis channels to stable colours.
+
+    The returned keys are normalised channel names. Channels are counted at most
+    once per plot set so duplicate primary/secondary selections do not trigger a
+    false repeat by themselves.
+    """
+    if not colours:
+        return {}
+
+    counts: dict[str, int] = {}
+    first_seen_order: list[str] = []
+    for channel_set in channel_sets:
+        seen_in_plot: set[str] = set()
+        for channel in channel_set:
+            key = normalise_channel_name(channel)
+            if not key or key in seen_in_plot:
+                continue
+            seen_in_plot.add(key)
+            if key not in counts:
+                counts[key] = 0
+                first_seen_order.append(key)
+            counts[key] += 1
+
+    repeated = [key for key in first_seen_order if counts.get(key, 0) > 1]
+    return {key: colours[index % len(colours)] for index, key in enumerate(repeated)}
