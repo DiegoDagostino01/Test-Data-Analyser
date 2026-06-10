@@ -4,9 +4,6 @@ Viewmodels coordinate domain state (``AppState``) and the service layer. They
 expose plain Python data structures, return structured :class:`OperationResult`
 objects, hold UI-independent state, and must not import Tkinter or PySide6, open
 file dialogs, or show message boxes.
-
-These viewmodels are designed to be driven by the new PySide6 shell (Phase 4
-onward); the existing Tkinter UI continues to operate during the migration.
 """
 from __future__ import annotations
 

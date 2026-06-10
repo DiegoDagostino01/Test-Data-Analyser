@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..services import settings_service
+from ..services import plot_render_service, settings_service
 from ..services.results import OperationResult
 
 
@@ -45,6 +45,13 @@ class SettingsViewModel:
 
     def palette(self) -> dict[str, str]:
         return settings_service.palette_for(self.settings_manager)
+
+    def plot_colours(self) -> list[str]:
+        cycle_name = str(self.get("plot_appearance", "colour_cycle", "eaton"))
+        return plot_render_service.resolve_plot_colours(cycle_name)
+
+    def secondary_plot_colours(self, colours: list[str] | None = None) -> list[str]:
+        return plot_render_service.secondary_colour_cycle(colours or self.plot_colours())
 
     def options_for(self, section: str, key: str) -> list | None:
         """Return the ``available_*`` option list for a setting, if one exists.

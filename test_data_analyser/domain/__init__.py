@@ -3,8 +3,8 @@
 This package is the canonical home for the application's domain dataclasses:
 plot/profile/session state, requirement limits, engineering notes, runs, and
 calculated channels. Nothing in this package may import a UI framework
-(Tkinter or PySide6); the models are intended to be reused by the current
-Tkinter UI and a future PySide6 UI alike.
+(Tkinter or PySide6); the models are intended to be reused by the current Qt UI
+and any future UI front end alike.
 """
 from __future__ import annotations
 

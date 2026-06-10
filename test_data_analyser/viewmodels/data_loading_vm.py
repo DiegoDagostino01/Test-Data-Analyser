@@ -2,8 +2,8 @@
 
 Coordinates file/sheet loading through the data-I/O layer and updates
 :class:`AppState`. Returns :class:`OperationResult` instead of showing dialogs or
-message boxes, so any UI (Tkinter or PySide6) can drive it. Phase 4's minimal Qt
-shell integrates with this viewmodel.
+message boxes, so any UI can drive it. The Qt shell integrates with this
+viewmodel.
 """
 from __future__ import annotations
 

@@ -82,10 +82,12 @@ must not embed in a canvas or show dialogs; they return values or an
   rows plus display text).
 - `maths_channel_service.py` — the restricted-AST `MathsChannelEvaluator`, the
   allowed-function set, and calculated-channel definition normalisation.
-- `plotting_data_service.py` — analysis-window data preparation (no Matplotlib).
+- `plotting_data_service.py` — analysis-window data preparation plus cleaned,
+  drawable plot/comparison series preparation (no Matplotlib canvas work).
 - `plot_render_service.py` — Matplotlib-aware colour-cycle resolution and the
   secondary-axis cycle (no Qt).
-- `fft_service.py` — window functions and averaged FFT spectra.
+- `fft_service.py` — window functions, averaged FFT spectra, and prepared FFT
+  series for rendering.
 - `raw_data_service.py` — selected-data framing/filtering, blank-row removal,
   row-limit parsing, and edit coercion.
 - `run_comparison_service.py` — enabled-run filtering, common-X range,
@@ -108,15 +110,19 @@ message boxes.
   manager).
 - `data_loading_vm.py` — file/sheet loading into the state.
 - `plot_workspace_vm.py` — plot-data preparation, selected ranges, statistics,
-  and FFT (pulls numeric series from the state directly).
-- `raw_data_vm.py` — Raw Data selection/filtering, row-limit parsing, edit
-  coercion, cell edits with undo, and selected-data export.
+  prepared plot/comparison/FFT series, and FFT (pulls numeric series from the
+  state directly).
+- `raw_data_vm.py` — Raw Data selection/filtering, row-limit parsing, display
+  frame preparation, edit coercion, cell edits with undo, and selected-data
+  export.
 - `maths_channels_vm.py` — validate/apply/recalculate/delete calculated
-  channels, mutating the state's dataframe/definitions in place.
+  channels plus table-display data for the Qt panel, mutating the state's
+  dataframe/definitions in place.
 - `limits_vm.py` — limit-line + point CRUD, colour-preset helpers, active
-  ranges, and the margin-to-limit summary.
+  ranges, table-display data, and the margin-to-limit summary.
 - `runs_comparison_vm.py` — run CRUD (load/remove/duplicate/rename/set-active/
-  toggle), comparison settings, comparison-item preparation, and statistics.
+  toggle), comparison settings, comparison-item preparation, table-display data,
+  and statistics.
 - `engineering_notes_vm.py` — the structured note fields, get/set/clear, and the
   compiled report text.
 - `cursor_compare_vm.py` — locked comparison points, the comparison table, and
@@ -133,8 +139,8 @@ The only package that imports PySide6.
 - `main_qt.py` — the `QApplication` entry point.
 - `main_window.py` — `MainWindow`: the Eaton-branded header, the axis/data
   controls, the Matplotlib plot canvas, the lower tabs, the File/Edit menus
-  (Open, Save/Load Session, Settings), and the wiring between every panel and the
-  viewmodels.
+  (Open, Save/Load Session, Settings), Help/About dialogs, and the wiring
+  between every panel and the viewmodels.
 - `theme.py` — the centralised Eaton Qt stylesheet/palette, sourced from
   `core/config.py` and honouring light/dark.
 - `widgets/` — one thin panel per feature: `data_file_panel`,
@@ -151,8 +157,8 @@ The only package that imports PySide6.
 
 - **Plotting.** `MainWindow._generate_plot()` reads the axis panel (X, primary &
   secondary Y, plot kind, analysis window, filter), asks `PlotWorkspace` to
-  render through `PlotWorkspaceViewModel` + `plot_render_service`, draws limit
-  overlays, and refreshes statistics, raw data, margins, and the cursor state.
+  render prepared series from `PlotWorkspaceViewModel`, draws limit overlays,
+  and refreshes statistics, raw data, margins, and the cursor state.
 - **Signals.** Panels communicate with the main window via Qt signals
   (`fileLoaded`, `channelsChanged`, `limitsChanged`, `comparisonRequested`,
   `cursorPointsChanged`, `analysisWindowRequested`, `statusMessage`); the main

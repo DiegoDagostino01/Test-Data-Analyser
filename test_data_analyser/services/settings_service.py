@@ -1,9 +1,8 @@
 """Settings access helpers extracted into a framework-independent service.
 
 The :class:`~test_data_analyser.settings_manager.SettingsManager` is already
-UI-free; this module adds small, defensive helpers that both the Tkinter UI and
-a future PySide6 UI can share (safe getter, theme resolution). It must not import
-Tkinter or PySide6.
+UI-free; this module adds small, defensive helpers for safe getter, theme
+resolution, and palette lookup. It must not import Tkinter or PySide6.
 """
 from __future__ import annotations
 

@@ -2,9 +2,9 @@
 
 A ``PlotProfile`` is the framework-independent representation of a single plot
 tab: its selected channels, labels, axis limits, analysis window, filter,
-legend, raw-data view, engineering notes, and limit lines. The Tkinter UI still
-stores active profiles as dictionaries for compatibility, normalising through
-``normalise_plot_profile`` at the creation/apply/save/load boundaries.
+legend, raw-data view, engineering notes, and limit lines. The Qt UI stores
+active profiles as dictionaries and normalises through ``normalise_plot_profile``
+at the creation/apply/save/load boundaries.
 """
 from __future__ import annotations
 

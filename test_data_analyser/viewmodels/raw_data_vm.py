@@ -36,6 +36,10 @@ class RawDataViewModel:
         except ValueError:
             return OperationResult.failure("Rows to display must be a positive whole number, or 'All'.")
 
+    @staticmethod
+    def empty_frame() -> pd.DataFrame:
+        return pd.DataFrame()
+
     def select_frame(
         self,
         x_col: str,
@@ -56,6 +60,53 @@ class RawDataViewModel:
             xmax=xmax,
             drop_blank=drop_blank,
             get_numeric=self._numeric,
+        )
+
+    def display_frame(
+        self,
+        x_col: str,
+        selected_y: list[str],
+        *,
+        row_limit_text: str,
+        apply_window: bool,
+        xmin: Optional[float],
+        xmax: Optional[float],
+        drop_blank: bool,
+    ) -> OperationResult:
+        """Return the DataFrame and status text for the Raw Data table."""
+        limit_result = self.parse_row_limit(row_limit_text)
+        limit: Optional[int] = None
+        warnings: list[str] = []
+        row_limit_valid = limit_result.ok
+        if limit_result.ok:
+            payload = limit_result.payload
+            limit = payload if isinstance(payload, int) else None
+        else:
+            warnings.append(limit_result.message)
+
+        frame, removed = self.select_frame(
+            x_col,
+            selected_y,
+            apply_window=apply_window,
+            xmin=xmin,
+            xmax=xmax,
+            drop_blank=drop_blank,
+        )
+        if frame.empty:
+            return OperationResult.failure(
+                "No complete selected X/Y rows to display.",
+                payload={"frame": self.empty_frame(), "row_limit_valid": row_limit_valid},
+            )
+
+        display = frame if limit is None else frame.head(limit)
+        message = (
+            f"Selected raw data: {len(display):,} / {len(frame):,} rows, {display.shape[1]:,} columns. "
+            f"Removed {removed:,} row(s) with blank cells. Double-click a cell to edit it."
+        )
+        return OperationResult.success(
+            message,
+            payload={"frame": display, "row_limit_valid": row_limit_valid},
+            warnings=warnings,
         )
 
     def coerce_edit_value(self, column_name: str, text: str) -> OperationResult:

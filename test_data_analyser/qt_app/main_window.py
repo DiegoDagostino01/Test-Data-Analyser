@@ -1,12 +1,9 @@
 """PySide6 main window.
 
-Wires together the framework-independent viewmodels and the migrated Qt panels:
-the data-file panel, axis/channel selection, the Matplotlib plot workspace, and
-the statistics table. Remaining panels (raw data, maths channels, limits,
-engineering notes, runs/comparison, cursor compare, session) are migrated in
-subsequent Phase 5 increments and currently show placeholders.
-
-PySide6 is imported only within ``qt_app``; all analysis logic stays in the
+Wires together the framework-independent viewmodels and the Qt panels for the
+full analysis workflow: data loading, plotting, raw data, maths channels,
+limits, engineering notes, run comparison, cursor comparison, and sessions.
+PySide6 is imported only within ``qt_app``; analysis logic stays in the
 domain/services/viewmodels layers.
 """
 from __future__ import annotations
@@ -91,6 +88,12 @@ class MainWindow(QMainWindow):
         settings_action = edit_menu.addAction("&Settings…")
         settings_action.triggered.connect(self.open_settings)
 
+        help_menu = self.menuBar().addMenu("&Help")
+        workflow_action = help_menu.addAction("&Workflow Help")
+        workflow_action.triggered.connect(self.show_workflow_help)
+        about_action = help_menu.addAction("&About Test Data Analyser")
+        about_action.triggered.connect(self.show_about)
+
     def _build_central_layout(self) -> None:
         central = QWidget()
         root = QVBoxLayout(central)
@@ -143,8 +146,7 @@ class MainWindow(QMainWindow):
         self.left_scroll = left_scroll
 
         # Plot above, analysis notebook below. The lower tabs are attached to
-        # their content like the previous Tkinter notebook, while the splitter
-        # handles plot/data resizing.
+        # their content while the splitter handles plot/data resizing.
         self.plot_workspace.setMinimumHeight(260)
         lower_panel = self._build_lower_groups()
         right_splitter = QSplitter(Qt.Orientation.Vertical)
@@ -330,8 +332,27 @@ class MainWindow(QMainWindow):
             self._apply_theme()
             self.statusBar().showMessage("Settings saved.")
 
+    def show_workflow_help(self) -> None:
+        qt_message_service.info(
+            self,
+            "Workflow Help",
+            "Open a CSV or Excel file, select X/Y channels, then generate plots, statistics, "
+            "raw-data views, maths channels, limits, notes, comparisons, and sessions from the panels.",
+        )
+
+    def show_about(self) -> None:
+        qt_message_service.info(
+            self,
+            "About Test Data Analyser",
+            f"Test Data Analyser\nEaton Edition\nVersion {__version__}\n\n"
+            "PySide6 desktop application for engineering test data analysis.",
+        )
+
     def save_session(self) -> None:
-        initial_dir = qt_widget_helpers.last_session_directory(self.settings_manager)
+        initial_dir = qt_widget_helpers.save_session_initial_directory(
+            self.settings_manager,
+            self.vm.state.filepath,
+        )
         path = qt_file_dialogs.save_session_file(self, initial_dir)
         if not path:
             return

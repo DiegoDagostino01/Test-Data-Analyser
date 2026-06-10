@@ -43,6 +43,17 @@ def remember_session_directory(settings_manager: Any, filename: str) -> None:
     _remember_directory(settings_manager, filename, _SESSION_SECTION, _SESSION_KEY)
 
 
+def save_session_initial_directory(settings_manager: Any, data_filename: Any = None) -> str:
+    """Return the initial directory for Save Session.
+
+    Prefer the currently loaded data file's folder so a new analysis starts next
+    to its source CSV/Excel file. When no usable data-file folder is available,
+    fall back to the last-used session directory.
+    """
+    data_directory = _directory_for_filename(data_filename)
+    return data_directory or last_session_directory(settings_manager)
+
+
 def _last_directory(settings_manager: Any, section: str, key: str) -> str:
     if settings_manager is None:
         return ""
@@ -53,6 +64,16 @@ def _last_directory(settings_manager: Any, section: str, key: str) -> str:
     if directory and Path(directory).is_dir():
         return str(directory)
     return ""
+
+
+def _directory_for_filename(filename: Any) -> str:
+    if not filename:
+        return ""
+    try:
+        directory = Path(filename).resolve().parent
+    except Exception:
+        return ""
+    return str(directory) if directory.is_dir() else ""
 
 
 def _remember_directory(settings_manager: Any, filename: str, section: str, key: str) -> None:

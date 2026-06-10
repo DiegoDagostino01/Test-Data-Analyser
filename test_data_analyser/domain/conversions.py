@@ -1,9 +1,9 @@
 """Small, framework-independent value-coercion helpers.
 
 These helpers are shared by the domain dataclasses to defensively normalise
-values that arrive from JSON sessions, the Tkinter UI, or a future Qt UI. They
-intentionally accept missing/invalid input and fall back to safe defaults so old
-saved sessions keep loading.
+values that arrive from JSON sessions or UI forms. They intentionally accept
+missing/invalid input and fall back to safe defaults so saved sessions keep
+loading.
 """
 from __future__ import annotations
 

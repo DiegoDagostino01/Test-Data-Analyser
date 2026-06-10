@@ -2,10 +2,9 @@
 
 Manage multiple loaded runs (add, remove, duplicate, rename, set-active, toggle
 enabled), configure the comparison options, view per-run comparison statistics,
-and overlay the enabled runs on the shared plot canvas. Mirrors the Tkinter
-Runs / Comparison tab. The panel is a thin Qt view; run CRUD, file loading,
-comparison-item preparation, and statistics all run through the
-framework-independent :class:`RunsComparisonViewModel`.
+and overlay the enabled runs on the shared plot canvas. The panel is a thin Qt
+view; run CRUD, file loading, comparison-item preparation, and statistics all
+run through the framework-independent :class:`RunsComparisonViewModel`.
 
 The current axis selection (X column, Y channels, analysis window) is supplied by
 an injected selection provider. Generating a comparison plot is delegated to the
@@ -15,7 +14,6 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-import pandas as pd
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -36,10 +34,6 @@ from ..adapters import qt_file_dialogs, qt_message_service, qt_widget_helpers
 from ..adapters.pandas_table_model import PandasTableModel
 
 SelectionProvider = Callable[[], tuple[str, list[str], Optional[float], Optional[float]]]
-
-_RUN_COLUMNS = ["Name", "Enabled", "Active", "File", "Sheet", "Rows", "Columns"]
-_STAT_COLUMNS = ["Run", "Channel", "Count", "Min", "Max", "Mean", "Std Dev"]
-
 
 class RunsComparisonPanel(QWidget):
     comparisonRequested = Signal()
@@ -153,28 +147,12 @@ class RunsComparisonPanel(QWidget):
     # Population
     # ------------------------------------------------------------------
     def refresh(self) -> None:
-        self.runs_model.set_dataframe(pd.DataFrame(self.vm.run_rows(), columns=_RUN_COLUMNS))
+        self.runs_model.set_dataframe(self.vm.run_table())
         self.update_statistics()
 
     def update_statistics(self) -> None:
         _x, selected_y, _xmin, _xmax = self._selection()
-        rows = self.vm.comparison_statistics(selected_y) if selected_y else []
-        frame = pd.DataFrame(
-            [
-                {
-                    "Run": row["run"],
-                    "Channel": row["channel"],
-                    "Count": row["Count"],
-                    "Min": f"{row['Min']:.6g}",
-                    "Max": f"{row['Max']:.6g}",
-                    "Mean": f"{row['Mean']:.6g}",
-                    "Std Dev": f"{row['Std Dev']:.6g}",
-                }
-                for row in rows
-            ],
-            columns=_STAT_COLUMNS,
-        )
-        self.stats_model.set_dataframe(frame)
+        self.stats_model.set_dataframe(self.vm.comparison_statistics_table(selected_y))
 
     # ------------------------------------------------------------------
     # Run CRUD actions

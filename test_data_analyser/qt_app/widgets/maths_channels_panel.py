@@ -1,11 +1,10 @@
 """Maths (calculated) channels panel.
 
-Create, validate, edit, recalculate, and delete calculated channels, mirroring
-the Tkinter Maths Channels tab: a definition form (name, an insertable existing
-column, a multi-line formula, a description) beside a table of the defined
-channels. The panel is a thin Qt view; all formula evaluation and channel CRUD
-run through the framework-independent :class:`MathsChannelsViewModel`, which
-returns :class:`OperationResult` objects the panel turns into dialogs/status.
+Create, validate, edit, recalculate, and delete calculated channels with a
+definition form beside a table of defined channels. The panel is a thin Qt view;
+all formula evaluation and channel CRUD run through the framework-independent
+:class:`MathsChannelsViewModel`, which returns :class:`OperationResult` objects
+the panel turns into dialogs/status.
 
 Creating, deleting, or recalculating channels changes the dataframe columns, so
 the panel emits :attr:`channelsChanged` for the main window to refresh the
@@ -13,7 +12,6 @@ dependent panels (axis selection, raw data).
 """
 from __future__ import annotations
 
-import pandas as pd
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -46,7 +44,6 @@ _EXAMPLES = (
     "clip(`Pressure`, 0, 500)\n"
     "Tip: wrap exact column names in backticks."
 )
-_TABLE_COLUMNS = ["Name", "Formula", "Enabled", "Description"]
 
 
 class MathsChannelsPanel(QWidget):
@@ -170,19 +167,8 @@ class MathsChannelsPanel(QWidget):
             self.column_combo.setCurrentText(current)
         self.column_combo.blockSignals(False)
 
-        self._channel_order = list(self.vm.state.calculated_channels.keys())
-        rows = []
-        for name in self._channel_order:
-            definition = self.vm.state.calculated_channels[name]
-            rows.append(
-                {
-                    "Name": definition.get("name", name),
-                    "Formula": definition.get("formula", ""),
-                    "Enabled": "Yes" if definition.get("enabled", True) else "No",
-                    "Description": definition.get("description", ""),
-                }
-            )
-        self.model.set_dataframe(pd.DataFrame(rows, columns=_TABLE_COLUMNS))
+        self._channel_order = self.vm.channel_names()
+        self.model.set_dataframe(self.vm.channel_table())
 
     def clear_form(self) -> None:
         self._selected_name = None

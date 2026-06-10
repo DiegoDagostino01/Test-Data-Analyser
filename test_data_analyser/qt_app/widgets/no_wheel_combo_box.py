@@ -6,8 +6,7 @@ pointer hovers over the control inside a scrollable panel). The event is ignored
 rather than consumed, so a surrounding scroll area still scrolls normally.
 
 Living in the ``qt_app`` layer keeps this Qt-specific concern out of the
-framework-independent layers, mirroring the intent of the legacy
-``core.utils._block_mousewheel`` helper used by the old Tkinter UI.
+framework-independent layers.
 """
 from __future__ import annotations
 

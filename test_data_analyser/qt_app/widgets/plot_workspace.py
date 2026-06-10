@@ -2,8 +2,8 @@
 
 Embeds the Matplotlib Qt canvas and renders the active selection through the
 framework-independent :class:`PlotWorkspaceViewModel`. Data preparation and FFT
-live in the viewmodel/services; colour-cycle resolution lives in
-``plot_render_service``. This panel only orchestrates rendering onto the canvas.
+live in the viewmodel/services; colour-cycle resolution is exposed through the
+settings viewmodel. This panel only orchestrates rendering onto the canvas.
 """
 from __future__ import annotations
 
@@ -11,8 +11,6 @@ import os
 from contextlib import contextmanager
 from typing import Any, Optional
 
-import numpy as np
-import pandas as pd
 from cycler import cycler
 from matplotlib.colors import to_hex
 from PySide6.QtCore import Qt, Signal
@@ -30,8 +28,6 @@ from PySide6.QtWidgets import (
 )
 
 from ...core.config import EATON_DARK_BLUE
-from ...core.filters import estimate_sampling_rate, lowpass_filter
-from ...services import plot_render_service
 from ...services.results import OperationResult
 from ...viewmodels.cursor_compare_vm import CursorCompareViewModel
 from ...viewmodels.plot_workspace_vm import PlotWorkspaceViewModel
@@ -242,8 +238,16 @@ class PlotWorkspace(QWidget):
     # Rendering helpers
     # ------------------------------------------------------------------
     def _colours(self) -> list[str]:
-        cycle_name = str(self.settings_vm.get("plot_appearance", "colour_cycle", "eaton"))
-        return plot_render_service.resolve_plot_colours(cycle_name)
+        resolver = getattr(self.settings_vm, "plot_colours", None)
+        if callable(resolver):
+            return resolver()
+        return SettingsViewModel.plot_colours(self.settings_vm)
+
+    def _secondary_colours(self, colours: list[str]) -> list[str]:
+        resolver = getattr(self.settings_vm, "secondary_plot_colours", None)
+        if callable(resolver):
+            return resolver(colours)
+        return SettingsViewModel.secondary_plot_colours(self.settings_vm, colours)
 
     def _line_width(self) -> float:
         try:
@@ -284,41 +288,28 @@ class PlotWorkspace(QWidget):
         secondary_set = set(secondary_y or [])
         self.canvas.clear()
         axes = self.canvas.axes
-        axes.set_prop_cycle(cycler(color=self._colours()))
+        colours = self._colours()
+        axes.set_prop_cycle(cycler(color=colours))
+        series_result = self.plot_vm.plot_series(
+            data,
+            secondary_y=secondary_set,
+            use_filter=use_filter,
+            cutoff=cutoff,
+            order=order,
+        )
+        if not series_result.ok:
+            return series_result
+        series_items = series_result.payload if isinstance(series_result.payload, list) else []
         secondary_axes = None
-        if secondary_set & set(data.y_map.keys()):
+        if any(bool(item.get("secondary")) for item in series_items):
             secondary_axes = axes.twinx()
-            secondary_axes.set_prop_cycle(
-                cycler(color=plot_render_service.secondary_colour_cycle(self._colours()))
-            )
+            secondary_axes.set_prop_cycle(cycler(color=self._secondary_colours(colours)))
         line_width = self._line_width()
         plotted = 0
-        try:
-            for label, series in data.y_map.items():
-                x_for_label = data.x_map.get(label, data.x) if data.x_map else data.x
-                frame = pd.DataFrame({"x": x_for_label, "y": series}).dropna()
-                if frame.empty:
-                    continue
-                is_secondary = label in secondary_set and secondary_axes is not None
-                target = secondary_axes if is_secondary else axes
-                y_values = frame["y"].to_numpy(dtype=float)
-                plot_label = label
-                if use_filter:
-                    fs = estimate_sampling_rate(x_for_label)
-                    if fs is None:
-                        return OperationResult.failure(
-                            "Cannot estimate sampling frequency from the selected X-axis column."
-                        )
-                    if cutoff is None:
-                        return OperationResult.failure("Please enter a low-pass filter cutoff frequency.")
-                    y_values = lowpass_filter(y_values, cutoff_hz=cutoff, fs_hz=fs, order=order)
-                    plot_label = f"{label} | LP {cutoff:g} Hz"
-                if is_secondary:
-                    plot_label = f"{plot_label} [Right Y]"
-                self._plot_series(target, frame["x"].to_numpy(dtype=float), y_values, plot_label, plot_kind, line_width)
-                plotted += 1
-        except (ValueError, RuntimeError) as exc:
-            return OperationResult.failure(str(exc))
+        for item in series_items:
+            target = secondary_axes if item.get("secondary") and secondary_axes is not None else axes
+            self._plot_series(target, item["x"], item["y"], str(item.get("label", "")), plot_kind, line_width)
+            plotted += 1
         if plotted == 0:
             return OperationResult.failure("No numeric data was available for the selected columns.")
 
@@ -499,11 +490,8 @@ class PlotWorkspace(QWidget):
         axes.set_prop_cycle(cycler(color=self._colours()))
         line_width = self._line_width()
         plotted = 0
-        for item in items:
-            frame = pd.DataFrame({"x": item.get("x"), "y": item.get("y")}).dropna()
-            if frame.empty:
-                continue
-            axes.plot(frame["x"], frame["y"], label=item.get("label", ""), linewidth=line_width, color=item.get("colour"))
+        for item in self.plot_vm.comparison_series(items):
+            axes.plot(item["x"], item["y"], label=item.get("label", ""), linewidth=line_width, color=item.get("colour"))
             plotted += 1
         if plotted == 0:
             return OperationResult.failure("No numeric comparison data was available for the enabled runs.")
@@ -524,7 +512,7 @@ class PlotWorkspace(QWidget):
             data = self.plot_vm.prepare_plot_data(x_col, y_cols)
         except ValueError as exc:
             return OperationResult.failure(str(exc))
-        fs = estimate_sampling_rate(data.x)
+        fs = self.plot_vm.sampling_rate(data)
         if fs is None:
             return OperationResult.failure("Cannot estimate sampling frequency from the selected X-axis column.")
 
@@ -535,14 +523,8 @@ class PlotWorkspace(QWidget):
         axes = self.canvas.axes
         axes.set_prop_cycle(cycler(color=self._colours()))
         plotted = 0
-        for label, series in data.y_map.items():
-            frame = pd.DataFrame({"y": series}).dropna()
-            if len(frame) < 4:
-                continue
-            values = frame["y"].to_numpy(dtype=float)
-            values = values - np.mean(values)
-            freqs, amp = self.plot_vm.fft(values, fs, window, overlap)
-            axes.plot(freqs, amp, label=label, linewidth=self._line_width())
+        for item in self.plot_vm.fft_series(data, fs, window, overlap):
+            axes.plot(item["x"], item["y"], label=item.get("label", ""), linewidth=self._line_width())
             plotted += 1
         if plotted == 0:
             return OperationResult.failure("Not enough numeric data to generate FFT.")

@@ -2,9 +2,8 @@
 
 Centralises the Qt stylesheet and palette generation, sourcing the Eaton brand
 colours from :mod:`test_data_analyser.config` as the single source of truth. This
-preserves the Eaton blue palette and the dark/light theme concept used by the
-Tkinter UI. Styling stays centralised here rather than being scattered across
-widgets.
+preserves the Eaton blue palette and the dark/light theme concept. Styling stays
+centralised here rather than being scattered across widgets.
 """
 from __future__ import annotations
 

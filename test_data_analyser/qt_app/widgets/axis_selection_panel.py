@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Optional
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QMouseEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QFrame,
@@ -26,11 +26,28 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ...core.utils import channel_group_options, classify_channel_name
+from ...core.utils import channel_group_options, classify_channel_name, natural_sort_key
 from .no_wheel_combo_box import NoWheelComboBox
 
 PLOT_KINDS = ("Line", "Scatter", "Line + Markers")
 _GROUP_HEADER_ROLE = "channel_group_header"
+
+
+class CheckableChannelListWidget(QListWidget):
+    """QListWidget whose checkable rows toggle from any click position."""
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        item = self.itemAt(event.position().toPoint())
+        if item is not None and item.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+            next_state = (
+                Qt.CheckState.Unchecked
+                if item.checkState() == Qt.CheckState.Checked
+                else Qt.CheckState.Checked
+            )
+            item.setCheckState(next_state)
+            event.accept()
+            return
+        super().mousePressEvent(event)
 
 
 class AxisSelectionPanel(QFrame):
@@ -79,14 +96,14 @@ class AxisSelectionPanel(QFrame):
         self.group_combo.currentTextChanged.connect(self._refresh_channel_lists)
         axes_layout.addWidget(self.group_combo)
         axes_layout.addWidget(QLabel("Primary Y-axis channels:"))
-        self.y_list = QListWidget()
+        self.y_list = CheckableChannelListWidget()
         self.y_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
         self.y_list.setMinimumHeight(160)
         self.y_list.setMaximumHeight(220)
         self.y_list.itemChanged.connect(self._on_primary_item_changed)
         axes_layout.addWidget(self.y_list, stretch=1)
         axes_layout.addWidget(QLabel("Secondary Y-axis channels (right):"))
-        self.secondary_y_list = QListWidget()
+        self.secondary_y_list = CheckableChannelListWidget()
         self.secondary_y_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
         self.secondary_y_list.setMinimumHeight(160)
         self.secondary_y_list.setMaximumHeight(220)
@@ -275,11 +292,21 @@ class AxisSelectionPanel(QFrame):
         group = self.group_combo.currentText() if hasattr(self, "group_combo") else "All"
         available = [column for column in self._columns if column != skip]
         if group != "All":
-            return [column for column in available if self._channel_groups.get(column) == group]
+            return self._sort_columns(
+                [column for column in available if self._channel_groups.get(column) == group]
+            )
         ordered: list[str] = []
         for group_name in channel_group_options()[1:]:
-            ordered.extend(column for column in available if self._channel_groups.get(column) == group_name)
+            ordered.extend(
+                self._sort_columns(
+                    [column for column in available if self._channel_groups.get(column) == group_name]
+                )
+            )
         return ordered
+
+    @staticmethod
+    def _sort_columns(columns: list[str]) -> list[str]:
+        return sorted(columns, key=natural_sort_key)
 
     def _on_primary_item_changed(self, item: QListWidgetItem) -> None:
         if item.data(Qt.ItemDataRole.UserRole) == _GROUP_HEADER_ROLE:

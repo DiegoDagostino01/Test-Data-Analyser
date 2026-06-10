@@ -1,9 +1,9 @@
 """Raw Data panel.
 
-Shows the selected X/Y channels as an editable table, mirroring the Tkinter Raw
-Data tab: a row-display limit, an "apply analysis window" toggle, a "hide blank
-rows" toggle, inline cell editing with undo, and an export action. The panel is
-a thin Qt view; framing/filtering, edit coercion, undo, and export all run
+Shows the selected X/Y channels as an editable table with a row-display limit,
+an "apply analysis window" toggle, a "hide blank rows" toggle, inline cell
+editing with undo, and an export action. The panel is a thin Qt view;
+framing/filtering, edit coercion, undo, and export all run
 through the framework-independent :class:`RawDataViewModel`.
 
 The current axis/window selection lives in the axis-selection panel, so the main
@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-import pandas as pd
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -116,7 +115,7 @@ class RawDataPanel(QWidget):
     # Public API
     # ------------------------------------------------------------------
     def clear(self) -> None:
-        self.model.set_dataframe(pd.DataFrame())
+        self.model.set_dataframe(self.vm.empty_frame())
         self.status_label.setText("Select X/Y channels and click Refresh to view the raw data.")
 
     def refresh(self) -> None:
@@ -125,34 +124,27 @@ class RawDataPanel(QWidget):
             self.clear()
             return
 
-        limit_result = self.vm.parse_row_limit(self.row_limit_edit.text())
-        if not limit_result.ok:
-            qt_message_service.warning(self, "Raw Data", limit_result.message)
-            self.row_limit_edit.setText("All")
-            limit: Optional[int] = None
-        else:
-            payload = limit_result.payload
-            limit = payload if isinstance(payload, int) else None
-
-        frame, removed = self.vm.select_frame(
+        result = self.vm.display_frame(
             x_col,
             selected_y,
+            row_limit_text=self.row_limit_edit.text(),
             apply_window=self.apply_window_check.isChecked(),
             xmin=xmin,
             xmax=xmax,
             drop_blank=self.drop_blank_check.isChecked(),
         )
-        if frame.empty:
-            self.model.set_dataframe(pd.DataFrame())
-            self.status_label.setText("No complete selected X/Y rows to display.")
+        for warning in result.warnings:
+            qt_message_service.warning(self, "Raw Data", warning)
+        payload = result.payload if isinstance(result.payload, dict) else {}
+        if not payload.get("row_limit_valid", True):
+            self.row_limit_edit.setText("All")
+        frame = payload.get("frame", self.vm.empty_frame())
+        if not result.ok:
+            self.model.set_dataframe(frame)
+            self.status_label.setText(result.message)
             return
-
-        display = frame if limit is None else frame.head(limit)
-        self.model.set_dataframe(display)
-        self.status_label.setText(
-            f"Selected raw data: {len(display):,} / {len(frame):,} rows, {display.shape[1]:,} columns. "
-            f"Removed {removed:,} row(s) with blank cells. Double-click a cell to edit it."
-        )
+        self.model.set_dataframe(frame)
+        self.status_label.setText(result.message)
 
     # ------------------------------------------------------------------
     # Editing

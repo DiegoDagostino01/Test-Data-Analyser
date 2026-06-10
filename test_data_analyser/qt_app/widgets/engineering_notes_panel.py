@@ -1,10 +1,9 @@
 """Engineering Notes panel.
 
 A scrollable set of structured note fields (objective, observations, rationale,
-and so on) with a compiled report/email preview, mirroring the Tkinter
-Engineering Notes tab. The panel is a thin Qt view; the field definitions, note
-storage, and report formatting all run through the framework-independent
-:class:`EngineeringNotesViewModel`.
+and so on) with a compiled report/email preview. The panel is a thin Qt view;
+the field definitions, note storage, and report formatting all run through the
+framework-independent :class:`EngineeringNotesViewModel`.
 
 The compiled report includes the current file and axis selection, which the main
 window supplies through an injected context provider.

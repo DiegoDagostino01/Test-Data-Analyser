@@ -1,10 +1,10 @@
 """Plot-workspace viewmodel.
 
-Coordinates plot-data preparation, statistics, selected-data ranges, and FFT for
-the active dataframe through the service layer. Framework-independent: it pulls
-numeric series from ``AppState.df`` itself (via :func:`data_io.numeric_series`)
-so it does not depend on the Tkinter numeric cache, and applies the per-channel X
-matching used for wide grouped files.
+Coordinates plot-data preparation, statistics, selected-data ranges, prepared
+render series, and FFT for the active dataframe through the service layer. It
+pulls numeric series from ``AppState.df`` itself (via
+:func:`data_io.numeric_series`) and applies the per-channel X matching used for
+wide grouped files.
 """
 from __future__ import annotations
 
@@ -13,8 +13,10 @@ from typing import Optional, Tuple
 import pandas as pd
 
 from ..core.data_io import numeric_series
+from ..core.filters import estimate_sampling_rate
 from ..domain import PlotData
 from ..services import fft_service, plotting_data_service, statistics_service
+from ..services.results import OperationResult
 from ..core.utils import _matching_x_column_for_y
 from .app_state import AppState
 
@@ -67,6 +69,38 @@ class PlotWorkspaceViewModel:
     def statistics(self, y_cols: list[str], decimal_places: int = 4) -> pd.DataFrame:
         columns = {col: self._numeric(col) for col in y_cols}
         return statistics_service.compute_statistics(columns, decimal_places)
+
+    def plot_series(
+        self,
+        data: PlotData,
+        *,
+        secondary_y: set[str] | None = None,
+        use_filter: bool = False,
+        cutoff: Optional[float] = None,
+        order: int = 4,
+    ) -> OperationResult:
+        return plotting_data_service.prepare_plot_series(
+            data,
+            secondary_y=secondary_y,
+            use_filter=use_filter,
+            cutoff=cutoff,
+            order=order,
+        )
+
+    def comparison_series(self, items: list[dict]) -> list[dict]:
+        return plotting_data_service.prepare_comparison_series(items)
+
+    def sampling_rate(self, data: PlotData) -> Optional[float]:
+        return estimate_sampling_rate(data.x)
+
+    def fft_series(
+        self,
+        data: PlotData,
+        fs: float,
+        window_name: str = "hanning",
+        overlap_percent: int = 50,
+    ) -> list[dict]:
+        return fft_service.fft_plot_series(data, fs, window_name, overlap_percent)
 
     def fft(
         self,

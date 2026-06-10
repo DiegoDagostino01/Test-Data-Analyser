@@ -2,10 +2,10 @@
 
 Create and edit requirement limit lines (name, type, applies-to, colour, and a
 sorted list of X/Y points), then compute the margin-to-limit summary for the
-current plot selection. Mirrors the Tkinter Requirements/Limits tab. The panel
-is a thin Qt view; all limit-line CRUD and margin calculations run through the
-framework-independent :class:`LimitsViewModel`; preparing the plot data for the
-summary uses the :class:`PlotWorkspaceViewModel`.
+current plot selection. The panel is a thin Qt view; all limit-line CRUD and
+margin calculations run through the framework-independent
+:class:`LimitsViewModel`; preparing the plot data for the summary uses the
+:class:`PlotWorkspaceViewModel`.
 
 Editing limits changes the overlays drawn on the plot, so the panel emits
 :attr:`limitsChanged` for the main window to redraw the canvas. The current axis
@@ -16,7 +16,6 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-import pandas as pd
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -45,8 +44,6 @@ from ..adapters.pandas_table_model import PandasTableModel
 
 SelectionProvider = Callable[[], tuple[str, list[str], Optional[float], Optional[float]]]
 
-_LINES_COLUMNS = ["Name", "Type", "Pts", "Applies to"]
-_POINTS_COLUMNS = ["X", "Y Limit"]
 _CUSTOM = "Custom"
 
 
@@ -273,34 +270,16 @@ class LimitsPanel(QWidget):
             self.applies_combo.setCurrentText(current)
         self._loading = False
 
-    def _lines_dataframe(self) -> pd.DataFrame:
-        rows = []
-        for line in self.vm.lines:
-            rows.append(
-                {
-                    "Name": line.get("name", "Limit"),
-                    "Type": line.get("type", "Upper Limit"),
-                    "Pts": len(line.get("points", [])),
-                    "Applies to": line.get("applies_to", "All selected Y channels"),
-                }
-            )
-        return pd.DataFrame(rows, columns=_LINES_COLUMNS)
-
     def _refresh_lines_table(self) -> None:
         self._loading = True
-        self.lines_model.set_dataframe(self._lines_dataframe())
+        self.lines_model.set_dataframe(self.vm.lines_table())
         index = self.vm.active_index()
         if index >= 0:
             self.lines_table.selectRow(index)
         self._loading = False
 
     def _refresh_points_table(self) -> None:
-        points = self.vm.active_points()
-        frame = pd.DataFrame(
-            [{"X": f"{p['x']:.6g}", "Y Limit": f"{p['y']:.6g}"} for p in points],
-            columns=_POINTS_COLUMNS,
-        )
-        self.points_model.set_dataframe(frame)
+        self.points_model.set_dataframe(self.vm.active_points_table())
 
     def _load_active_into_form(self) -> None:
         line = self.vm.active_line()

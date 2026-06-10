@@ -6,7 +6,6 @@ framework-independent :class:`PlotWorkspaceViewModel`.
 """
 from __future__ import annotations
 
-import pandas as pd
 from PySide6.QtWidgets import QHeaderView, QTableView, QVBoxLayout, QWidget
 
 from ..adapters.pandas_table_model import PandasTableModel
@@ -25,5 +24,5 @@ class StatisticsPanel(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         layout.addWidget(self.table)
 
-    def set_statistics(self, stats: pd.DataFrame) -> None:
+    def set_statistics(self, stats) -> None:
         self.model.set_dataframe(stats)

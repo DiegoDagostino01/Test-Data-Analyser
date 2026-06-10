@@ -2,18 +2,21 @@
 
 Coordinates validation, application, recalculation, and deletion of calculated
 channels against :class:`AppState`. Crucially, it returns :class:`OperationResult`
-objects instead of showing message boxes, so the same logic can drive the
-Tkinter and PySide6 UIs. The dataframe and the calculated-channel definitions on
-``AppState`` are mutated in place, mirroring the existing behaviour.
+objects instead of showing message boxes. The dataframe and the
+calculated-channel definitions on ``AppState`` are mutated in place.
 """
 from __future__ import annotations
 
 from typing import Any
 
+import pandas as pd
+
 from ..services import maths_channel_service
 from ..services.maths_channel_service import MathsChannelEvaluator
 from ..services.results import OperationResult
 from .app_state import AppState
+
+MATHS_CHANNEL_TABLE_COLUMNS = ["Name", "Formula", "Enabled", "Description"]
 
 
 class MathsChannelsViewModel:
@@ -25,6 +28,23 @@ class MathsChannelsViewModel:
 
     def normalise_definitions(self, raw: Any) -> dict[str, dict[str, Any]]:
         return maths_channel_service.normalise_calculated_channel_definitions(raw)
+
+    def channel_names(self) -> list[str]:
+        return list(self.state.calculated_channels.keys())
+
+    def channel_table(self) -> pd.DataFrame:
+        rows = []
+        for name in self.channel_names():
+            definition = self.state.calculated_channels[name]
+            rows.append(
+                {
+                    "Name": definition.get("name", name),
+                    "Formula": definition.get("formula", ""),
+                    "Enabled": "Yes" if definition.get("enabled", True) else "No",
+                    "Description": definition.get("description", ""),
+                }
+            )
+        return pd.DataFrame(rows, columns=MATHS_CHANNEL_TABLE_COLUMNS)
 
     def validate_formula(self, formula: str) -> OperationResult:
         """Validate a formula against the loaded dataframe.

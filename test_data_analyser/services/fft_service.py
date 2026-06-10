@@ -5,7 +5,11 @@ Matplotlib or UI imports.
 """
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
+
+from ..domain import PlotData
 
 
 def fft_window(window_name: str, size: int) -> np.ndarray:
@@ -46,3 +50,22 @@ def fft_spectrum(
         correction = float(np.mean(window)) or 1.0
         return np.fft.rfftfreq(n, d=1.0 / fs), np.abs(np.fft.rfft(values * window)) * 2.0 / (n * correction)
     return freqs, np.mean(spectra, axis=0)
+
+
+def fft_plot_series(
+    data: PlotData,
+    fs: float,
+    window_name: str = "hanning",
+    overlap_percent: int = 50,
+) -> list[dict[str, Any]]:
+    """Return drawable FFT series for each selected Y channel."""
+    prepared: list[dict[str, Any]] = []
+    for label, series in data.y_map.items():
+        clean = series.dropna()
+        if len(clean) < 4:
+            continue
+        values = clean.to_numpy(dtype=float)
+        values = values - np.mean(values)
+        frequencies, amplitudes = fft_spectrum(values, fs, window_name, overlap_percent)
+        prepared.append({"label": label, "x": frequencies, "y": amplitudes})
+    return prepared

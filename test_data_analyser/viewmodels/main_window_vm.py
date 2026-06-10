@@ -117,7 +117,7 @@ class MainWindowViewModel:
         The Qt shell keeps limit lines and engineering notes as top-level working
         state and the axis selection in the panel; this folds them into a single
         plot profile so :meth:`save_session` persists a session compatible with
-        the existing on-disk format (and the Tkinter loader).
+        the existing on-disk format.
         """
         name = self.state.plot_profiles[0]["name"] if self.state.plot_profiles else "Plot 1"
         self.state.plot_profiles = [

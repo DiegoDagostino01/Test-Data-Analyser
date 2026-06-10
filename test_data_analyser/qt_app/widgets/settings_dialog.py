@@ -1,9 +1,8 @@
 """Settings dialog.
 
 A focused Qt settings dialog for the most-used options, driven entirely through
-the framework-independent :class:`SettingsViewModel` (get/set/save). It does not
-replicate every option in the legacy Tkinter settings window; additional
-sections can be added to ``FIELD_SPEC`` as the migration proceeds.
+the framework-independent :class:`SettingsViewModel` (get/set/save). Additional
+sections can be added to ``FIELD_SPEC`` as needed.
 """
 from __future__ import annotations
 

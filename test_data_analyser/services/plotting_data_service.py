@@ -7,11 +7,13 @@ adapters.
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 import pandas as pd
 
+from ..core.filters import estimate_sampling_rate, lowpass_filter
 from ..domain import PlotData
+from .results import OperationResult
 
 
 def apply_analysis_window(
@@ -49,3 +51,71 @@ def apply_analysis_window(
             global_mask &= x <= xmax
         x = x.where(global_mask)
     return PlotData(x=x, y_map=y_map, x_map=x_map)
+
+
+def prepare_plot_series(
+    data: PlotData,
+    *,
+    secondary_y: set[str] | None = None,
+    use_filter: bool = False,
+    cutoff: Optional[float] = None,
+    order: int = 4,
+) -> OperationResult:
+    """Return cleaned, drawable X/Y series for the selected plot data.
+
+    This keeps NaN dropping, low-pass filtering, and secondary-axis labelling in
+    the service layer so Qt widgets only render already prepared arrays.
+    """
+    secondary = secondary_y or set()
+    prepared: list[dict[str, Any]] = []
+    try:
+        for label, series in data.y_map.items():
+            x_for_label = data.x_map.get(label, data.x) if data.x_map else data.x
+            frame = pd.DataFrame({"x": x_for_label, "y": series}).dropna()
+            if frame.empty:
+                continue
+            x_values = frame["x"].to_numpy(dtype=float)
+            y_values = frame["y"].to_numpy(dtype=float)
+            plot_label = label
+            if use_filter:
+                if cutoff is None:
+                    return OperationResult.failure("Please enter a low-pass filter cutoff frequency.")
+                fs = estimate_sampling_rate(frame["x"])
+                if fs is None:
+                    return OperationResult.failure(
+                        "Cannot estimate sampling frequency from the selected X-axis column."
+                    )
+                y_values = lowpass_filter(y_values, cutoff_hz=cutoff, fs_hz=fs, order=order)
+                plot_label = f"{label} | LP {cutoff:g} Hz"
+            is_secondary = label in secondary
+            if is_secondary:
+                plot_label = f"{plot_label} [Right Y]"
+            prepared.append(
+                {
+                    "label": plot_label,
+                    "x": x_values,
+                    "y": y_values,
+                    "secondary": is_secondary,
+                }
+            )
+    except (ValueError, RuntimeError) as exc:
+        return OperationResult.failure(str(exc))
+    return OperationResult.success(payload=prepared)
+
+
+def prepare_comparison_series(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return cleaned drawable series for a run-comparison plot."""
+    prepared: list[dict[str, Any]] = []
+    for item in items:
+        frame = pd.DataFrame({"x": item.get("x"), "y": item.get("y")}).dropna()
+        if frame.empty:
+            continue
+        prepared.append(
+            {
+                "label": item.get("label", ""),
+                "x": frame["x"].to_numpy(dtype=float),
+                "y": frame["y"].to_numpy(dtype=float),
+                "colour": item.get("colour"),
+            }
+        )
+    return prepared

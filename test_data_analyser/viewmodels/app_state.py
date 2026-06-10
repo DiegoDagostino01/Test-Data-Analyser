@@ -2,13 +2,9 @@
 
 ``AppState`` is the single source of truth for the framework-independent state
 that the viewmodels coordinate: the loaded dataframe, source file/sheet, plot
-profiles, runs, calculated channels, and comparison settings. It holds no
-Tkinter or PySide6 objects.
-
-During the staged migration the Tkinter UI keeps its own Tk variables; the
-viewmodels and this state container are consumed by the new PySide6 shell. The
-data shapes intentionally match the existing dictionaries (plot profiles, runs,
-calculated channels) so domain/service helpers and saved sessions stay
+profiles, runs, calculated channels, limits, notes, and comparison settings. It
+holds no Tkinter or PySide6 objects. The data shapes intentionally match the
+saved-session dictionaries so domain/service helpers and saved sessions stay
 compatible.
 """
 from __future__ import annotations

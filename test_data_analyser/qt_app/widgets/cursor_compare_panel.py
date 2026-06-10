@@ -1,10 +1,10 @@
 """Cursor / point-comparison panel.
 
 Locks comparison points on the plot and shows a per-point table with delta-
-versus-Point-1 rows, mirroring the Tkinter Point Compare feature. The panel is a
-thin Qt view: locked-point state and the table data live in the
-:class:`CursorCompareViewModel`, and the Matplotlib click/key wiring lives in the
-:class:`PlotWorkspace`. The panel only toggles compare mode and renders the table.
+versus-Point-1 rows. The panel is a thin Qt view: locked-point state and table
+data live in the :class:`CursorCompareViewModel`, and the Matplotlib click/key
+wiring lives in the :class:`PlotWorkspace`. The panel only toggles compare mode
+and renders the table.
 """
 from __future__ import annotations
 

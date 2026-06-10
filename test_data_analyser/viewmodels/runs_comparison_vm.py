@@ -20,6 +20,9 @@ from ..services.results import OperationResult
 from ..core.utils import _matching_x_column_for_y
 from .app_state import AppState
 
+RUN_TABLE_COLUMNS = ["Name", "Enabled", "Active", "File", "Sheet", "Rows", "Columns"]
+COMPARISON_STAT_TABLE_COLUMNS = ["Run", "Channel", "Count", "Min", "Max", "Mean", "Std Dev"]
+
 
 class RunsComparisonViewModel:
     def __init__(self, state: AppState) -> None:
@@ -147,6 +150,9 @@ class RunsComparisonViewModel:
             )
         return rows
 
+    def run_table(self) -> pd.DataFrame:
+        return pd.DataFrame(self.run_rows(), columns=RUN_TABLE_COLUMNS)
+
     # ------------------------------------------------------------------
     # Comparison settings (stored on AppState.comparison)
     # ------------------------------------------------------------------
@@ -231,6 +237,24 @@ class RunsComparisonViewModel:
                     continue
                 rows.append({"run": run.get("name", "Run"), "channel": channel, **stats})
         return rows
+
+    def comparison_statistics_table(self, y_columns: list[str]) -> pd.DataFrame:
+        rows = self.comparison_statistics(y_columns) if y_columns else []
+        return pd.DataFrame(
+            [
+                {
+                    "Run": row["run"],
+                    "Channel": row["channel"],
+                    "Count": row["Count"],
+                    "Min": f"{row['Min']:.6g}",
+                    "Max": f"{row['Max']:.6g}",
+                    "Mean": f"{row['Mean']:.6g}",
+                    "Std Dev": f"{row['Std Dev']:.6g}",
+                }
+                for row in rows
+            ],
+            columns=COMPARISON_STAT_TABLE_COLUMNS,
+        )
 
     def serialise_runs(self) -> list[dict[str, Any]]:
         return run_comparison_service.serialise_runs(self.state.runs)

@@ -15,6 +15,8 @@ from __future__ import annotations
 import copy
 from typing import Any, Optional, Tuple
 
+import pandas as pd
+
 from ..core.config import EATON_DARK_BLUE, LIMIT_COLOR_PRESETS
 from ..domain import PlotData
 from ..services import limits_service
@@ -23,6 +25,8 @@ from ..services.results import OperationResult
 from .app_state import AppState
 
 _LIMIT_TYPES = ("Upper Limit", "Lower Limit", "Reference Line")
+LIMIT_LINES_TABLE_COLUMNS = ["Name", "Type", "Pts", "Applies to"]
+LIMIT_POINTS_TABLE_COLUMNS = ["X", "Y Limit"]
 
 
 class LimitsViewModel:
@@ -219,4 +223,23 @@ class LimitsViewModel:
         if line is None:
             return []
         return self._sorted_points(line)
+
+    def lines_table(self) -> pd.DataFrame:
+        rows = []
+        for line in self.lines:
+            rows.append(
+                {
+                    "Name": line.get("name", "Limit"),
+                    "Type": line.get("type", "Upper Limit"),
+                    "Pts": len(line.get("points", [])),
+                    "Applies to": line.get("applies_to", "All selected Y channels"),
+                }
+            )
+        return pd.DataFrame(rows, columns=LIMIT_LINES_TABLE_COLUMNS)
+
+    def active_points_table(self) -> pd.DataFrame:
+        return pd.DataFrame(
+            [{"X": f"{p['x']:.6g}", "Y Limit": f"{p['y']:.6g}"} for p in self.active_points()],
+            columns=LIMIT_POINTS_TABLE_COLUMNS,
+        )
 

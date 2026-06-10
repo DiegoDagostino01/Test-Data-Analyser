@@ -68,7 +68,7 @@ class EngineeringNotesViewModel:
         """Return the compiled report/email text for the current notes.
 
         The optional context (file, X/Y axes) is included in the header, matching
-        the legacy Tkinter report layout. Empty fields are omitted.
+        the structured engineering report layout. Empty fields are omitted.
         """
         notes = self.get_notes()
         body: list[str] = []

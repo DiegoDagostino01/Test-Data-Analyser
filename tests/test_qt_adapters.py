@@ -30,6 +30,7 @@ try:
         QTabBar,
         QTabWidget,
     )
+    from PySide6.QtTest import QTest
 
     from test_data_analyser.core.config import EATON_HEADER_BLUE
     from test_data_analyser.core.settings_manager import SettingsManager
@@ -417,6 +418,20 @@ class AxisSelectionPanelTests(unittest.TestCase):
             if widget.item(row).flags() & Qt.ItemFlag.ItemIsUserCheckable
         )
 
+    @staticmethod
+    def _checkable_texts(widget) -> list[str]:
+        return [
+            widget.item(row).text()
+            for row in range(widget.count())
+            if widget.item(row).flags() & Qt.ItemFlag.ItemIsUserCheckable
+        ]
+
+    def test_y_axis_lists_are_alphabetical(self) -> None:
+        self.panel.set_columns(["Time", "Zeta", "alpha", "Beta", "A10", "A2"], "Time")
+        expected = ["A2", "A10", "alpha", "Beta", "Zeta"]
+        self.assertEqual(self._checkable_texts(self.panel.y_list), expected)
+        self.assertEqual(self._checkable_texts(self.panel.secondary_y_list), expected)
+
     def test_primary_and_secondary_lists_have_equal_sizing(self) -> None:
         self.assertEqual(self.panel.y_list.minimumHeight(), self.panel.secondary_y_list.minimumHeight())
         self.assertEqual(self.panel.y_list.maximumHeight(), self.panel.secondary_y_list.maximumHeight())
@@ -426,6 +441,42 @@ class AxisSelectionPanelTests(unittest.TestCase):
             item = self.panel.secondary_y_list.item(row)
             if item.text() == "B":
                 item.setCheckState(Qt.CheckState.Checked)
+        self.assertEqual(self.panel.selected_secondary_y(), ["B"])
+
+    def test_clicking_primary_row_toggles_channel(self) -> None:
+        self.panel.show()
+        QApplication.processEvents()
+        for row in range(self.panel.y_list.count()):
+            item = self.panel.y_list.item(row)
+            if item.text() == "A":
+                rect = self.panel.y_list.visualItemRect(item)
+                point = rect.center()
+                point.setX(rect.right() - 2)
+                QTest.mouseClick(
+                    self.panel.y_list.viewport(),
+                    Qt.MouseButton.LeftButton,
+                    Qt.KeyboardModifier.NoModifier,
+                    point,
+                )
+                break
+        self.assertEqual(self.panel.selected_y(), ["A"])
+
+    def test_clicking_secondary_row_toggles_channel(self) -> None:
+        self.panel.show()
+        QApplication.processEvents()
+        for row in range(self.panel.secondary_y_list.count()):
+            item = self.panel.secondary_y_list.item(row)
+            if item.text() == "B":
+                rect = self.panel.secondary_y_list.visualItemRect(item)
+                point = rect.center()
+                point.setX(rect.right() - 2)
+                QTest.mouseClick(
+                    self.panel.secondary_y_list.viewport(),
+                    Qt.MouseButton.LeftButton,
+                    Qt.KeyboardModifier.NoModifier,
+                    point,
+                )
+                break
         self.assertEqual(self.panel.selected_secondary_y(), ["B"])
 
     def test_plot_kind_default(self) -> None:
@@ -1031,6 +1082,54 @@ class MainWindowLayoutTests(unittest.TestCase):
                 str(Path(save_path).resolve().parent),
             )
 
+    def test_save_session_prefers_loaded_data_directory(self) -> None:
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            remembered_session_dir = os.path.join(directory, "remembered_sessions")
+            data_dir = os.path.join(directory, "data")
+            selected_session_dir = os.path.join(directory, "selected_sessions")
+            os.mkdir(remembered_session_dir)
+            os.mkdir(data_dir)
+            os.mkdir(selected_session_dir)
+            data_path = os.path.join(data_dir, "run.csv")
+            with open(data_path, "w", encoding="utf-8") as handle:
+                handle.write("Time,A\n0,1\n")
+
+            manager = SettingsManager(os.path.join(directory, "settings.json"))
+            manager.set("general_ui", "last_session_directory", remembered_session_dir)
+            window = MainWindow(manager)
+            window.vm.state.filepath = Path(data_path)
+
+            original_save_dialog = qt_file_dialogs.save_session_file
+            original_show_result = qt_message_service.show_result
+            captured: dict[str, str] = {}
+            save_path = os.path.join(selected_session_dir, "analysis.json")
+
+            class _Result:
+                ok = True
+                message = "Saved."
+
+            def fake_save_dialog(parent, initial_dir=""):
+                captured["initial_dir"] = initial_dir
+                return save_path
+
+            qt_file_dialogs.save_session_file = fake_save_dialog
+            qt_message_service.show_result = lambda *args, **kwargs: None
+            window.vm.capture_working_state = lambda **kwargs: None
+            window.vm.save_session = lambda path: _Result()
+            try:
+                window.save_session()
+            finally:
+                qt_file_dialogs.save_session_file = original_save_dialog
+                qt_message_service.show_result = original_show_result
+
+            self.assertEqual(captured["initial_dir"], str(Path(data_path).resolve().parent))
+            self.assertEqual(
+                manager.get("general_ui", "last_session_directory"),
+                str(Path(save_path).resolve().parent),
+            )
+
 
 @unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
 class MainWindowSessionRestoreTests(unittest.TestCase):
@@ -1238,6 +1337,40 @@ class LastDataDirectoryHelperTests(unittest.TestCase):
             manager = Manager(os.path.join(directory, "settings.json"))
             manager.set("general_ui", "last_session_directory", os.path.join(directory, "does_not_exist"))
             self.assertEqual(qt_widget_helpers.last_session_directory(manager), "")
+
+    def test_save_session_initial_directory_prefers_data_file(self) -> None:
+        from pathlib import Path
+
+        from test_data_analyser.core.settings_manager import SettingsManager as Manager
+        from test_data_analyser.qt_app.adapters import qt_widget_helpers
+
+        with tempfile.TemporaryDirectory() as directory:
+            session_dir = os.path.join(directory, "sessions")
+            data_dir = os.path.join(directory, "data")
+            os.mkdir(session_dir)
+            os.mkdir(data_dir)
+            data_file = os.path.join(data_dir, "source.csv")
+            with open(data_file, "w", encoding="utf-8") as handle:
+                handle.write("Time,A\n0,1\n")
+            manager = Manager(os.path.join(directory, "settings.json"))
+            manager.set("general_ui", "last_session_directory", session_dir)
+
+            self.assertEqual(
+                qt_widget_helpers.save_session_initial_directory(manager, data_file),
+                str(Path(data_file).resolve().parent),
+            )
+
+    def test_save_session_initial_directory_falls_back_to_session_folder(self) -> None:
+        from test_data_analyser.core.settings_manager import SettingsManager as Manager
+        from test_data_analyser.qt_app.adapters import qt_widget_helpers
+
+        with tempfile.TemporaryDirectory() as directory:
+            session_dir = os.path.join(directory, "sessions")
+            os.mkdir(session_dir)
+            manager = Manager(os.path.join(directory, "settings.json"))
+            manager.set("general_ui", "last_session_directory", session_dir)
+
+            self.assertEqual(qt_widget_helpers.save_session_initial_directory(manager, None), session_dir)
 
 
 class SettingsOptionsHelperTests(unittest.TestCase):

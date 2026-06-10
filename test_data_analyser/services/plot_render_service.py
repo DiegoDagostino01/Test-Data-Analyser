@@ -1,8 +1,7 @@
 """Matplotlib-aware plot rendering helpers extracted from ``plotting.py``.
 
 This module may import Matplotlib but must not import Tkinter or PySide6. Canvas
-embedding and event handling remain in the UI adapter (the Tkinter
-``PlottingMixin`` today, a Qt adapter in future).
+embedding and event handling remain in Qt adapters.
 """
 from __future__ import annotations
 
