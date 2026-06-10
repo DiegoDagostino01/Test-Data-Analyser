@@ -1,20 +1,20 @@
 """Axis / channel selection panel.
 
-Lets the user choose the X column, the Y channels, and an optional analysis
-window, then request a plot or FFT. Holds no analysis logic; it only gathers the
-selection for the plot workspace.
+Lets the user choose the X column, the Y channels, an optional analysis window,
+and filter settings. Holds no analysis logic; it only gathers the selection for
+the plot workspace.
 """
 from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QMouseEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QFrame,
     QGroupBox,
-    QHBoxLayout,
+    QGridLayout,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -51,9 +51,6 @@ class CheckableChannelListWidget(QListWidget):
 
 
 class AxisSelectionPanel(QFrame):
-    generateRequested = Signal()
-    fftRequested = Signal()
-
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("EatonPanel")
@@ -72,7 +69,7 @@ class AxisSelectionPanel(QFrame):
         root.addWidget(heading)
 
         # The grouped controls live in a scroll area so the panel never feels
-        # cramped on shorter windows; the action buttons stay pinned below it.
+        # cramped on shorter windows.
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -102,6 +99,14 @@ class AxisSelectionPanel(QFrame):
         self.y_list.setMaximumHeight(220)
         self.y_list.itemChanged.connect(self._on_primary_item_changed)
         axes_layout.addWidget(self.y_list, stretch=1)
+        self.primary_select_all_button = QPushButton("Select All")
+        self.primary_select_all_button.setToolTip("Select all visible primary Y channels in the current group.")
+        self.primary_select_all_button.clicked.connect(self._select_visible_primary)
+        self.primary_clear_all_button = QPushButton("Clear All")
+        self.primary_clear_all_button.setToolTip("Clear every selected primary Y channel.")
+        self.primary_clear_all_button.clicked.connect(self._clear_primary)
+        primary_buttons = self._button_row(self.primary_select_all_button, self.primary_clear_all_button)
+        axes_layout.addLayout(primary_buttons)
         axes_layout.addWidget(QLabel("Secondary Y-axis channels (right):"))
         self.secondary_y_list = CheckableChannelListWidget()
         self.secondary_y_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
@@ -109,62 +114,88 @@ class AxisSelectionPanel(QFrame):
         self.secondary_y_list.setMaximumHeight(220)
         self.secondary_y_list.itemChanged.connect(self._on_secondary_item_changed)
         axes_layout.addWidget(self.secondary_y_list, stretch=1)
+        self.secondary_select_all_button = QPushButton("Select All")
+        self.secondary_select_all_button.setToolTip("Select all visible secondary Y channels in the current group.")
+        self.secondary_select_all_button.clicked.connect(self._select_visible_secondary)
+        self.secondary_clear_all_button = QPushButton("Clear All")
+        self.secondary_clear_all_button.setToolTip("Clear every selected secondary Y channel.")
+        self.secondary_clear_all_button.clicked.connect(self._clear_secondary)
+        secondary_buttons = self._button_row(self.secondary_select_all_button, self.secondary_clear_all_button)
+        axes_layout.addLayout(secondary_buttons)
         controls.addWidget(axes_group)
 
         # --- Plot Options ----------------------------------------------------
         options_group = QGroupBox("Plot Options")
-        options_layout = QHBoxLayout(options_group)
+        options_layout = QVBoxLayout(options_group)
+        options_layout.setSpacing(4)
         options_layout.addWidget(QLabel("Plot kind:"))
         self.plot_kind_combo = NoWheelComboBox()
         self.plot_kind_combo.addItems(PLOT_KINDS)
-        options_layout.addWidget(self.plot_kind_combo, stretch=1)
+        self._make_expanding(self.plot_kind_combo)
+        options_layout.addWidget(self.plot_kind_combo)
         controls.addWidget(options_group)
 
         # --- Analysis Window -------------------------------------------------
         window_group = QGroupBox("Analysis Window")
-        window_layout = QHBoxLayout(window_group)
-        window_layout.addWidget(QLabel("X range:"))
+        window_layout = QGridLayout(window_group)
+        window_layout.setHorizontalSpacing(6)
+        window_layout.setVerticalSpacing(4)
+        window_layout.addWidget(QLabel("X range:"), 0, 0, 1, 2)
+        window_layout.addWidget(QLabel("Min:"), 1, 0)
+        window_layout.addWidget(QLabel("Max:"), 1, 1)
         self.xmin_edit = QLineEdit()
         self.xmin_edit.setPlaceholderText("min")
         self.xmax_edit = QLineEdit()
         self.xmax_edit.setPlaceholderText("max")
-        window_layout.addWidget(self.xmin_edit)
-        window_layout.addWidget(self.xmax_edit)
+        self._make_expanding(self.xmin_edit)
+        self._make_expanding(self.xmax_edit)
+        window_layout.addWidget(self.xmin_edit, 2, 0)
+        window_layout.addWidget(self.xmax_edit, 2, 1)
+        window_layout.setColumnStretch(0, 1)
+        window_layout.setColumnStretch(1, 1)
         controls.addWidget(window_group)
 
-        # --- Filter / FFT ----------------------------------------------------
-        filter_group = QGroupBox("Filter / FFT")
-        filter_layout = QHBoxLayout(filter_group)
+        # --- Filter ----------------------------------------------------------
+        filter_group = QGroupBox("Filter")
+        filter_layout = QGridLayout(filter_group)
+        filter_layout.setHorizontalSpacing(6)
+        filter_layout.setVerticalSpacing(4)
         self.filter_check = QCheckBox("Low-pass filter")
-        filter_layout.addWidget(self.filter_check)
-        filter_layout.addWidget(QLabel("Cutoff Hz:"))
+        filter_layout.addWidget(self.filter_check, 0, 0, 1, 2)
+        filter_layout.addWidget(QLabel("Cutoff Hz:"), 1, 0)
+        filter_layout.addWidget(QLabel("Order:"), 1, 1)
         self.cutoff_edit = QLineEdit()
         self.cutoff_edit.setPlaceholderText("e.g. 50")
-        self.cutoff_edit.setFixedWidth(70)
-        filter_layout.addWidget(self.cutoff_edit)
-        filter_layout.addWidget(QLabel("Order:"))
         self.order_edit = QLineEdit("4")
-        self.order_edit.setFixedWidth(40)
-        filter_layout.addWidget(self.order_edit)
-        filter_layout.addStretch(1)
+        self._make_expanding(self.cutoff_edit)
+        self._make_expanding(self.order_edit)
+        filter_layout.addWidget(self.cutoff_edit, 2, 0)
+        filter_layout.addWidget(self.order_edit, 2, 1)
+        filter_layout.setColumnStretch(0, 1)
+        filter_layout.setColumnStretch(1, 1)
         controls.addWidget(filter_group)
 
         controls.addStretch(1)
         scroll.setWidget(container)
         root.addWidget(scroll, stretch=1)
 
-        # --- Actions (pinned at the bottom) ----------------------------------
-        button_row = QHBoxLayout()
-        self.generate_button = QPushButton("Generate Plot")
-        self.generate_button.setObjectName("PrimaryButton")
-        self.generate_button.clicked.connect(self.generateRequested)
-        self.fft_button = QPushButton("FFT")
-        self.fft_button.clicked.connect(self.fftRequested)
-        button_row.addWidget(self.generate_button, stretch=2)
-        button_row.addWidget(self.fft_button, stretch=1)
-        root.addLayout(button_row)
+        self.setMinimumWidth(240)
 
-        self.setMinimumWidth(280)
+    @staticmethod
+    def _button_row(left_button: QPushButton, right_button: QPushButton) -> QGridLayout:
+        layout = QGridLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setHorizontalSpacing(6)
+        for column, button in enumerate((left_button, right_button)):
+            AxisSelectionPanel._make_expanding(button)
+            layout.addWidget(button, 0, column)
+            layout.setColumnStretch(column, 1)
+        return layout
+
+    @staticmethod
+    def _make_expanding(widget: QWidget) -> None:
+        widget.setMinimumWidth(0)
+        widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
     # ------------------------------------------------------------------
     # Population
@@ -317,6 +348,37 @@ class AxisSelectionPanel(QFrame):
         if item.data(Qt.ItemDataRole.UserRole) == _GROUP_HEADER_ROLE:
             return
         self._set_checked(self._checked_secondary, item)
+
+    def _select_visible_primary(self) -> None:
+        self._select_visible_channels(self.y_list, self._checked_primary)
+
+    def _select_visible_secondary(self) -> None:
+        self._select_visible_channels(self.secondary_y_list, self._checked_secondary)
+
+    def _clear_primary(self) -> None:
+        self._checked_primary.clear()
+        self._sync_checklist_checks(self.y_list, self._checked_primary)
+
+    def _clear_secondary(self) -> None:
+        self._checked_secondary.clear()
+        self._sync_checklist_checks(self.secondary_y_list, self._checked_secondary)
+
+    def _select_visible_channels(self, widget: QListWidget, target: set[str]) -> None:
+        for row in range(widget.count()):
+            item = widget.item(row)
+            if item.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                target.add(item.text())
+        self._sync_checklist_checks(widget, target)
+
+    @staticmethod
+    def _sync_checklist_checks(widget: QListWidget, checked: set[str]) -> None:
+        widget.blockSignals(True)
+        for row in range(widget.count()):
+            item = widget.item(row)
+            if item.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                state = Qt.CheckState.Checked if item.text() in checked else Qt.CheckState.Unchecked
+                item.setCheckState(state)
+        widget.blockSignals(False)
 
     @staticmethod
     def _set_checked(target: set[str], item: QListWidgetItem) -> None:

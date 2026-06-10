@@ -146,6 +146,9 @@ class RawDataPanel(QWidget):
         self.model.set_dataframe(frame)
         self.status_label.setText(result.message)
 
+    def export_selected_data(self) -> None:
+        self._export()
+
     # ------------------------------------------------------------------
     # Editing
     # ------------------------------------------------------------------

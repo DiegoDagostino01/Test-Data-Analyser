@@ -9,12 +9,14 @@ domain/services/viewmodels layers.
 from __future__ import annotations
 
 import base64
+from collections.abc import Callable
 from typing import Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QGuiApplication, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -23,8 +25,6 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSplitter,
     QStackedWidget,
-    QTabBar,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -48,7 +48,12 @@ from .widgets.statistics_panel import StatisticsPanel
 
 
 class MainWindow(QMainWindow):
-    HEADER_GROUPS = ("PLOT", "ANALYSIS", "REQUIREMENTS", "NOTES")
+    LOWER_PLOT_INDEX = 0
+    LOWER_ANALYSIS_INDEX = 1
+    LOWER_REQUIREMENTS_INDEX = 2
+    LOWER_NOTES_INDEX = 3
+    LEFT_RAIL_INITIAL_WIDTH = 300
+    LEFT_RAIL_MINIMUM_WIDTH = 280
 
     def __init__(self, settings_manager: SettingsManager | None = None) -> None:
         super().__init__()
@@ -88,6 +93,12 @@ class MainWindow(QMainWindow):
         settings_action = edit_menu.addAction("&Settings…")
         settings_action.triggered.connect(self.open_settings)
 
+        view_menu = self.menuBar().addMenu("&View")
+        self.show_ribbon_action = view_menu.addAction("Show Ribbon")
+        self.show_ribbon_action.setCheckable(True)
+        self.show_ribbon_action.setChecked(True)
+        self.show_ribbon_action.toggled.connect(self._set_ribbon_visible)
+
         help_menu = self.menuBar().addMenu("&Help")
         workflow_action = help_menu.addAction("&Workflow Help")
         workflow_action.triggered.connect(self.show_workflow_help)
@@ -120,14 +131,15 @@ class MainWindow(QMainWindow):
 
         self.data_panel.fileLoaded.connect(self._on_file_loaded)
         self.data_panel.statusMessage.connect(self.statusBar().showMessage)
-        self.axis_panel.generateRequested.connect(self._on_generate_plot)
-        self.axis_panel.fftRequested.connect(self._on_generate_fft)
         self.maths_panel.channelsChanged.connect(self._on_channels_changed)
         self.maths_panel.statusMessage.connect(self.statusBar().showMessage)
         self.limits_panel.limitsChanged.connect(self._on_limits_changed)
         self.limits_panel.statusMessage.connect(self.statusBar().showMessage)
         self.runs_panel.comparisonRequested.connect(self._on_generate_comparison)
         self.runs_panel.statusMessage.connect(self.statusBar().showMessage)
+
+        root.addWidget(self._build_ribbon())
+        root.addWidget(self._build_collapsed_ribbon_bar())
 
         left = QWidget()
         left_layout = QVBoxLayout(left)
@@ -141,7 +153,7 @@ class MainWindow(QMainWindow):
         left_scroll.setFrameShape(QFrame.Shape.NoFrame)
         left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         left_scroll.setWidget(left)
-        left_scroll.setMinimumWidth(320)
+        left_scroll.setMinimumWidth(self.LEFT_RAIL_MINIMUM_WIDTH)
         left_scroll.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         self.left_scroll = left_scroll
 
@@ -150,9 +162,11 @@ class MainWindow(QMainWindow):
         self.plot_workspace.setMinimumHeight(260)
         lower_panel = self._build_lower_groups()
         right_splitter = QSplitter(Qt.Orientation.Vertical)
-        right_splitter.setChildrenCollapsible(False)
+        right_splitter.setChildrenCollapsible(True)
         right_splitter.addWidget(self.plot_workspace)
         right_splitter.addWidget(lower_panel)
+        right_splitter.setCollapsible(0, True)
+        right_splitter.setCollapsible(1, True)
         right_splitter.setStretchFactor(0, 3)
         right_splitter.setStretchFactor(1, 2)
         right_splitter.setSizes([520, 260])
@@ -170,18 +184,20 @@ class MainWindow(QMainWindow):
         body_splitter.addWidget(right)
         body_splitter.setStretchFactor(0, 1)
         body_splitter.setStretchFactor(1, 4)
+        body_splitter.setChildrenCollapsible(False)
+        self.body_splitter = body_splitter
 
         root.addWidget(body_splitter, stretch=1)
         self.setCentralWidget(central)
-        self.header_tab_bar.setCurrentIndex(0)
-        self._on_header_tab_changed(0)
+        body_splitter.setSizes([self.LEFT_RAIL_INITIAL_WIDTH, 1020])
+        self.lower_stack.setCurrentIndex(self.LOWER_PLOT_INDEX)
 
     def _build_header(self) -> QFrame:
         header = QFrame()
         header.setObjectName("EatonHeader")
-        header.setFixedHeight(76)
+        header.setFixedHeight(58)
         layout = QHBoxLayout(header)
-        layout.setContentsMargins(20, 6, 20, 0)
+        layout.setContentsMargins(20, 6, 20, 6)
         layout.setSpacing(14)
 
         logo = self._build_logo_label()
@@ -198,24 +214,129 @@ class MainWindow(QMainWindow):
         title_box.addWidget(subtitle)
         layout.addLayout(title_box)
         layout.addStretch(1)
-        layout.addWidget(self._build_header_tabs(), 0, Qt.AlignmentFlag.AlignBottom)
         return header
 
-    def _build_header_tabs(self) -> QTabBar:
-        """Build the PLOT / ANALYSIS / REQUIREMENTS / NOTES nav in the header.
+    def _build_ribbon(self) -> QFrame:
+        ribbon = QFrame()
+        ribbon.setObjectName("RibbonBar")
+        ribbon.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.ribbon = ribbon
+        layout = QHBoxLayout(ribbon)
+        layout.setContentsMargins(12, 5, 12, 5)
+        layout.setSpacing(8)
 
-        The tab bar drives the lower stacked panel so the graph stays visible at
-        all times and the body is freed from a separate tab strip.
-        """
-        self.header_tab_bar = QTabBar()
-        self.header_tab_bar.setObjectName("HeaderTabs")
-        self.header_tab_bar.setExpanding(False)
-        self.header_tab_bar.setDrawBase(False)
-        self.header_tab_bar.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        for label in self.HEADER_GROUPS:
-            self.header_tab_bar.addTab(label)
-        self.header_tab_bar.currentChanged.connect(self._on_header_tab_changed)
-        return self.header_tab_bar
+        self.ribbon_buttons: dict[str, QPushButton] = {}
+        for title, commands in self._ribbon_commands():
+            layout.addWidget(self._build_ribbon_group(title, commands))
+        layout.addStretch(1)
+        self.hide_ribbon_button = QPushButton("Hide Ribbon")
+        self.hide_ribbon_button.setObjectName("RibbonButton")
+        self.hide_ribbon_button.setFixedHeight(23)
+        self.hide_ribbon_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.hide_ribbon_button.setToolTip("Hide the ribbon to give more space to the plot and lower panels.")
+        self.hide_ribbon_button.clicked.connect(lambda: self.show_ribbon_action.setChecked(False))
+        layout.addWidget(self.hide_ribbon_button, 0, Qt.AlignmentFlag.AlignTop)
+        return ribbon
+
+    def _build_collapsed_ribbon_bar(self) -> QFrame:
+        bar = QFrame()
+        bar.setObjectName("CollapsedRibbonBar")
+        bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.collapsed_ribbon_bar = bar
+
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(12, 3, 12, 3)
+        layout.setSpacing(6)
+        self.show_ribbon_button = QPushButton("Show Ribbon")
+        self.show_ribbon_button.setObjectName("RibbonButton")
+        self.show_ribbon_button.setFixedHeight(23)
+        self.show_ribbon_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.show_ribbon_button.clicked.connect(lambda: self.show_ribbon_action.setChecked(True))
+        layout.addStretch(1)
+        layout.addWidget(self.show_ribbon_button, 0, Qt.AlignmentFlag.AlignRight)
+        bar.setVisible(False)
+        return bar
+
+    def _ribbon_commands(self) -> list[tuple[str, list[tuple[str, Callable[[], None]]]]]:
+        return [
+            (
+                "FILE",
+                [
+                    ("Open Data", self._open_via_panel),
+                    ("Save Session", self.save_session),
+                    ("Load Session", self.load_session),
+                    ("Export Data", self._export_selected_data),
+                ],
+            ),
+            (
+                "PLOT",
+                [
+                    ("Generate Plot", self._on_generate_plot),
+                    ("FFT", self._on_generate_fft),
+                    ("Save Plot", self._save_plot_png),
+                    ("Clear Plot", self._clear_plot),
+                    ("Runs / Comparison", lambda: self._show_plot_page(0)),
+                ],
+            ),
+            (
+                "ANALYSIS",
+                [
+                    ("Statistics", lambda: self._show_analysis_page(0)),
+                    ("Raw Data", lambda: self._show_analysis_page(1)),
+                    ("Maths Channels", lambda: self._show_analysis_page(2)),
+                    ("Cursor", lambda: self._show_plot_page(1)),
+                ],
+            ),
+            (
+                "REQUIREMENTS",
+                [
+                    ("Limits", lambda: self._show_requirements_page(0)),
+                    ("Margins", lambda: self._show_requirements_page(1)),
+                    ("Refresh", self._refresh_requirements),
+                ],
+            ),
+            (
+                "NOTES",
+                [
+                    ("Engineering Notes", lambda: self._show_lower_page(self.LOWER_NOTES_INDEX)),
+                    ("Refresh Report Text", self._refresh_engineering_notes),
+                    ("Clear Notes", self._clear_engineering_notes),
+                    ("Copy Notes", self._copy_engineering_notes),
+                ],
+            ),
+        ]
+
+    def _build_ribbon_group(
+        self,
+        title: str,
+        commands: list[tuple[str, Callable[[], None]]],
+    ) -> QFrame:
+        group = QFrame()
+        group.setObjectName("RibbonGroup")
+        group_layout = QVBoxLayout(group)
+        group_layout.setContentsMargins(6, 3, 6, 4)
+        group_layout.setSpacing(3)
+
+        label = QLabel(title)
+        label.setObjectName("RibbonGroupLabel")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        group_layout.addWidget(label)
+
+        button_grid = QGridLayout()
+        button_grid.setContentsMargins(0, 0, 0, 0)
+        button_grid.setHorizontalSpacing(4)
+        button_grid.setVerticalSpacing(3)
+        column_count = 3 if len(commands) > 4 else 2
+        for index, (text, handler) in enumerate(commands):
+            button = QPushButton(text)
+            button.setObjectName("RibbonButton")
+            button.setFixedHeight(23)
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            button.clicked.connect(handler)
+            self.ribbon_buttons[f"{title}:{text}"] = button
+            button_grid.addWidget(button, index // column_count, index % column_count)
+        group_layout.addLayout(button_grid)
+        return group
 
     def _build_logo_label(self) -> Optional[QLabel]:
         """Build the Eaton branding logo, or ``None`` if it cannot be decoded.
@@ -238,81 +359,52 @@ class MainWindow(QMainWindow):
             return None
 
     def _build_lower_groups(self) -> QWidget:
-        """Build the grouped lower panel driven by the header nav tabs.
-
-        Pages line up 1:1 with ``HEADER_GROUPS``: PLOT, ANALYSIS, REQUIREMENTS,
-        NOTES. Groups with more than one panel use a small sub-tab strip.
-        """
+        """Build the grouped lower panel controlled by the ribbon commands."""
         self.lower_stack = QStackedWidget()
         self.lower_stack.setObjectName("AnalysisStack")
+        self.lower_stack.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
 
         self.plot_group = self._build_plot_group()
-        self.analysis_tabs = self._build_group_tabs(
+        self.analysis_stack = self._build_panel_stack(
             [
-                (self.statistics_panel, "Statistics"),
-                (self.raw_data_panel, "Raw Data"),
-                (self.maths_panel, "Maths Channels"),
+                self.statistics_panel,
+                self.raw_data_panel,
+                self.maths_panel,
             ]
         )
-        self.requirements_tabs = self._build_group_tabs(
+        self.requirements_stack = self._build_panel_stack(
             [
-                (self.limits_panel, "Requirements / Limits"),
-                (self.limits_panel.summary_panel, "Margin to Limit"),
+                self.limits_panel,
+                self.limits_panel.summary_panel,
             ]
         )
 
         self.lower_stack.addWidget(self.plot_group)
-        self.lower_stack.addWidget(self.analysis_tabs)
-        self.lower_stack.addWidget(self.requirements_tabs)
+        self.lower_stack.addWidget(self.analysis_stack)
+        self.lower_stack.addWidget(self.requirements_stack)
         self.lower_stack.addWidget(self.notes_panel)
         self.lower_stack.setMinimumHeight(150)
 
         container = QFrame()
         container.setObjectName("EatonPanel")
+        container.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
         container_layout = QVBoxLayout(container)
         container_layout.setContentsMargins(8, 8, 8, 8)
         container_layout.addWidget(self.lower_stack)
         container.setMinimumHeight(170)
         return container
 
-    def _build_group_tabs(self, panels: list[tuple[QWidget, str]]) -> QTabWidget:
-        tabs = QTabWidget()
-        tabs.setObjectName("AnalysisTabs")
-        tabs.setDocumentMode(True)
-        tabs.setUsesScrollButtons(True)
-        for widget, label in panels:
-            tabs.addTab(widget, label)
-        return tabs
+    @staticmethod
+    def _build_panel_stack(panels: list[QWidget]) -> QStackedWidget:
+        stack = QStackedWidget()
+        stack.setObjectName("RibbonPanelStack")
+        stack.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
+        for widget in panels:
+            stack.addWidget(widget)
+        return stack
 
-    def _build_plot_group(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-
-        actions = QHBoxLayout()
-        self.generate_plot_button = QPushButton("Generate Plot")
-        self.generate_plot_button.setObjectName("PrimaryButton")
-        self.generate_plot_button.clicked.connect(self._on_generate_plot)
-        self.save_plot_button = QPushButton("Save Plot (.png)")
-        self.save_plot_button.clicked.connect(self._save_plot_png)
-        actions.addWidget(self.generate_plot_button)
-        actions.addWidget(self.save_plot_button)
-        actions.addStretch(1)
-        layout.addLayout(actions)
-
-        self.plot_tabs = self._build_group_tabs(
-            [
-                (self.runs_panel, "Runs / Comparison"),
-                (self.cursor_panel, "Point Compare"),
-            ]
-        )
-        layout.addWidget(self.plot_tabs, stretch=1)
-        return page
-
-    def _on_header_tab_changed(self, index: int) -> None:
-        if hasattr(self, "lower_stack"):
-            self.lower_stack.setCurrentIndex(index)
+    def _build_plot_group(self) -> QStackedWidget:
+        return self._build_panel_stack([self.runs_panel, self.cursor_panel])
 
     # ------------------------------------------------------------------
     # Theme
@@ -325,6 +417,62 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _open_via_panel(self) -> None:
         self.data_panel.open_file()
+
+    def _set_ribbon_visible(self, visible: bool) -> None:
+        if hasattr(self, "ribbon"):
+            self.ribbon.setVisible(visible)
+        if hasattr(self, "collapsed_ribbon_bar"):
+            self.collapsed_ribbon_bar.setVisible(not visible)
+        self.statusBar().showMessage("Ribbon shown." if visible else "Ribbon hidden.")
+
+    def _show_lower_page(self, index: int) -> None:
+        self.lower_stack.setCurrentIndex(index)
+
+    def _show_plot_page(self, index: int) -> None:
+        self._show_lower_page(self.LOWER_PLOT_INDEX)
+        self.plot_group.setCurrentIndex(index)
+
+    def _show_analysis_page(self, index: int) -> None:
+        self._show_lower_page(self.LOWER_ANALYSIS_INDEX)
+        self.analysis_stack.setCurrentIndex(index)
+
+    def _show_requirements_page(self, index: int) -> None:
+        self._show_lower_page(self.LOWER_REQUIREMENTS_INDEX)
+        self.requirements_stack.setCurrentIndex(index)
+
+    def _export_selected_data(self) -> None:
+        self._show_analysis_page(1)
+        self.raw_data_panel.export_selected_data()
+
+    def _refresh_requirements(self) -> None:
+        self._show_requirements_page(1)
+        self.limits_panel.refresh()
+        self.limits_panel.refresh_margins()
+        self._generate_plot()
+        self.statusBar().showMessage("Requirements and margin summary refreshed.")
+
+    def _refresh_engineering_notes(self) -> None:
+        self._show_lower_page(self.LOWER_NOTES_INDEX)
+        self.notes_panel.refresh_report()
+        self.statusBar().showMessage("Engineering notes report text refreshed.")
+
+    def _clear_engineering_notes(self) -> None:
+        self._show_lower_page(self.LOWER_NOTES_INDEX)
+        if self.notes_panel.clear_notes():
+            self.statusBar().showMessage("Engineering notes cleared.")
+
+    def _copy_engineering_notes(self) -> None:
+        self._show_lower_page(self.LOWER_NOTES_INDEX)
+        self.notes_panel.refresh_report()
+        text = self.notes_panel.report_text.toPlainText()
+        QGuiApplication.clipboard().setText(text)
+        self.statusBar().showMessage("Engineering notes copied to the clipboard.")
+
+    def _clear_plot(self) -> None:
+        result = self.plot_workspace.clear_plot()
+        self._plot_generated = False
+        self.cursor_panel.refresh()
+        self.statusBar().showMessage(result.message)
 
     def open_settings(self) -> None:
         dialog = SettingsDialog(self.vm.settings, self)

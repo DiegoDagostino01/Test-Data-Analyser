@@ -22,12 +22,13 @@ try:
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import (
         QApplication,
+        QFrame,
         QGroupBox,
         QPushButton,
         QScrollArea,
         QSizePolicy,
+        QSplitter,
         QStackedWidget,
-        QTabBar,
         QTabWidget,
     )
     from PySide6.QtTest import QTest
@@ -347,8 +348,11 @@ class EngineeringNotesPanelTests(unittest.TestCase):
 
     def test_clear_empties_editors(self) -> None:
         self.panel._editors["actions"].setPlainText("Retest.")
-        self.panel._clear()
+        self.assertTrue(self.panel.clear_notes())
         self.assertEqual(self.panel._editors["actions"].toPlainText(), "")
+
+    def test_notes_actions_are_not_embedded_in_panel(self) -> None:
+        self.assertEqual(self.panel.findChildren(QPushButton), [])
 
 
 @unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
@@ -426,6 +430,15 @@ class AxisSelectionPanelTests(unittest.TestCase):
             if widget.item(row).flags() & Qt.ItemFlag.ItemIsUserCheckable
         ]
 
+    @staticmethod
+    def _checked_texts(widget) -> list[str]:
+        return [
+            widget.item(row).text()
+            for row in range(widget.count())
+            if widget.item(row).flags() & Qt.ItemFlag.ItemIsUserCheckable
+            and widget.item(row).checkState() == Qt.CheckState.Checked
+        ]
+
     def test_y_axis_lists_are_alphabetical(self) -> None:
         self.panel.set_columns(["Time", "Zeta", "alpha", "Beta", "A10", "A2"], "Time")
         expected = ["A2", "A10", "alpha", "Beta", "Zeta"]
@@ -435,6 +448,22 @@ class AxisSelectionPanelTests(unittest.TestCase):
     def test_primary_and_secondary_lists_have_equal_sizing(self) -> None:
         self.assertEqual(self.panel.y_list.minimumHeight(), self.panel.secondary_y_list.minimumHeight())
         self.assertEqual(self.panel.y_list.maximumHeight(), self.panel.secondary_y_list.maximumHeight())
+
+    def test_compact_controls_expand_with_available_width(self) -> None:
+        self.assertLessEqual(self.panel.minimumWidth(), 240)
+        for widget in [
+            self.panel.primary_select_all_button,
+            self.panel.primary_clear_all_button,
+            self.panel.secondary_select_all_button,
+            self.panel.secondary_clear_all_button,
+            self.panel.plot_kind_combo,
+            self.panel.xmin_edit,
+            self.panel.xmax_edit,
+            self.panel.cutoff_edit,
+            self.panel.order_edit,
+        ]:
+            self.assertEqual(widget.minimumWidth(), 0)
+            self.assertEqual(widget.sizePolicy().horizontalPolicy(), QSizePolicy.Policy.Expanding)
 
     def test_secondary_selection(self) -> None:
         for row in range(self.panel.secondary_y_list.count()):
@@ -506,6 +535,8 @@ class AxisSelectionPanelTests(unittest.TestCase):
         group_titles = [group.title() for group in self.panel.findChildren(QGroupBox)]
         self.assertNotIn("Plot Labels", group_titles)
         self.assertNotIn("Axis Limits", group_titles)
+        self.assertNotIn("Filter / FFT", group_titles)
+        self.assertIn("Filter", group_titles)
 
     def test_channel_group_filter_preserves_checked_items(self) -> None:
         self.panel.set_columns(["Time", "Outlet Pressure", "Current on Phase A", "Voltage"], "Time")
@@ -527,6 +558,38 @@ class AxisSelectionPanelTests(unittest.TestCase):
             if self.panel.y_list.item(row).checkState() == Qt.CheckState.Checked
         ]
         self.assertEqual(checked, ["Current on Phase A"])
+
+    def test_primary_select_all_respects_channel_group(self) -> None:
+        self.panel.set_columns(["Time", "TC1", "TC2", "Outlet Pressure"], "Time")
+        self.panel.group_combo.setCurrentText("Temperature")
+        self.panel.primary_select_all_button.click()
+        self.assertEqual(self.panel.selected_y(), ["TC1", "TC2"])
+        self.assertEqual(self.panel.selected_secondary_y(), [])
+
+    def test_primary_clear_all_clears_hidden_group_selections(self) -> None:
+        self.panel.set_columns(["Time", "TC1", "Outlet Pressure", "Current on Phase A"], "Time")
+        self.panel.primary_select_all_button.click()
+        self.panel.group_combo.setCurrentText("Temperature")
+        self.panel.primary_clear_all_button.click()
+        self.assertEqual(self.panel.selected_y(), [])
+        self.panel.group_combo.setCurrentText("All")
+        self.assertEqual(self._checked_texts(self.panel.y_list), [])
+
+    def test_secondary_buttons_are_independent_from_primary_buttons(self) -> None:
+        self.panel.set_columns(["Time", "TC1", "Outlet Pressure"], "Time")
+        self.panel.group_combo.setCurrentText("Pressure")
+        self.panel.secondary_select_all_button.click()
+        self.assertEqual(self.panel.selected_y(), [])
+        self.assertEqual(self.panel.selected_secondary_y(), ["Outlet Pressure"])
+
+        self.panel.group_combo.setCurrentText("Temperature")
+        self.panel.primary_select_all_button.click()
+        self.assertEqual(self.panel.selected_y(), ["TC1"])
+        self.assertEqual(self.panel.selected_secondary_y(), ["Outlet Pressure"])
+
+        self.panel.secondary_clear_all_button.click()
+        self.assertEqual(self.panel.selected_y(), ["TC1"])
+        self.assertEqual(self.panel.selected_secondary_y(), [])
 
 
 class _PaddingSettingsVM:
@@ -623,6 +686,22 @@ class PlotWorkspaceParityTests(unittest.TestCase):
         self.panel.set_legend_display("panel")
         self.assertFalse(self.panel.legend_panel.isHidden())
         self.assertIsNone(self.panel.canvas.axes.get_legend())
+
+    def test_toolbar_keeps_navigation_and_promotes_edit_axis(self) -> None:
+        toolbar = self.panel.canvas.toolbar
+        tool_names = [item[0] for item in toolbar.toolitems if item[0]]
+        self.assertIn("Pan", tool_names)
+        self.assertIn("Zoom", tool_names)
+        self.assertNotIn("Subplots", tool_names)
+        self.assertNotIn("Customize", tool_names)
+        self.assertNotIn("Save", tool_names)
+
+        self.assertEqual(toolbar.edit_axis_button.text(), "Edit Axis")
+        self.assertEqual(toolbar.edit_axis_button.objectName(), "PrimaryButton")
+        self.assertIsInstance(toolbar.edit_axis_button, QPushButton)
+        action_labels = [action.text().replace("&", "") for action in toolbar.actions() if action.text()]
+        self.assertIn("Edit Axis", action_labels)
+        self.assertNotIn("Save", action_labels)
 
     def test_figure_options_includes_legend_tab(self) -> None:
         captured: dict[str, object] = {}
@@ -768,6 +847,21 @@ class PlotWorkspaceParityTests(unittest.TestCase):
     def test_save_plot_png_requires_a_plot(self) -> None:
         result = self.panel.save_plot_png("unused.png")
         self.assertFalse(result.ok)
+
+    def test_clear_plot_removes_drawn_content(self) -> None:
+        self.panel.generate_plot("Time", ["A", "B"], secondary_y=["B"])
+        self.assertEqual(len(self.panel.canvas.figure.axes), 2)
+        self.assertTrue(self.panel.canvas.axes.get_lines())
+        self.assertGreater(self.panel.legend_table.rowCount(), 0)
+
+        result = self.panel.clear_plot()
+
+        self.assertTrue(result.ok, result.message)
+        self.assertEqual(len(self.panel.canvas.figure.axes), 1)
+        self.assertFalse(self.panel.canvas.axes.get_lines())
+        self.assertFalse(self.panel.canvas.axes.collections)
+        self.assertEqual(self.panel.legend_table.rowCount(), 0)
+        self.assertFalse(self.panel.save_plot_png("unused.png").ok)
 
 
 @unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
@@ -940,7 +1034,7 @@ class OpenDataFileInitialDirTests(unittest.TestCase):
 
 @unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
 class MainWindowLayoutTests(unittest.TestCase):
-    """The main window builds offscreen with top tabs and a smooth splitter."""
+    """The main window builds offscreen with a ribbon and smooth splitter."""
 
     def _window(self) -> "MainWindow":
         directory = tempfile.mkdtemp()
@@ -954,58 +1048,218 @@ class MainWindowLayoutTests(unittest.TestCase):
         assert logo is not None  # narrow for the type checker
         self.assertFalse(logo.pixmap().isNull())
 
-    def test_splitter_is_not_collapsible(self) -> None:
+    def test_plot_and_lower_splitter_can_fully_collapse(self) -> None:
         window = self._window()
-        self.assertFalse(window.right_splitter.childrenCollapsible())
-
-    def test_panes_have_minimum_heights(self) -> None:
-        window = self._window()
+        window.show()
+        QApplication.processEvents()
+        self.assertTrue(window.right_splitter.childrenCollapsible())
+        self.assertTrue(window.right_splitter.isCollapsible(0))
+        self.assertTrue(window.right_splitter.isCollapsible(1))
         self.assertGreaterEqual(window.plot_workspace.minimumHeight(), 260)
         self.assertGreaterEqual(window.lower_stack.minimumHeight(), 150)
 
-    def test_header_nav_has_four_groups(self) -> None:
+        total_height = sum(window.right_splitter.sizes())
+        window.right_splitter.setSizes([100, total_height - 100])
+        QApplication.processEvents()
+        self.assertGreaterEqual(window.right_splitter.sizes()[0], window.plot_workspace.minimumHeight())
+
+        total_height = sum(window.right_splitter.sizes())
+        window.right_splitter.setSizes([total_height, 0])
+        QApplication.processEvents()
+        self.assertEqual(window.right_splitter.sizes()[1], 0)
+
+        total_height = sum(window.right_splitter.sizes())
+        window.right_splitter.setSizes([0, total_height])
+        QApplication.processEvents()
+        self.assertEqual(window.right_splitter.sizes()[0], 0)
+
+    def test_plot_layout_refreshes_when_splitter_shrinks(self) -> None:
         window = self._window()
-        self.assertIsInstance(window.header_tab_bar, QTabBar)
-        labels = [window.header_tab_bar.tabText(i) for i in range(window.header_tab_bar.count())]
-        self.assertEqual(labels, ["PLOT", "ANALYSIS", "REQUIREMENTS", "NOTES"])
+        window.vm.state.df = pd.DataFrame({"Time": [0.0, 1.0, 2.0], "A": [1.0, 3.0, 2.0]})
+        window.axis_panel.apply_selection(["Time", "A"], "Time", ["A"], [])
+        window.show()
+        QApplication.processEvents()
+
+        result = window._generate_plot(
+            {"title": "A Long Plot Title", "x_label": "Time (s)", "y_label": "Amplitude"}
+        )
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertTrue(result.ok, result.message)
+
+        total_height = sum(window.right_splitter.sizes())
+        window.right_splitter.setSizes(
+            [window.plot_workspace.minimumHeight(), total_height - window.plot_workspace.minimumHeight()]
+        )
+        QApplication.processEvents()
+
+        plot_canvas = window.plot_workspace.canvas
+        plot_canvas.canvas.draw()
+        renderer = plot_canvas.canvas.get_renderer()
+        figure_bbox = plot_canvas.figure.bbox
+        for artist in (plot_canvas.axes.title, plot_canvas.axes.xaxis.label):
+            bbox = artist.get_window_extent(renderer)
+            self.assertGreaterEqual(bbox.y0, figure_bbox.y0)
+            self.assertLessEqual(bbox.y1, figure_bbox.y1)
+
+    def test_ribbon_has_required_groups_and_commands(self) -> None:
+        window = self._window()
+        self.assertFalse(hasattr(window, "header_tab_bar"))
+        self.assertIsInstance(window.findChild(QFrame, "RibbonBar"), QFrame)
+        self.assertIs(window.findChild(QFrame, "RibbonBar"), window.ribbon)
+        self.assertIsInstance(window.findChild(QFrame, "CollapsedRibbonBar"), QFrame)
+        self.assertTrue(window.collapsed_ribbon_bar.isHidden())
+        self.assertTrue(window.show_ribbon_action.isChecked())
+        self.assertEqual(window.hide_ribbon_button.text(), "Hide Ribbon")
+        self.assertEqual(window.show_ribbon_button.text(), "Show Ribbon")
+        collapsed_layout = window.collapsed_ribbon_bar.layout()
+        self.assertEqual(collapsed_layout.itemAt(collapsed_layout.count() - 1).widget(), window.show_ribbon_button)
+        for key in [
+            "FILE:Open Data",
+            "FILE:Save Session",
+            "FILE:Load Session",
+            "FILE:Export Data",
+            "PLOT:Generate Plot",
+            "PLOT:FFT",
+            "PLOT:Save Plot",
+            "PLOT:Clear Plot",
+            "PLOT:Runs / Comparison",
+            "ANALYSIS:Statistics",
+            "ANALYSIS:Raw Data",
+            "ANALYSIS:Maths Channels",
+            "ANALYSIS:Cursor",
+            "REQUIREMENTS:Limits",
+            "REQUIREMENTS:Margins",
+            "REQUIREMENTS:Refresh",
+            "NOTES:Engineering Notes",
+            "NOTES:Refresh Report Text",
+            "NOTES:Clear Notes",
+            "NOTES:Copy Notes",
+        ]:
+            self.assertIn(key, window.ribbon_buttons)
         self.assertIsInstance(window.lower_stack, QStackedWidget)
         self.assertEqual(window.lower_stack.count(), 4)
         self.assertEqual(window.right_panel.layout().itemAt(0).widget(), window.right_splitter)
 
-    def test_header_nav_switches_lower_stack(self) -> None:
+    def test_ribbon_can_be_collapsed_and_restored(self) -> None:
         window = self._window()
-        window.header_tab_bar.setCurrentIndex(1)
-        self.assertIs(window.lower_stack.currentWidget(), window.analysis_tabs)
-        window.header_tab_bar.setCurrentIndex(3)
+        self.assertFalse(window.ribbon.isHidden())
+        self.assertTrue(window.collapsed_ribbon_bar.isHidden())
+
+        window.hide_ribbon_button.click()
+        self.assertTrue(window.ribbon.isHidden())
+        self.assertFalse(window.collapsed_ribbon_bar.isHidden())
+        self.assertFalse(window.show_ribbon_action.isChecked())
+        self.assertEqual(window.statusBar().currentMessage(), "Ribbon hidden.")
+
+        window.show_ribbon_button.click()
+        self.assertFalse(window.ribbon.isHidden())
+        self.assertTrue(window.collapsed_ribbon_bar.isHidden())
+        self.assertTrue(window.show_ribbon_action.isChecked())
+        self.assertEqual(window.statusBar().currentMessage(), "Ribbon shown.")
+
+        window.show_ribbon_action.setChecked(False)
+        self.assertTrue(window.ribbon.isHidden())
+        self.assertFalse(window.collapsed_ribbon_bar.isHidden())
+        window.show_ribbon_action.setChecked(True)
+        self.assertFalse(window.ribbon.isHidden())
+
+    def test_ribbon_navigation_switches_lower_stack(self) -> None:
+        window = self._window()
+        window.ribbon_buttons["ANALYSIS:Statistics"].click()
+        self.assertIs(window.lower_stack.currentWidget(), window.analysis_stack)
+        window.ribbon_buttons["NOTES:Engineering Notes"].click()
         self.assertIs(window.lower_stack.currentWidget(), window.notes_panel)
 
-    def test_plot_group_has_generate_and_save_actions(self) -> None:
+    def test_notes_ribbon_actions_refresh_and_clear_panel(self) -> None:
+        from test_data_analyser.qt_app.widgets import engineering_notes_panel as panel_module
+
+        window = self._window()
+        window.notes_panel._editors["objective"].setPlainText("Summarise this run.")
+        window.ribbon_buttons["NOTES:Refresh Report Text"].click()
+        self.assertIs(window.lower_stack.currentWidget(), window.notes_panel)
+        self.assertIn("Summarise this run.", window.notes_panel.report_text.toPlainText())
+
+        original_confirm = panel_module.qt_message_service.confirm
+        panel_module.qt_message_service.confirm = lambda *args, **kwargs: True
+        try:
+            window.ribbon_buttons["NOTES:Clear Notes"].click()
+        finally:
+            panel_module.qt_message_service.confirm = original_confirm
+        self.assertEqual(window.notes_panel._editors["objective"].toPlainText(), "")
+        self.assertEqual(window.statusBar().currentMessage(), "Engineering notes cleared.")
+
+    def test_plot_actions_moved_to_ribbon(self) -> None:
         window = self._window()
         self.assertEqual(window.lower_stack.currentIndex(), 0)
         self.assertIs(window.lower_stack.currentWidget(), window.plot_group)
-        self.assertIsInstance(window.generate_plot_button, QPushButton)
-        self.assertIsInstance(window.save_plot_button, QPushButton)
-        plot_labels = [window.plot_tabs.tabText(i) for i in range(window.plot_tabs.count())]
-        self.assertEqual(plot_labels, ["Runs / Comparison", "Point Compare"])
+        self.assertIsInstance(window.ribbon_buttons["PLOT:Generate Plot"], QPushButton)
+        self.assertIsInstance(window.ribbon_buttons["PLOT:Save Plot"], QPushButton)
+        self.assertTrue(window.ribbon_buttons["PLOT:Clear Plot"].isEnabled())
+        self.assertEqual(window.plot_group.count(), 2)
+        self.assertIs(window.plot_group.currentWidget(), window.runs_panel)
+
+    def test_lower_middle_tab_widgets_are_removed(self) -> None:
+        window = self._window()
+        self.assertEqual(window.findChildren(QTabWidget), [])
+
+    def test_duplicate_left_side_open_and_generate_buttons_are_removed(self) -> None:
+        window = self._window()
+        left_button_labels = [button.text() for button in window.data_panel.findChildren(QPushButton)]
+        left_button_labels += [button.text() for button in window.axis_panel.findChildren(QPushButton)]
+        self.assertNotIn("Open Data File…", left_button_labels)
+        self.assertNotIn("Generate Plot", left_button_labels)
+        self.assertNotIn("FFT", left_button_labels)
+
+    def test_clear_plot_ribbon_command_clears_canvas(self) -> None:
+        window = self._window()
+        window.vm.state.df = pd.DataFrame({"Time": [0.0, 1.0], "A": [1.0, 2.0]})
+        result = window.plot_workspace.generate_plot("Time", ["A"])
+        self.assertTrue(result.ok, result.message)
+        window._plot_generated = True
+
+        window.ribbon_buttons["PLOT:Clear Plot"].click()
+
+        self.assertFalse(window._plot_generated)
+        self.assertFalse(window.plot_workspace.canvas.axes.get_lines())
+        self.assertEqual(window.plot_workspace.legend_table.rowCount(), 0)
+        self.assertEqual(window.statusBar().currentMessage(), "Plot cleared.")
+
+    def test_inspector_and_quality_commands_are_removed(self) -> None:
+        window = self._window()
+        self.assertNotIn("ANALYSIS:Inspector", window.ribbon_buttons)
+        self.assertNotIn("ANALYSIS:Quality", window.ribbon_buttons)
 
     def test_analysis_group_reaches_maths_panel(self) -> None:
         window = self._window()
-        window.header_tab_bar.setCurrentIndex(1)
-        window.analysis_tabs.setCurrentIndex(2)
-        self.assertIs(window.analysis_tabs.currentWidget(), window.maths_panel)
+        window.ribbon_buttons["ANALYSIS:Maths Channels"].click()
+        self.assertIs(window.lower_stack.currentWidget(), window.analysis_stack)
+        self.assertIs(window.analysis_stack.currentWidget(), window.maths_panel)
+
+    def test_ribbon_reaches_raw_data_and_cursor_panels(self) -> None:
+        window = self._window()
+        window.ribbon_buttons["ANALYSIS:Raw Data"].click()
+        self.assertIs(window.lower_stack.currentWidget(), window.analysis_stack)
+        self.assertIs(window.analysis_stack.currentWidget(), window.raw_data_panel)
+        window.ribbon_buttons["ANALYSIS:Cursor"].click()
+        self.assertIs(window.lower_stack.currentWidget(), window.plot_group)
+        self.assertIs(window.plot_group.currentWidget(), window.cursor_panel)
+        window.ribbon_buttons["PLOT:Runs / Comparison"].click()
+        self.assertIs(window.plot_group.currentWidget(), window.runs_panel)
 
     def test_requirements_group_has_margin_sub_tab(self) -> None:
         window = self._window()
-        window.header_tab_bar.setCurrentIndex(2)
-        self.assertIs(window.lower_stack.currentWidget(), window.requirements_tabs)
-        labels = [window.requirements_tabs.tabText(i) for i in range(window.requirements_tabs.count())]
-        margin_index = labels.index("Margin to Limit")
-        window.requirements_tabs.setCurrentIndex(margin_index)
-        self.assertIs(window.requirements_tabs.currentWidget(), window.limits_panel.summary_panel)
+        window.ribbon_buttons["REQUIREMENTS:Margins"].click()
+        self.assertIs(window.lower_stack.currentWidget(), window.requirements_stack)
+        self.assertIs(window.requirements_stack.currentWidget(), window.limits_panel.summary_panel)
+        window.ribbon_buttons["REQUIREMENTS:Limits"].click()
+        self.assertIs(window.requirements_stack.currentWidget(), window.limits_panel)
 
-    def test_header_tab_styling_present(self) -> None:
+    def test_ribbon_styling_present(self) -> None:
         stylesheet = theme.build_stylesheet("light")
-        self.assertIn("QTabBar#HeaderTabs", stylesheet)
+        self.assertIn("QFrame#RibbonBar", stylesheet)
+        self.assertIn("QLabel#RibbonGroupLabel", stylesheet)
+        self.assertNotIn("QTabBar#HeaderTabs", stylesheet)
 
     def test_header_labels_use_header_background(self) -> None:
         stylesheet = theme.build_stylesheet("light")
@@ -1018,6 +1272,17 @@ class MainWindowLayoutTests(unittest.TestCase):
         self.assertTrue(window.left_scroll.widgetResizable())
         self.assertEqual(window.left_scroll.horizontalScrollBarPolicy(), Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.assertEqual(window.axis_panel.sizePolicy().verticalPolicy(), QSizePolicy.Policy.Expanding)
+
+    def test_left_rail_opens_wide_but_can_shrink(self) -> None:
+        window = self._window()
+        window.show()
+        QApplication.processEvents()
+        self.assertIsInstance(window.body_splitter, QSplitter)
+        self.assertFalse(window.body_splitter.childrenCollapsible())
+        self.assertEqual(window.left_scroll.minimumWidth(), MainWindow.LEFT_RAIL_MINIMUM_WIDTH)
+        self.assertLess(window.left_scroll.minimumWidth(), MainWindow.LEFT_RAIL_INITIAL_WIDTH)
+        self.assertGreaterEqual(window.body_splitter.sizes()[0], MainWindow.LEFT_RAIL_INITIAL_WIDTH - 5)
+        self.assertEqual(window.lower_stack.sizePolicy().horizontalPolicy(), QSizePolicy.Policy.Ignored)
 
     def test_load_session_uses_remembered_session_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

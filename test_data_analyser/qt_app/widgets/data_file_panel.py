@@ -12,7 +12,6 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QPushButton,
     QVBoxLayout,
     QWidget,
 )
@@ -37,11 +36,6 @@ class DataFilePanel(QFrame):
         heading = QLabel("Data File")
         heading.setObjectName("PanelHeading")
         layout.addWidget(heading)
-
-        open_button = QPushButton("Open Data File…")
-        open_button.setObjectName("PrimaryButton")
-        open_button.clicked.connect(self.open_file)
-        layout.addWidget(open_button)
 
         self.file_label = QLabel("No file loaded.")
         self.file_label.setObjectName("PlaceholderText")

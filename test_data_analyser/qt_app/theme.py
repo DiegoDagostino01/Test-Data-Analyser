@@ -43,6 +43,26 @@ def build_stylesheet(theme_name: str = "light") -> str:
         background-color: {EATON_HEADER_BLUE};
         border: none;
     }}
+    QFrame#RibbonBar {{
+        background-color: {card};
+        border-top: 1px solid {border};
+        border-bottom: 1px solid {border};
+    }}
+    QFrame#CollapsedRibbonBar {{
+        background-color: {card};
+        border-top: 1px solid {border};
+        border-bottom: 1px solid {border};
+    }}
+    QFrame#RibbonGroup {{
+        background-color: {card};
+        border-right: 1px solid {border};
+    }}
+    QLabel#RibbonGroupLabel {{
+        color: {secondary};
+        font-size: 7.5pt;
+        font-weight: 700;
+        letter-spacing: 0px;
+    }}
     QLabel#EatonHeaderTitle {{
         background-color: {EATON_HEADER_BLUE};
         color: {EATON_WHITE};
@@ -99,6 +119,16 @@ def build_stylesheet(theme_name: str = "light") -> str:
     QPushButton#PrimaryButton:hover {{
         background-color: {EATON_DARK_BLUE};
     }}
+    QPushButton#RibbonButton {{
+        min-width: 62px;
+        padding: 2px 7px;
+        font-size: 8.5pt;
+        border-radius: 3px;
+    }}
+    QPushButton#RibbonButton:disabled {{
+        color: {secondary};
+        background-color: {bg};
+    }}
     QComboBox, QLineEdit, QPlainTextEdit, QTextEdit {{
         background-color: {entry};
         color: {text};
@@ -138,40 +168,6 @@ def build_stylesheet(theme_name: str = "light") -> str:
     }}
     QTabBar::tab:selected {{
         background-color: {EATON_BLUE};
-        color: {EATON_WHITE};
-    }}
-    QTabWidget#AnalysisTabs::pane {{
-        background-color: {card};
-        border: 1px solid {border};
-        border-radius: 4px;
-        top: -1px;
-    }}
-    QTabWidget#AnalysisTabs QTabBar::tab {{
-        border: 1px solid {border};
-        border-bottom: none;
-        border-top-left-radius: 3px;
-        border-top-right-radius: 3px;
-    }}
-    QTabBar#HeaderTabs {{
-        background-color: {EATON_HEADER_BLUE};
-    }}
-    QTabBar#HeaderTabs::tab {{
-        background-color: transparent;
-        color: rgba(255, 255, 255, 0.72);
-        padding: 8px 18px;
-        margin-right: 2px;
-        border: none;
-        border-bottom: 3px solid transparent;
-        font-size: 10.5pt;
-        font-weight: 600;
-    }}
-    QTabBar#HeaderTabs::tab:selected {{
-        background-color: transparent;
-        color: {EATON_WHITE};
-        border-bottom: 3px solid {EATON_WHITE};
-    }}
-    QTabBar#HeaderTabs::tab:hover {{
-        background-color: transparent;
         color: {EATON_WHITE};
     }}
     QStatusBar {{

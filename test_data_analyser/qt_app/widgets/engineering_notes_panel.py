@@ -14,10 +14,8 @@ from typing import Callable, Optional
 
 from PySide6.QtWidgets import (
     QFrame,
-    QHBoxLayout,
     QLabel,
     QPlainTextEdit,
-    QPushButton,
     QScrollArea,
     QVBoxLayout,
     QWidget,
@@ -39,24 +37,11 @@ class EngineeringNotesPanel(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
-        layout.addLayout(self._build_toolbar())
         layout.addWidget(self._build_scroll_area(), stretch=1)
 
     # ------------------------------------------------------------------
     # Construction
     # ------------------------------------------------------------------
-    def _build_toolbar(self) -> QHBoxLayout:
-        toolbar = QHBoxLayout()
-        refresh_button = QPushButton("Refresh Report Text")
-        refresh_button.setObjectName("PrimaryButton")
-        refresh_button.clicked.connect(self.refresh_report)
-        clear_button = QPushButton("Clear Notes")
-        clear_button.clicked.connect(self._clear)
-        toolbar.addWidget(refresh_button)
-        toolbar.addWidget(clear_button)
-        toolbar.addStretch(1)
-        return toolbar
-
     def _build_scroll_area(self) -> QScrollArea:
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -137,6 +122,19 @@ class EngineeringNotesPanel(QWidget):
             self.vm.report_text(file_name=file_name, x_axis=x_axis, y_axis=y_axis)
         )
 
+    def clear_notes(self) -> bool:
+        if not qt_message_service.confirm(
+            self, "Clear Engineering Notes", "Clear all structured engineering note fields?"
+        ):
+            return False
+        self.vm.clear()
+        for editor in self._editors.values():
+            editor.blockSignals(True)
+            editor.clear()
+            editor.blockSignals(False)
+        self.refresh_report()
+        return True
+
     # ------------------------------------------------------------------
     # Actions
     # ------------------------------------------------------------------
@@ -144,15 +142,3 @@ class EngineeringNotesPanel(QWidget):
         editor = self._editors.get(key)
         if editor is not None:
             self.vm.update_field(key, editor.toPlainText())
-
-    def _clear(self) -> None:
-        if not qt_message_service.confirm(
-            self, "Clear Engineering Notes", "Clear all structured engineering note fields?"
-        ):
-            return
-        self.vm.clear()
-        for editor in self._editors.values():
-            editor.blockSignals(True)
-            editor.clear()
-            editor.blockSignals(False)
-        self.refresh_report()

@@ -1,6 +1,6 @@
 {
   "plot_appearance": {
-    "default_line_width": 2.5,
+    "default_line_width": 1.5,
     "colour_cycle": "eaton",
     "available_colour_cycles": [
       "eaton",

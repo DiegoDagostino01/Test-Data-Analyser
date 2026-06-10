@@ -164,6 +164,17 @@ class PlotWorkspace(QWidget):
                 return True
         return False
 
+    def clear_plot(self) -> OperationResult:
+        self._last_plot_data = None
+        self._last_x_col = ""
+        self._remove_cursor_artists()
+        self._set_cursor_data(None)
+        self.canvas.clear()
+        self._update_legend_table([], [])
+        self.legend_panel.setVisible(self._legend_display == LEGEND_DISPLAY_PANEL)
+        self.canvas.draw()
+        return OperationResult.success("Plot cleared.")
+
     @contextmanager
     def _legend_export_context(self):
         """Temporarily draw the side-panel legend onto the figure for image export.

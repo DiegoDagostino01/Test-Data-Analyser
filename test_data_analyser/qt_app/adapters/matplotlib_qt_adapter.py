@@ -14,7 +14,8 @@ from matplotlib.backends.backend_qt import NavigationToolbar2QT
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.backends.qt_editor import _formlayout, figureoptions
 from matplotlib.figure import Figure
-from PySide6.QtWidgets import QInputDialog, QMessageBox, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QInputDialog, QMessageBox, QPushButton, QVBoxLayout, QWidget
 
 LEGEND_DISPLAY_PANEL = "panel"
 LEGEND_DISPLAY_GRAPH = "graph"
@@ -27,11 +28,26 @@ LEGEND_DISPLAY_CHOICES = (
 class LegendAwareNavigationToolbar(NavigationToolbar2QT):
     """Navigation toolbar that adds Test Data Analyser legend options."""
 
+    toolitems = tuple(
+        item
+        for item in NavigationToolbar2QT.toolitems
+        if item[0] not in {"Subplots", "Customize", "Save"}
+    )
+
     def __init__(self, canvas, parent=None, coordinates: bool = True) -> None:
         super().__init__(canvas, parent, coordinates)
         self._legend_display_getter: Callable[[], str] | None = None
         self._legend_display_setter: Callable[[str], None] | None = None
         self._export_preparer: Callable[[], Any] | None = None
+        self.addSeparator()
+        self.edit_axis_button = QPushButton("Edit Axis")
+        self.edit_axis_button.setObjectName("PrimaryButton")
+        self.edit_axis_button.setToolTip("Edit plot title, axis labels, limits, and legend placement.")
+        self.edit_axis_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.edit_axis_button.clicked.connect(self.edit_parameters)
+        self.edit_axis_action = self.addWidget(self.edit_axis_button)
+        self.edit_axis_action.setText("Edit Axis")
+        self.edit_axis_action.setToolTip(self.edit_axis_button.toolTip())
 
     def set_legend_display_controller(
         self,
@@ -153,6 +169,7 @@ class MatplotlibCanvas(QWidget):
         self.canvas = FigureCanvasQTAgg(self.figure)
         self.toolbar = LegendAwareNavigationToolbar(self.canvas, self)
         self.axes = self.figure.add_subplot(111)
+        self.canvas.mpl_connect("resize_event", self._on_canvas_resize)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -172,3 +189,8 @@ class MatplotlibCanvas(QWidget):
             except Exception:
                 pass
         self.canvas.draw_idle()
+
+    def _on_canvas_resize(self, _event) -> None:
+        if self.canvas.width() <= 1 or self.canvas.height() <= 1 or not self.figure.axes:
+            return
+        self.draw()
