@@ -43,7 +43,7 @@ skill changes.
 | --- | --- |
 | `python-refactor-safely` | Refactoring layered Python modules or moving responsibilities. |
 | `pyside6-qt-gui-maintainer` | Modifying Qt widgets, layouts, signals, dialogs, or Matplotlib canvas code. |
-| `plotting-engine-separation` | Changing plotting, FFT, legends, axis limits, figure export, or plot data preparation. |
+| `plotting-engine-separation` | Changing plotting, legends, axis limits, figure export, or plot data preparation. |
 | `pandas-data-cleaning-analysis` | Working on CSV/Excel loading, numeric coercion, raw data, filtering, statistics, or export. |
 | `code-review-bug-hunter` | Reviewing changed Python/Qt code for regressions. |
 | `python-test-writer` | Adding or updating the `unittest`-based test suite. |

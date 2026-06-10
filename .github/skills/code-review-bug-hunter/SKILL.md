@@ -20,7 +20,7 @@ Review changes as a strict Python/Qt code reviewer.
 - Changed behaviour not requested by the prompt.
 - Stale Tkinter or `run_app.py` references in active code or guidance.
 - Session/profile state inconsistencies and generated-plot restore regressions.
-- Secondary Y-axis, legend, axis limit, limit-line, FFT, cursor compare, save
+- Secondary Y-axis, legend, axis limit, limit-line, cursor compare, save
   figure, raw data/export, maths channel, and runs comparison regressions.
 - Missing tests for changed shared logic.
 

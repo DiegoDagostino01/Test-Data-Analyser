@@ -86,8 +86,6 @@ must not embed in a canvas or show dialogs; they return values or an
   drawable plot/comparison series preparation (no Matplotlib canvas work).
 - `plot_render_service.py` — Matplotlib-aware colour-cycle resolution and the
   secondary-axis cycle (no Qt).
-- `fft_service.py` — window functions, averaged FFT spectra, and prepared FFT
-  series for rendering.
 - `raw_data_service.py` — selected-data framing/filtering, blank-row removal,
   row-limit parsing, and edit coercion.
 - `run_comparison_service.py` — enabled-run filtering, common-X range,
@@ -110,8 +108,8 @@ message boxes.
   manager).
 - `data_loading_vm.py` — file/sheet loading into the state.
 - `plot_workspace_vm.py` — plot-data preparation, selected ranges, statistics,
-  prepared plot/comparison/FFT series, and FFT (pulls numeric series from the
-  state directly).
+  and prepared plot/comparison series (pulls numeric series from the state
+  directly).
 - `raw_data_vm.py` — Raw Data selection/filtering, row-limit parsing, display
   frame preparation, edit coercion, cell edits with undo, and selected-data
   export.
@@ -186,7 +184,7 @@ All tests are framework-independent and run headless via
 
 - `tests/test_domain_models.py` — `from_dict`/`to_dict` round-trips and session
   normalisation.
-- `tests/test_services.py` — statistics, limits, maths formulas, FFT, raw data,
+- `tests/test_services.py` — statistics, limits, maths formulas, raw data,
   run comparison, and cursor logic.
 - `tests/test_viewmodels.py` — every viewmodel, plus session save/restore.
 - `tests/test_qt_adapters.py` — the table models, every migrated panel, the axis

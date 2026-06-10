@@ -53,7 +53,7 @@ becomes unit-testable without a GUI.
   engineering notes, runs, and calculated channels, each with
   `from_dict()`/`to_dict()` that preserve on-disk key names.
 - **services/** — reusable statistics, limits, maths-channel, plotting-data,
-  FFT, raw-data, run-comparison, settings, and session logic. May use
+  raw-data, run-comparison, settings, and session logic. May use
   numpy/pandas/Matplotlib but never a UI toolkit.
 - **viewmodels/** — UI-independent coordinators over `AppState` + services;
   return `OperationResult`; never touch Tk/Qt, dialogs, or message boxes.
@@ -91,7 +91,6 @@ service, and apply the result.
 | `maths_channel_service.py` | `calculated_channels.py` | restricted-AST `MathsChannelEvaluator`, allowed functions, definition normalisation |
 | `plotting_data_service.py` | `plotting.py` | analysis-window data preparation (no Matplotlib) |
 | `plot_render_service.py` | `plotting.py` | Matplotlib colour-cycle resolution (no Tk/Qt) |
-| `fft_service.py` | `plotting.py` | window functions + averaged FFT spectra |
 | `raw_data_service.py` | `raw_data*.py` | selected-data framing/filtering, row-limit parsing, edit coercion |
 | `run_comparison_service.py` | `multi_run.py` | enabled runs, common-X range, comparison stats, run serialisation |
 | `settings_service.py` | (new) | safe settings access + theme resolution |
@@ -135,7 +134,7 @@ plus the settings dialog.
   `QAbstractTableModel`), `matplotlib_qt_adapter.py` (owns `FigureCanvasQTAgg` +
   toolbar), `qt_file_dialogs.py`, `qt_message_service.py`.
 - **Widgets** (`qt_app/widgets/`): `data_file_panel.py`, `axis_selection_panel.py`,
-  `plot_workspace.py` (Matplotlib Qt canvas + FFT), `statistics_panel.py`
+  `plot_workspace.py` (Matplotlib Qt canvas), `statistics_panel.py`
   (`QTableView` + `PandasTableModel`), `settings_dialog.py`.
 - `main_window.py` now wires these panels together; remaining lower tabs are
   labelled placeholders.
@@ -252,8 +251,8 @@ Test Data Analysis/
 │  │  ├─ plot_profile.py  run_model.py  session.py  settings.py
 │  ├─ services/                   # framework-independent logic
 │  │  ├─ statistics_service.py  limits_service.py  maths_channel_service.py
-│  │  ├─ plotting_data_service.py  plot_render_service.py  fft_service.py
-│  │  ├─ raw_data_service.py  run_comparison_service.py  cursor_service.py
+│  │  ├─ plotting_data_service.py  plot_render_service.py  raw_data_service.py
+│  │  ├─ run_comparison_service.py  cursor_service.py
 │  │  ├─ settings_service.py  session_service.py  results.py
 │  ├─ viewmodels/                 # UI-independent coordinators
 │  │  ├─ app_state.py  main_window_vm.py  data_loading_vm.py
@@ -309,7 +308,7 @@ All tests are framework-independent and run without a visible GUI.
 | Suite | Focus | Count |
 | --- | --- | --- |
 | `test_domain_models.py` | `from_dict`/`to_dict` round-trips, session normalisation | 18 |
-| `test_services.py` | statistics, limits, maths formulas, FFT, raw-data, run comparison, cursor | 35 |
+| `test_services.py` | statistics, limits, maths formulas, raw-data, run comparison, cursor | 35 |
 | `test_viewmodels.py` | data loading, plot workspace, maths channels, runs (+ CRUD), raw-data edit/undo/export, limits CRUD, engineering notes, cursor compare, session save/restore | 76 |
 | `test_qt_adapters.py` | table models, every migrated panel, axis controls, plot parity, cursor wiring (offscreen) | 47 |
 | **Total** | | **176** |

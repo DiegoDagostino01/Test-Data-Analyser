@@ -31,7 +31,7 @@ Rule: small safe steps, keep Tk app runnable, no UI imports in domain/services.
   - results.py (OperationResult), statistics_service, limits_service (LimitMarginSummary/Row),
     maths_channel_service (MathsChannelEvaluator + normalise_calculated_channel_definitions),
     plotting_data_service (apply_analysis_window), plot_render_service (resolve_plot_colours,
-    secondary_colour_cycle; matplotlib OK), fft_service (fft_window/fft_spectrum),
+    secondary_colour_cycle; matplotlib OK),
     raw_data_service (parse_row_limit/select_raw_data_frame/coerce_raw_edit_value),
     run_comparison_service (enabled_runs/common_x_range/channel_frame/run_channel_statistics/serialise_runs).
 - Mixins are now THIN WRAPPERS: analysis.py, limits.py, calculated_channels.py, plotting.py,
@@ -87,14 +87,14 @@ Rule: small safe steps, keep Tk app runnable, no UI imports in domain/services.
   from matplotlib.backends.backend_qtagg), qt_file_dialogs.py, qt_message_service.py (info/warning/error/confirm/show_result).
 - qt_app/widgets/: data_file_panel.py (DataFilePanel: open+sheet combo via DataLoadingViewModel, signals
   fileLoaded(list)/statusMessage), axis_selection_panel.py (X combo + checkable Y QListWidget + analysis window
-  + Generate/FFT signals), plot_workspace.py (PlotWorkspace: renders line plot + FFT from PlotWorkspaceViewModel,
+  + Generate signals), plot_workspace.py (PlotWorkspace: renders line plot from PlotWorkspaceViewModel,
   colours via plot_render_service; returns OperationResult), statistics_panel.py (QTableView+PandasTableModel),
   settings_dialog.py (focused dialog via SettingsViewModel get/set/save, FIELD_SPEC tabs, theme re-applies on save).
 - main_window.py REWRITTEN: wires panels (load->axes->plot->stats) + Edit>Settings. Lower tabs: Statistics real,
   others placeholders (Raw Data, Maths, Limits, Notes, Runs).
 - Tests: tests/test_qt_adapters.py (9 tests, skip if no PySide6, QT_QPA_PLATFORM=offscreen in setUpModule).
   Total suite now 95 tests, all pass. Both apps launch clean. E2E offscreen: load CSV->2 Y->plot=2 lines->
-  stats 2x9->FFT ok.
+  stats 2x9 ok.
 - Test count history: Ph1=18, Ph2=49, Ph3=86, Ph5inc1=95.
 
 ## Done — Phase 5 increment 2 (Raw Data panel)
@@ -239,7 +239,7 @@ Rule: small safe steps, keep Tk app runnable, no UI imports in domain/services.
   Exported from viewmodels/__init__; main_window_vm self.cursor_compare=CursorCompareViewModel().
 - plot_workspace OWNS the mpl event wiring: cursorPointsChanged=Signal(); __init__ mpl_connect button_press+key_press;
   set_cursor_viewmodel/set_point_compare_enabled/clear_cursor_markers; _on_canvas_click (point_compare & button==1 & inaxes:
-  vm.lock_at + axvline + emit), _on_canvas_key (escape->clear+emit); generate_plot->_set_cursor_data(data), comparison/fft->
+  vm.lock_at + axvline + emit), _on_canvas_key (escape->clear+emit); generate_plot->_set_cursor_data(data), comparison->
   _set_cursor_data(None). cursor_compare_panel.py — CursorComparePanel(cursor_vm,plot_workspace): Point Compare QCheckBox->
   plot.set_point_compare_enabled, Clear Points, "Use P1–P2 as Analysis Window"->analysisWindowRequested signal, table. Connects
   plot.cursorPointsChanged->refresh. main_window: 7th tab "Point Compare", analysisWindowRequested->_on_cursor_window (set axis xmin/xmax+replot).
@@ -302,9 +302,9 @@ Rule: small safe steps, keep Tk app runnable, no UI imports in domain/services.
 - SETTINGS: added DEFAULT_SETTINGS["data_import"]["last_data_directory"]="" (merge-with-defaults auto-adds to
   existing settings.json on load). qt_file_dialogs.open_data_file gained `initial_dir=""` 2nd param (back-compat).
 - AXIS PANEL regrouped: heading "Plot Controls" + QScrollArea(widgetResizable) holding 4 QGroupBox sections
-  (Axes & Channels / Plot Options / Analysis Window / Filter / FFT); Generate Plot(primary)+FFT buttons PINNED
+  (Axes & Channels / Plot Options / Analysis Window / Filter). Generate Plot(primary) button PINNED
   below scroll. All attribute names preserved (x_combo,y_list,secondary_y_list,plot_kind_combo,xmin/xmax_edit,
-  filter_check,cutoff/order_edit,generate/fft_button) so existing tests + main_window refs still work. Added
+  filter_check,cutoff/order_edit) so existing tests + main_window refs still work. Added
   QGroupBox style to theme.py (Eaton dark-blue titles).
 - HEADER LOGO restored: main_window._build_logo_label() decodes EATON_LOGO_PNG_BASE64 (core/config) via base64+
   QPixmap.loadFromData, scaledToHeight(38). Returns Optional[QLabel]; None->text-only fallback. Added to

@@ -2,20 +2,25 @@
 
 Owns the ``FigureCanvasQTAgg`` and ``NavigationToolbar2QT`` so the rest of the Qt
 UI does not import the Matplotlib backends directly. This adapter is responsible
-only for embedding/displaying a Matplotlib figure; data preparation lives in the
-services/viewmodels and plot styling lives in ``plot_render_service``.
+only for embedding/displaying a Matplotlib figure and applying theme surfaces;
+data preparation lives in the services/viewmodels and series styling lives in
+``plot_render_service``.
 """
 from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any
 
+import numpy as np
 from matplotlib.backends.backend_qt import NavigationToolbar2QT
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.backends.qt_editor import _formlayout, figureoptions
 from matplotlib.figure import Figure
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QInputDialog, QMessageBox, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QInputDialog, QMessageBox, QPushButton, QVBoxLayout, QWidget
+
+from ...core.config import theme_palette
+from ...core.utils import classify_channel_name
 
 LEGEND_DISPLAY_PANEL = "panel"
 LEGEND_DISPLAY_GRAPH = "graph"
@@ -23,6 +28,7 @@ LEGEND_DISPLAY_CHOICES = (
     (LEGEND_DISPLAY_PANEL, "Right-side Legend panel"),
     (LEGEND_DISPLAY_GRAPH, "Inside graph"),
 )
+_AUTO_LEGEND_FIELD = "(Re-)Generate automatic legend"
 
 
 class LegendAwareNavigationToolbar(NavigationToolbar2QT):
@@ -39,6 +45,7 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
         self._legend_display_getter: Callable[[], str] | None = None
         self._legend_display_setter: Callable[[str], None] | None = None
         self._export_preparer: Callable[[], Any] | None = None
+        self._axis_padding_getter: Callable[[], dict[str, object]] | None = None
         self.addSeparator()
         self.edit_axis_button = QPushButton("Edit Axis")
         self.edit_axis_button.setObjectName("PrimaryButton")
@@ -64,6 +71,9 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
         onto the figure so it is captured in the saved image.
         """
         self._export_preparer = preparer
+
+    def set_axis_padding_getter(self, getter: Callable[[], dict[str, object]]) -> None:
+        self._axis_padding_getter = getter
 
     def save_figure(self, *args):
         preparer = self._export_preparer
@@ -107,10 +117,7 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
         )
 
     def _figure_edit_with_legend(self, axes) -> None:
-        if self._legend_display_getter is None or self._legend_display_setter is None:
-            figureoptions.figure_edit(axes, self)
-            return
-
+        include_legend = self._legend_display_getter is not None and self._legend_display_setter is not None
         original_fedit = _formlayout.fedit
 
         def fedit_with_legend(
@@ -121,27 +128,255 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
             parent=None,
             apply=None,
         ):
+            form_data, removed_auto_legend = self._without_auto_legend_checkbox(data) if include_legend else (data, False)
+
             def apply_with_legend(form_data: list[Any]) -> None:
                 form_sections = list(form_data)
-                legend_data = form_sections.pop() if form_sections else []
+                legend_data = form_sections.pop() if include_legend and form_sections else []
                 if apply is not None:
-                    apply(form_sections)
-                self._apply_legend_form_data(legend_data)
+                    apply(self._restore_auto_legend_checkbox(form_sections, removed_auto_legend))
+                if include_legend:
+                    self._apply_legend_form_data(legend_data)
 
-            return original_fedit(
-                [*data, (self._legend_form_data(), "Legend", "")],
+            result = original_fedit(
+                [*form_data, (self._legend_form_data(), "Legend", "")] if include_legend else form_data,
                 title=title,
                 comment=comment,
                 icon=icon,
                 parent=parent,
                 apply=apply_with_legend,
             )
+            self._install_axis_helper_buttons(axes)
+            return result
 
         _formlayout.fedit = fedit_with_legend
         try:
             figureoptions.figure_edit(axes, self)
         finally:
             _formlayout.fedit = original_fedit
+
+    @staticmethod
+    def _without_auto_legend_checkbox(data) -> tuple[list, bool]:
+        form_data = list(data)
+        if not form_data:
+            return form_data, False
+        axes_section = form_data[0]
+        if not (isinstance(axes_section, tuple) and len(axes_section) == 3):
+            return form_data, False
+        fields, title, comment = axes_section
+        if title != "Axes" or not isinstance(fields, list) or not fields:
+            return form_data, False
+        last_field = fields[-1]
+        if not (isinstance(last_field, tuple) and len(last_field) >= 2 and last_field[0] == _AUTO_LEGEND_FIELD):
+            return form_data, False
+        form_data[0] = (list(fields[:-1]), title, comment)
+        return form_data, True
+
+    @staticmethod
+    def _restore_auto_legend_checkbox(form_sections: list[Any], removed: bool) -> list[Any]:
+        if not removed or not form_sections or not isinstance(form_sections[0], list):
+            return form_sections
+        restored = list(form_sections)
+        restored[0] = [*form_sections[0], False]
+        return restored
+
+    def _install_axis_helper_buttons(self, axes) -> None:
+        dialog = getattr(self, "_fedit_dialog", None)
+        formwidget = getattr(dialog, "formwidget", None)
+        widgetlist = getattr(formwidget, "widgetlist", [])
+        if not widgetlist:
+            return
+        axes_form = widgetlist[0]
+        if getattr(axes_form, "_tda_axis_helpers_installed", False):
+            return
+        fields = self._axes_form_fields(axes_form)
+        if not fields.get("title"):
+            return
+
+        helper_row = QWidget(axes_form)
+        helper_layout = QHBoxLayout(helper_row)
+        helper_layout.setContentsMargins(0, 0, 0, 0)
+        helper_layout.setSpacing(6)
+
+        auto_label_button = QPushButton("Auto Label", helper_row)
+        auto_label_button.setObjectName("AxisAutoLabelButton")
+        auto_label_button.setToolTip("Generate the plot title and axis labels from the plotted X and Y channels.")
+        auto_label_button.clicked.connect(lambda: self._auto_label_axes_form(axes, axes_form))
+        helper_layout.addWidget(auto_label_button)
+
+        auto_fit_x_button = QPushButton("Auto-fit X", helper_row)
+        auto_fit_x_button.setObjectName("AxisAutoFitXButton")
+        auto_fit_x_button.setToolTip("Set X-axis limits to the plotted data range using the configured X padding.")
+        auto_fit_x_button.clicked.connect(lambda: self._auto_fit_axis_form(axes, axes_form, "x"))
+        helper_layout.addWidget(auto_fit_x_button)
+
+        auto_fit_y_button = QPushButton("Auto-fit Y", helper_row)
+        auto_fit_y_button.setObjectName("AxisAutoFitYButton")
+        auto_fit_y_button.setToolTip("Set Y-axis limits to the plotted data range using the configured Y padding.")
+        auto_fit_y_button.clicked.connect(lambda: self._auto_fit_axis_form(axes, axes_form, "y"))
+        helper_layout.addWidget(auto_fit_y_button)
+        helper_layout.addStretch(1)
+
+        axes_form.formlayout.addRow("Helpers", helper_row)
+        axes_form._tda_axis_helpers_installed = True
+
+    @staticmethod
+    def _axes_form_fields(axes_form) -> dict[str, Any]:
+        fields: dict[str, Any] = {"axes": {}}
+        current_axis = ""
+        for (label, value), widget in zip(getattr(axes_form, "data", []), getattr(axes_form, "widgets", [])):
+            if label == "Title":
+                fields["title"] = widget
+                continue
+            if label is None and isinstance(value, str):
+                if "X-Axis" in value:
+                    current_axis = "x"
+                    fields["axes"].setdefault(current_axis, {})
+                elif "Y-Axis" in value:
+                    current_axis = "y"
+                    fields["axes"].setdefault(current_axis, {})
+                continue
+            if current_axis and label in {"Min", "Max", "Label", "Scale"}:
+                fields["axes"].setdefault(current_axis, {})[str(label).lower()] = widget
+        return fields
+
+    def _auto_label_axes_form(self, axes, axes_form) -> None:
+        fields = self._axes_form_fields(axes_form)
+        title, x_label, y_label = self._auto_labels_for_axes(axes)
+        self._set_field_text(fields.get("title"), title)
+        axis_fields = fields.get("axes", {})
+        self._set_field_text(axis_fields.get("x", {}).get("label"), x_label)
+        self._set_field_text(axis_fields.get("y", {}).get("label"), y_label)
+        self._update_dialog_buttons(axes_form)
+
+    def _auto_fit_axis_form(self, axes, axes_form, axis_name: str) -> None:
+        fields = self._axes_form_fields(axes_form)
+        axis_fields = fields.get("axes", {}).get(axis_name, {})
+        if not axis_fields:
+            return
+        lower, upper = self._auto_fit_limits(axes, axis_name)
+        self._set_field_text(axis_fields.get("min"), self._format_limit(lower))
+        self._set_field_text(axis_fields.get("max"), self._format_limit(upper))
+        self._update_dialog_buttons(axes_form)
+
+    @staticmethod
+    def _set_field_text(widget, text: str) -> None:
+        if hasattr(widget, "setText"):
+            widget.setText(text)
+
+    def _auto_labels_for_axes(self, axes) -> tuple[str, str, str]:
+        x_label = (axes.get_xlabel() or "X Axis").strip()
+        y_labels = self._series_labels_for_axes(axes)
+        y_label = self._summarise_series_labels(y_labels) or (axes.get_ylabel() or "Selected Signals").strip()
+        title = f"{y_label} vs {x_label}" if x_label and y_label else "Engineering Test Data"
+        return title, x_label, y_label
+
+    @staticmethod
+    def _series_labels_for_axes(axes) -> list[str]:
+        labels: list[str] = []
+        artists = [*axes.get_lines(), *axes.collections]
+        for artist in artists:
+            label_getter = getattr(artist, "get_label", None)
+            label = str(label_getter() if callable(label_getter) else "").strip()
+            clean = LegendAwareNavigationToolbar._clean_series_label(label)
+            if clean and clean not in labels:
+                labels.append(clean)
+        return labels
+
+    @staticmethod
+    def _clean_series_label(label: str) -> str:
+        if not label or label.startswith("_"):
+            return ""
+        limit_suffixes = ("[Upper Limit]", "[Lower Limit]", "[Reference Line]")
+        if any(label.endswith(suffix) for suffix in limit_suffixes):
+            return ""
+        label = label.removesuffix(" [Right Y]")
+        if " | LP " in label:
+            label = label.split(" | LP ", 1)[0]
+        return label.strip()
+
+    @staticmethod
+    def _summarise_series_labels(labels: list[str]) -> str:
+        if not labels:
+            return ""
+        if len(labels) == 1:
+            return labels[0]
+        groups = [classify_channel_name(label) for label in labels]
+        meaningful_groups = [group for group in groups if group not in {"Other Numeric", "Non-numeric / Metadata"}]
+        if meaningful_groups and len(set(meaningful_groups)) == 1:
+            return meaningful_groups[0]
+        if len(labels) <= 3:
+            return ", ".join(labels)
+        return "Selected Signals"
+
+    def _auto_fit_limits(self, axes, axis_name: str) -> tuple[float, float]:
+        values = self._finite_axis_values(axes, axis_name)
+        if not values:
+            current_lower, current_upper = getattr(axes, f"get_{axis_name}lim")()
+            return float(current_lower), float(current_upper)
+        lower = min(values)
+        upper = max(values)
+        span = upper - lower
+        fraction = self._axis_padding_fraction(axis_name)
+        if span <= 0:
+            span = max(abs(lower), 1.0)
+        padding = span * fraction
+        if padding == 0 and lower == upper:
+            padding = max(abs(lower), 1.0) * 0.05
+        return lower - padding, upper + padding
+
+    @staticmethod
+    def _finite_axis_values(axes, axis_name: str) -> list[float]:
+        values: list[float] = []
+        for line in axes.get_lines():
+            data = line.get_xdata(orig=False) if axis_name == "x" else line.get_ydata(orig=False)
+            values.extend(LegendAwareNavigationToolbar._finite_values(data))
+        for collection in axes.collections:
+            offsets_getter = getattr(collection, "get_offsets", None)
+            if not callable(offsets_getter):
+                continue
+            offsets = offsets_getter()
+            offset_array = np.asarray(offsets, dtype=float)
+            if offset_array.size == 0:
+                continue
+            column = 0 if axis_name == "x" else 1
+            values.extend(LegendAwareNavigationToolbar._finite_values(offset_array[:, column]))
+        return values
+
+    @staticmethod
+    def _finite_values(values) -> list[float]:
+        try:
+            array = np.asarray(values, dtype=float).ravel()
+        except (TypeError, ValueError):
+            return []
+        return [float(value) for value in array if np.isfinite(value)]
+
+    def _axis_padding_fraction(self, axis_name: str) -> float:
+        settings = self._axis_padding_getter() if self._axis_padding_getter is not None else {}
+        if not isinstance(settings, dict):
+            settings = {}
+        enabled = bool(settings.get(f"pad_{axis_name}_axis", True))
+        if not enabled:
+            return 0.0
+        try:
+            percent = float(str(settings.get(f"pad_{axis_name}_percent", 5) or 5))
+        except (TypeError, ValueError):
+            percent = 5.0
+        return max(0.0, percent / 100.0)
+
+    @staticmethod
+    def _format_limit(value: float) -> str:
+        return f"{float(value):.6g}"
+
+    @staticmethod
+    def _update_dialog_buttons(axes_form) -> None:
+        dialog_getter = getattr(axes_form, "get_dialog", None)
+        if not callable(dialog_getter):
+            return
+        dialog = dialog_getter()
+        updater = getattr(dialog, "update_buttons", None)
+        if callable(updater):
+            updater()
 
     def _legend_form_data(self) -> list[tuple[str, list[object]]]:
         getter = self._legend_display_getter
@@ -165,10 +400,15 @@ class MatplotlibCanvas(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setObjectName("MatplotlibCanvas")
+        self._theme_name = "light"
         self.figure = Figure(figsize=(8.0, 5.0), dpi=100)
         self.canvas = FigureCanvasQTAgg(self.figure)
+        self.canvas.setObjectName("MatplotlibFigureCanvas")
         self.toolbar = LegendAwareNavigationToolbar(self.canvas, self)
+        self.toolbar.setObjectName("PlotToolbar")
         self.axes = self.figure.add_subplot(111)
+        self._apply_plot_surfaces()
         self.canvas.mpl_connect("resize_event", self._on_canvas_resize)
 
         layout = QVBoxLayout(self)
@@ -180,15 +420,43 @@ class MatplotlibCanvas(QWidget):
         """Reset the figure to a single empty axes."""
         self.figure.clear()
         self.axes = self.figure.add_subplot(111)
+        self._apply_plot_surfaces()
+
+    def apply_theme(self, theme_name: str) -> None:
+        self._theme_name = str(theme_name or "light")
+        self._apply_plot_surfaces()
+        self.canvas.draw_idle()
 
     def draw(self, *, tight: bool = True) -> None:
         """Lay out and repaint the canvas."""
+        self._apply_plot_surfaces()
         if tight:
             try:
                 self.figure.tight_layout()
             except Exception:
                 pass
         self.canvas.draw_idle()
+
+    def _apply_plot_surfaces(self) -> None:
+        palette = theme_palette(self._theme_name)
+        plot_bg = palette["plot_bg"]
+        plot_text = palette["plot_text"]
+        plot_axis = palette["plot_axis"]
+        plot_spine = palette["plot_spine"]
+        plot_grid = palette["plot_grid"]
+        self.figure.patch.set_facecolor(plot_bg)
+        for axes in self.figure.axes:
+            axes.set_facecolor(plot_bg)
+            axes.title.set_color(plot_text)
+            axes.xaxis.label.set_color(plot_text)
+            axes.yaxis.label.set_color(plot_text)
+            axes.tick_params(axis="both", colors=plot_axis)
+            for spine in axes.spines.values():
+                spine.set_color(plot_spine)
+            for gridline in [*axes.get_xgridlines(), *axes.get_ygridlines()]:
+                gridline.set_color(plot_grid)
+                gridline.set_alpha(0.65)
+                gridline.set_linewidth(0.8)
 
     def _on_canvas_resize(self, _event) -> None:
         if self.canvas.width() <= 1 or self.canvas.height() <= 1 or not self.figure.axes:

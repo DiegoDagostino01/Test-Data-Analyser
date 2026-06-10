@@ -1,9 +1,9 @@
 """Plot workspace panel.
 
 Embeds the Matplotlib Qt canvas and renders the active selection through the
-framework-independent :class:`PlotWorkspaceViewModel`. Data preparation and FFT
-live in the viewmodel/services; colour-cycle resolution is exposed through the
-settings viewmodel. This panel only orchestrates rendering onto the canvas.
+framework-independent :class:`PlotWorkspaceViewModel`. Data preparation lives in
+the viewmodel/services; colour-cycle resolution is exposed through the settings
+viewmodel. This panel only orchestrates rendering onto the canvas.
 """
 from __future__ import annotations
 
@@ -14,13 +14,13 @@ from typing import Any, Optional
 from cycler import cycler
 from matplotlib.colors import to_hex
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -37,6 +37,8 @@ from ..adapters.matplotlib_qt_adapter import LEGEND_DISPLAY_GRAPH, LEGEND_DISPLA
 
 class PlotWorkspace(QWidget):
     cursorPointsChanged = Signal()
+    LEGEND_DEFAULT_WIDTH = 230
+    LEGEND_MAXIMUM_WIDTH = 320
 
     def __init__(
         self,
@@ -45,6 +47,7 @@ class PlotWorkspace(QWidget):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self.setObjectName("PlotWorkspace")
         self.plot_vm = plot_vm
         self.settings_vm = settings_vm
         self._last_plot_data = None
@@ -57,20 +60,39 @@ class PlotWorkspace(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.canvas = MatplotlibCanvas(self)
+        self.apply_theme()
         self.canvas.toolbar.set_legend_display_controller(self.legend_display, self.set_legend_display)
         self.canvas.toolbar.set_export_preparer(self._legend_export_context)
+        self.canvas.toolbar.set_axis_padding_getter(self._axis_padding_settings)
         self.legend_panel = self._build_legend_panel()
-        layout.addWidget(self.canvas, stretch=1)
-        layout.addWidget(self.legend_panel)
+        self.plot_legend_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.plot_legend_splitter.setObjectName("PlotLegendSplitter")
+        self.plot_legend_splitter.addWidget(self.canvas)
+        self.plot_legend_splitter.addWidget(self.legend_panel)
+        self.plot_legend_splitter.setCollapsible(0, False)
+        self.plot_legend_splitter.setCollapsible(1, True)
+        self.plot_legend_splitter.setStretchFactor(0, 1)
+        self.plot_legend_splitter.setStretchFactor(1, 0)
+        self.plot_legend_splitter.setSizes([900, self.LEGEND_DEFAULT_WIDTH])
+        layout.addWidget(self.plot_legend_splitter)
 
         self.canvas.canvas.mpl_connect("button_press_event", self._on_canvas_click)
         self.canvas.canvas.mpl_connect("key_press_event", self._on_canvas_key)
 
+    def apply_theme(self, theme_name: str | None = None) -> None:
+        self.canvas.apply_theme(theme_name or self._theme_name())
+
+    def _theme_name(self) -> str:
+        resolver = getattr(self.settings_vm, "theme_name", None)
+        if callable(resolver):
+            return str(resolver())
+        return "light"
+
     def _build_legend_panel(self) -> QWidget:
         panel = QFrame()
         panel.setObjectName("EatonPanel")
-        panel.setMinimumWidth(210)
-        panel.setMaximumWidth(260)
+        panel.setMinimumWidth(0)
+        panel.setMaximumWidth(self.LEGEND_MAXIMUM_WIDTH)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(8, 8, 8, 8)
         heading = QLabel("Legend")
@@ -269,6 +291,14 @@ class PlotWorkspace(QWidget):
     def _grid_visible(self) -> bool:
         return bool(self.settings_vm.get("plot_appearance", "grid_visible", True))
 
+    def _axis_padding_settings(self) -> dict[str, object]:
+        return {
+            "pad_x_axis": bool(self.settings_vm.get("axis_scaling", "pad_x_axis", True)),
+            "pad_x_percent": self.settings_vm.get("axis_scaling", "pad_x_percent", 5),
+            "pad_y_axis": bool(self.settings_vm.get("axis_scaling", "pad_y_axis", True)),
+            "pad_y_percent": self.settings_vm.get("axis_scaling", "pad_y_percent", 5),
+        }
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -366,13 +396,28 @@ class PlotWorkspace(QWidget):
                 continue
             row = self.legend_table.rowCount()
             self.legend_table.insertRow(row)
-            swatch = QTableWidgetItem("")
-            swatch.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            swatch.setBackground(QColor(self._legend_colour(handle)))
+            swatch_item = QTableWidgetItem("")
+            swatch_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
             text = QTableWidgetItem(label)
             text.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            self.legend_table.setItem(row, 0, swatch)
+            self.legend_table.setItem(row, 0, swatch_item)
+            self.legend_table.setCellWidget(row, 0, self._legend_swatch(self._legend_colour(handle)))
             self.legend_table.setItem(row, 1, text)
+
+    @staticmethod
+    def _legend_swatch(colour: str) -> QWidget:
+        container = QWidget()
+        container.setObjectName("LegendSwatchCell")
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(6, 4, 6, 4)
+        swatch = QFrame(container)
+        swatch.setObjectName("LegendColourSwatch")
+        swatch.setMinimumSize(14, 12)
+        swatch.setStyleSheet(
+            f"QFrame#LegendColourSwatch {{ background-color: {colour}; border: 1px solid #FFFFFF; border-radius: 2px; }}"
+        )
+        layout.addWidget(swatch)
+        return container
 
     def _apply_legend_display(self, axes, handles, labels) -> None:
         self._update_legend_table(handles, labels)
@@ -517,35 +562,3 @@ class PlotWorkspace(QWidget):
         self.canvas.draw()
         self._set_cursor_data(None)
         return OperationResult.success(f"Comparison plot generated for {plotted} series.")
-
-    def generate_fft(self, x_col: str, y_cols: list[str]) -> OperationResult:
-        try:
-            data = self.plot_vm.prepare_plot_data(x_col, y_cols)
-        except ValueError as exc:
-            return OperationResult.failure(str(exc))
-        fs = self.plot_vm.sampling_rate(data)
-        if fs is None:
-            return OperationResult.failure("Cannot estimate sampling frequency from the selected X-axis column.")
-
-        window = str(self.settings_vm.get("engineering_analysis", "fft_window_function", "hanning"))
-        overlap = int(self.settings_vm.get("engineering_analysis", "fft_overlap_percent", 50) or 0)
-
-        self.canvas.clear()
-        axes = self.canvas.axes
-        axes.set_prop_cycle(cycler(color=self._colours()))
-        plotted = 0
-        for item in self.plot_vm.fft_series(data, fs, window, overlap):
-            axes.plot(item["x"], item["y"], label=item.get("label", ""), linewidth=self._line_width())
-            plotted += 1
-        if plotted == 0:
-            return OperationResult.failure("Not enough numeric data to generate FFT.")
-
-        axes.set_title(f"FFT | {x_col}")
-        axes.set_xlabel("Frequency [Hz]")
-        axes.set_ylabel("Amplitude")
-        axes.grid(self._grid_visible(), alpha=0.35)
-        handles, labels = self._legend_handles_and_labels(axes, None)
-        self._apply_legend_display(axes, handles, labels)
-        self.canvas.draw()
-        self._set_cursor_data(None)
-        return OperationResult.success(f"FFT plotted for {plotted} channel(s).")

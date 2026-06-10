@@ -18,13 +18,16 @@ from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMainWindow,
+    QMenu,
     QPushButton,
     QScrollArea,
     QSizePolicy,
     QSplitter,
     QStackedWidget,
+    QTabBar,
     QVBoxLayout,
     QWidget,
 )
@@ -54,12 +57,16 @@ class MainWindow(QMainWindow):
     LOWER_NOTES_INDEX = 3
     LEFT_RAIL_INITIAL_WIDTH = 300
     LEFT_RAIL_MINIMUM_WIDTH = 280
+    LEFT_RAIL_MAXIMUM_WIDTH = 380
 
     def __init__(self, settings_manager: SettingsManager | None = None) -> None:
         super().__init__()
         self.settings_manager = settings_manager or SettingsManager()
         self.vm = MainWindowViewModel(self.settings_manager)
+        self.vm.ensure_plot_profiles()
         self._plot_generated = False
+        self._syncing_plot_tabs = False
+        self._active_plot_tab_index = self.vm.state.active_plot_profile_index
 
         self.setWindowTitle("Test Data Analyser — Eaton Edition")
         self.resize(1320, 840)
@@ -154,16 +161,25 @@ class MainWindow(QMainWindow):
         left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         left_scroll.setWidget(left)
         left_scroll.setMinimumWidth(self.LEFT_RAIL_MINIMUM_WIDTH)
+        left_scroll.setMaximumWidth(self.LEFT_RAIL_MAXIMUM_WIDTH)
         left_scroll.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         self.left_scroll = left_scroll
 
         # Plot above, analysis notebook below. The lower tabs are attached to
         # their content while the splitter handles plot/data resizing.
         self.plot_workspace.setMinimumHeight(260)
+        plot_area = QWidget()
+        plot_area_layout = QVBoxLayout(plot_area)
+        plot_area_layout.setContentsMargins(0, 0, 0, 0)
+        plot_area_layout.setSpacing(6)
+        plot_area_layout.addWidget(self._build_plot_tabs_bar())
+        plot_area_layout.addWidget(self.plot_workspace, stretch=1)
+        self.plot_area = plot_area
+
         lower_panel = self._build_lower_groups()
         right_splitter = QSplitter(Qt.Orientation.Vertical)
         right_splitter.setChildrenCollapsible(True)
-        right_splitter.addWidget(self.plot_workspace)
+        right_splitter.addWidget(plot_area)
         right_splitter.addWidget(lower_panel)
         right_splitter.setCollapsible(0, True)
         right_splitter.setCollapsible(1, True)
@@ -185,6 +201,8 @@ class MainWindow(QMainWindow):
         body_splitter.setStretchFactor(0, 1)
         body_splitter.setStretchFactor(1, 4)
         body_splitter.setChildrenCollapsible(False)
+        body_splitter.setCollapsible(0, True)
+        body_splitter.setCollapsible(1, False)
         self.body_splitter = body_splitter
 
         root.addWidget(body_splitter, stretch=1)
@@ -208,7 +226,7 @@ class MainWindow(QMainWindow):
         title_box.setSpacing(0)
         title = QLabel("Test Data Analyser")
         title.setObjectName("EatonHeaderTitle")
-        subtitle = QLabel(f"Eaton Edition — PySide6 shell (v{__version__})")
+        subtitle = QLabel(f"Eaton Engineering - Analysis Workspace (V{__version__})")
         subtitle.setObjectName("EatonHeaderSubtitle")
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
@@ -272,7 +290,6 @@ class MainWindow(QMainWindow):
                 "PLOT",
                 [
                     ("Generate Plot", self._on_generate_plot),
-                    ("FFT", self._on_generate_fft),
                     ("Save Plot", self._save_plot_png),
                     ("Clear Plot", self._clear_plot),
                     ("Runs / Comparison", lambda: self._show_plot_page(0)),
@@ -330,6 +347,8 @@ class MainWindow(QMainWindow):
         for index, (text, handler) in enumerate(commands):
             button = QPushButton(text)
             button.setObjectName("RibbonButton")
+            if title == "PLOT" and text == "Generate Plot":
+                button.setProperty("ribbonPrimary", "true")
             button.setFixedHeight(23)
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             button.clicked.connect(handler)
@@ -406,15 +425,220 @@ class MainWindow(QMainWindow):
     def _build_plot_group(self) -> QStackedWidget:
         return self._build_panel_stack([self.runs_panel, self.cursor_panel])
 
+    def _build_plot_tabs_bar(self) -> QFrame:
+        bar = QFrame()
+        bar.setObjectName("PlotTabsBar")
+        bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        self.plot_tab_bar = QTabBar()
+        self.plot_tab_bar.setObjectName("PlotProfileTabs")
+        self.plot_tab_bar.setExpanding(False)
+        self.plot_tab_bar.setMovable(False)
+        self.plot_tab_bar.setUsesScrollButtons(True)
+        self.plot_tab_bar.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.plot_tab_bar.currentChanged.connect(self._on_plot_tab_changed)
+        self.plot_tab_bar.customContextMenuRequested.connect(self._show_plot_tab_menu)
+        layout.addWidget(self.plot_tab_bar, stretch=1)
+
+        self._sync_plot_tabs()
+        return bar
+
     # ------------------------------------------------------------------
     # Theme
     # ------------------------------------------------------------------
     def _apply_theme(self) -> None:
-        self.setStyleSheet(theme.build_stylesheet(self.vm.settings.theme_name()))
+        theme_name = self.vm.settings.theme_name()
+        self.setStyleSheet(theme.build_stylesheet(theme_name))
+        if hasattr(self, "plot_workspace"):
+            self.plot_workspace.apply_theme(theme_name)
 
     # ------------------------------------------------------------------
     # Actions
     # ------------------------------------------------------------------
+    def _sync_plot_tabs(self) -> None:
+        if not hasattr(self, "plot_tab_bar"):
+            return
+        self.vm.ensure_plot_profiles()
+        self._syncing_plot_tabs = True
+        try:
+            while self.plot_tab_bar.count():
+                self.plot_tab_bar.removeTab(0)
+            for profile in self.vm.state.plot_profiles:
+                self.plot_tab_bar.addTab(str(profile.get("name", "Plot")))
+            add_index = self.plot_tab_bar.addTab("+")
+            self.plot_tab_bar.setTabToolTip(add_index, "Create a new plot")
+            index = self.vm.state.active_plot_profile_index
+            self.plot_tab_bar.setCurrentIndex(index)
+            self._active_plot_tab_index = index
+        finally:
+            self._syncing_plot_tabs = False
+
+    def _show_plot_tab_menu(self, position) -> None:
+        index = self.plot_tab_bar.tabAt(position)
+        if index < 0:
+            return
+        if index >= len(self.vm.state.plot_profiles):
+            return
+        menu = QMenu(self)
+        duplicate_action = menu.addAction("Duplicate")
+        rename_action = menu.addAction("Rename")
+        delete_action = menu.addAction("Delete")
+        delete_action.setEnabled(len(self.vm.state.plot_profiles) > 1)
+        chosen = menu.exec(self.plot_tab_bar.mapToGlobal(position))
+        if chosen == duplicate_action:
+            self._duplicate_plot_profile(index)
+        elif chosen == rename_action:
+            self._rename_plot_profile(index)
+        elif chosen == delete_action:
+            self._delete_plot_profile(index)
+
+    def _new_plot_profile(self) -> None:
+        self._capture_current_plot_profile()
+        result = self.vm.add_plot_profile()
+        if not result.ok:
+            qt_message_service.warning(self, "New Plot", result.message)
+            return
+        self._sync_plot_tabs()
+        self._apply_active_plot_profile()
+        self.statusBar().showMessage(result.message)
+
+    def _duplicate_plot_profile(self, index: int | None = None) -> None:
+        self._capture_current_plot_profile()
+        result = self.vm.duplicate_plot_profile(index)
+        if not result.ok:
+            qt_message_service.warning(self, "Duplicate Plot", result.message)
+            return
+        self._sync_plot_tabs()
+        self._apply_active_plot_profile()
+        self.statusBar().showMessage(result.message)
+
+    def _rename_plot_profile(self, index: int, name: str | None = None) -> None:
+        current = self.vm.state.plot_profiles[index] if 0 <= index < len(self.vm.state.plot_profiles) else {}
+        new_name = name
+        if new_name is None:
+            new_name, ok = QInputDialog.getText(
+                self,
+                "Rename Plot",
+                "Plot name:",
+                text=str(current.get("name", f"Plot {index + 1}")),
+            )
+            if not ok:
+                return
+        self._capture_current_plot_profile()
+        result = self.vm.rename_plot_profile(index, new_name)
+        if not result.ok:
+            qt_message_service.warning(self, "Rename Plot", result.message)
+            return
+        self._sync_plot_tabs()
+        self.statusBar().showMessage(result.message)
+
+    def _delete_plot_profile(self, index: int, confirm: bool = True) -> None:
+        current = self.vm.state.plot_profiles[index] if 0 <= index < len(self.vm.state.plot_profiles) else {}
+        name = str(current.get("name", f"Plot {index + 1}"))
+        if len(self.vm.state.plot_profiles) <= 1:
+            qt_message_service.warning(self, "Delete Plot", "At least one plot must remain in the session.")
+            return
+        if confirm and not qt_message_service.confirm(
+            self,
+            "Delete Plot",
+            f"Delete plot '{name}'? This removes the plot tab from the current session.",
+        ):
+            return
+        self._capture_current_plot_profile()
+        result = self.vm.delete_plot_profile(index)
+        if not result.ok:
+            qt_message_service.warning(self, "Delete Plot", result.message)
+            return
+        self._sync_plot_tabs()
+        self._apply_active_plot_profile()
+        self.statusBar().showMessage(result.message)
+
+    def _on_plot_tab_changed(self, index: int) -> None:
+        if self._syncing_plot_tabs or index < 0:
+            return
+        if index >= len(self.vm.state.plot_profiles):
+            self._new_plot_profile()
+            return
+        if index == self.vm.state.active_plot_profile_index:
+            self._active_plot_tab_index = index
+            return
+        self._capture_current_plot_profile()
+        result = self.vm.select_plot_profile(index)
+        if not result.ok:
+            qt_message_service.warning(self, "Plot Tabs", result.message)
+            self._sync_plot_tabs()
+            return
+        self._active_plot_tab_index = index
+        self._apply_active_plot_profile()
+        self.statusBar().showMessage(result.message)
+
+    def _capture_current_plot_profile(self) -> None:
+        self.vm.ensure_plot_profiles()
+        profile = self.vm.state.active_plot_profile() or {}
+        appearance = self.plot_workspace.current_axis_appearance() if self._plot_generated else {}
+        if not appearance:
+            appearance = self._stored_profile_appearance(profile)
+        self.vm.capture_working_state(
+            x_column=self.axis_panel.x_column(),
+            y_columns=self.axis_panel.selected_y(),
+            secondary_y_columns=self.axis_panel.selected_secondary_y(),
+            plot_kind=self.axis_panel.plot_kind(),
+            legend_settings={"display_mode": self.plot_workspace.legend_display()},
+            analysis_window=self.axis_panel.analysis_window_texts(),
+            filter_settings=self.axis_panel.filter_setting_texts(),
+            title=appearance.get("title", ""),
+            x_label=appearance.get("x_label", ""),
+            y_label=appearance.get("y_label", ""),
+            secondary_y_label=appearance.get("secondary_y_label", ""),
+            axis_limits=appearance.get("axis_limits", {}),
+            auto_fit_axes=appearance.get("auto_fit_axes", True),
+            generated=self._plot_generated,
+        )
+
+    @staticmethod
+    def _stored_profile_appearance(profile: dict) -> dict:
+        return {
+            "title": profile.get("title", ""),
+            "x_label": profile.get("x_label", ""),
+            "y_label": profile.get("y_label", ""),
+            "secondary_y_label": profile.get("secondary_y_label", ""),
+            "axis_limits": profile.get("axis_limits", {}),
+            "auto_fit_axes": profile.get("auto_fit_axes", True),
+        }
+
+    def _apply_active_plot_profile(self, *, clear_global_forms: bool = False) -> None:
+        self.vm.ensure_plot_profiles()
+        profile = self.vm.state.active_plot_profile() or {}
+        self.vm.state.limit_lines = [dict(line) for line in profile.get("limit_lines", [])]
+        self.vm.state.active_limit_line_index = 0
+        self.vm.state.engineering_notes = dict(profile.get("engineering_notes", {}))
+
+        columns = self.vm.state.column_names()
+        self.axis_panel.apply_selection(
+            columns,
+            str(profile.get("x_column", "")),
+            list(profile.get("y_columns", [])),
+            list(profile.get("secondary_y_columns", [])),
+        )
+        self.axis_panel.apply_plot_settings(profile)
+        legend_settings = profile.get("legend", {}) if isinstance(profile, dict) else {}
+        display_mode = legend_settings.get("display_mode", "panel") if isinstance(legend_settings, dict) else "panel"
+        self.plot_workspace.set_legend_display(str(display_mode))
+        self.statistics_panel.set_statistics(self.vm.plot_workspace.statistics([]))
+        self.raw_data_panel.clear()
+        if clear_global_forms:
+            self.maths_panel.clear_form()
+        self.maths_panel.refresh()
+        self.limits_panel.refresh()
+        self.notes_panel.load_from_state()
+        self.runs_panel.refresh()
+        self.plot_workspace.clear_cursor_markers()
+        self.cursor_panel.refresh()
+        self._restore_generated_plot(profile)
+
     def _open_via_panel(self) -> None:
         self.data_panel.open_file()
 
@@ -505,23 +729,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         qt_widget_helpers.remember_session_directory(self.settings_manager, path)
-        appearance = self.plot_workspace.current_axis_appearance() if self._plot_generated else {}
-        self.vm.capture_working_state(
-            x_column=self.axis_panel.x_column(),
-            y_columns=self.axis_panel.selected_y(),
-            secondary_y_columns=self.axis_panel.selected_secondary_y(),
-            plot_kind=self.axis_panel.plot_kind(),
-            legend_settings={"display_mode": self.plot_workspace.legend_display()},
-            analysis_window=self.axis_panel.analysis_window_texts(),
-            filter_settings=self.axis_panel.filter_setting_texts(),
-            title=appearance.get("title", ""),
-            x_label=appearance.get("x_label", ""),
-            y_label=appearance.get("y_label", ""),
-            secondary_y_label=appearance.get("secondary_y_label", ""),
-            axis_limits=appearance.get("axis_limits", {}),
-            auto_fit_axes=appearance.get("auto_fit_axes", True),
-            generated=self._plot_generated,
-        )
+        self._capture_current_plot_profile()
         result = self.vm.save_session(path)
         qt_message_service.show_result(self, "Save Session", result)
         self.statusBar().showMessage(result.message)
@@ -544,28 +752,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(result.message)
 
     def _apply_loaded_session(self, selection: dict) -> None:
-        columns = self.vm.state.column_names()
-        self.axis_panel.apply_selection(
-            columns,
-            selection.get("x_column", ""),
-            selection.get("y_columns", []),
-            selection.get("secondary_y_columns", []),
-        )
-        profile = self.vm.state.active_plot_profile() or {}
-        self.axis_panel.apply_plot_settings(profile)
-        legend_settings = profile.get("legend", {}) if isinstance(profile, dict) else {}
-        display_mode = legend_settings.get("display_mode", "panel") if isinstance(legend_settings, dict) else "panel"
-        self.plot_workspace.set_legend_display(str(display_mode))
-        self.statistics_panel.set_statistics(self.vm.plot_workspace.statistics([]))
-        self.raw_data_panel.clear()
-        self.maths_panel.clear_form()
-        self.maths_panel.refresh()
-        self.limits_panel.refresh()
-        self.notes_panel.load_from_state()
-        self.runs_panel.refresh()
-        self.plot_workspace.clear_cursor_markers()
-        self.cursor_panel.refresh()
-        self._restore_generated_plot(profile)
+        self._sync_plot_tabs()
+        self._apply_active_plot_profile(clear_global_forms=True)
 
     def _restore_generated_plot(self, profile: dict) -> None:
         """Re-render the plot that was on screen when the session was saved.
@@ -577,6 +765,8 @@ class MainWindow(QMainWindow):
         """
         self._plot_generated = False
         if not (isinstance(profile, dict) and profile.get("generated")):
+            self.plot_workspace.clear_plot()
+            self.cursor_panel.refresh()
             return
         appearance = {
             "title": profile.get("title", ""),
@@ -588,6 +778,8 @@ class MainWindow(QMainWindow):
         }
         result = self._generate_plot(appearance)
         if result is None or not result.ok:
+            self.plot_workspace.clear_plot()
+            self.cursor_panel.refresh()
             return
         self._plot_generated = True
         self._update_statistics(self.axis_panel.all_selected_y())
@@ -598,6 +790,10 @@ class MainWindow(QMainWindow):
     def _on_file_loaded(self, columns: list[str]) -> None:
         suggested_x = self.vm.data_loading.suggested_x_column(columns)
         self._plot_generated = False
+        self.vm.reset_plot_profiles()
+        self._sync_plot_tabs()
+        self.plot_workspace.clear_plot()
+        self.cursor_panel.refresh()
         self.axis_panel.set_columns(columns, suggested_x)
         self.statistics_panel.set_statistics(self.vm.plot_workspace.statistics([]))
         self.raw_data_panel.clear()
@@ -732,14 +928,6 @@ class MainWindow(QMainWindow):
 
     def _on_limits_changed(self) -> None:
         self._generate_plot()
-
-    def _on_generate_fft(self) -> None:
-        x_col = self.axis_panel.x_column()
-        y_cols = self.axis_panel.selected_y()
-        result = self.plot_workspace.generate_fft(x_col, y_cols)
-        if not result.ok:
-            qt_message_service.warning(self, "FFT", result.message)
-        self.statusBar().showMessage(result.message)
 
     def _save_plot_png(self) -> None:
         path = qt_file_dialogs.save_image_file(self)

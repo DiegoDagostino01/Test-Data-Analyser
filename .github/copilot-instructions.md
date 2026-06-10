@@ -21,7 +21,7 @@ Qt-only and is documented in `ARCHITECTURE.md`.
 - Preserve current behaviour for CSV/XLSX/XLS loading, tolerant numeric
   conversion, secondary Y-axis plotting, plot/session profile state, Engineering
   Notes, Requirements/Limits, Raw Data editing/export, Maths Channels, Runs /
-  Comparison, Point Compare, FFT, settings, and figure export.
+  Comparison, Point Compare, settings, and figure export.
 - Keep the app runnable using `python run_qt_app.py` and
   `python -m test_data_analyser`.
 - Use `python -m unittest discover -s tests` for the test suite. Use the Qt
@@ -34,8 +34,8 @@ Qt-only and is documented in `ARCHITECTURE.md`.
 - Use `python-refactor-safely` for layered Python refactors.
 - Use `pyside6-qt-gui-maintainer` for Qt widgets, layout, signals, dialogs, and
   Matplotlib canvas work.
-- Use `plotting-engine-separation` for plotting, FFT, legends, axis limits,
-  figure export, or plot data preparation.
+- Use `plotting-engine-separation` for plotting, legends, axis limits, figure
+  export, or plot data preparation.
 - Use `pandas-data-cleaning-analysis` for data loading, numeric coercion,
   statistics, raw data, filtering, and export.
 - Use `session-profile-state-guardian` for sessions, plot profiles, labels,

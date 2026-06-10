@@ -533,6 +533,55 @@ class MainWindowViewModelTests(unittest.TestCase):
         self.assertIn("Sum", session["calculated_channels"])
         self.assertEqual(session["plot_profiles"][0]["x_column"], "Time")
 
+    def test_capture_working_state_updates_active_profile_only(self) -> None:
+        vm = MainWindowViewModel()
+        vm.state.plot_profiles = [
+            {"name": "Plot 1", "x_column": "Time", "y_columns": ["A"]},
+            {"name": "Plot 2", "x_column": "Time", "y_columns": ["B"]},
+        ]
+        vm.state.active_plot_profile_index = 1
+        vm.capture_working_state(
+            x_column="Time",
+            y_columns=["B"],
+            secondary_y_columns=[],
+            title="Second Plot",
+            x_label="Seconds",
+            y_label="Current",
+        )
+
+        self.assertEqual(len(vm.state.plot_profiles), 2)
+        self.assertEqual(vm.state.active_plot_profile_index, 1)
+        self.assertEqual(vm.state.plot_profiles[0]["y_columns"], ["A"])
+        self.assertEqual(vm.state.plot_profiles[1]["title"], "Second Plot")
+        self.assertEqual(vm.state.plot_profiles[1]["y_label"], "Current")
+
+    def test_plot_profile_crud_keeps_valid_active_profile(self) -> None:
+        vm = MainWindowViewModel()
+        vm.ensure_plot_profiles()
+        add = vm.add_plot_profile()
+        self.assertTrue(add.ok)
+        self.assertEqual(len(vm.state.plot_profiles), 2)
+        self.assertEqual(vm.state.active_plot_profile_index, 1)
+
+        duplicate = vm.duplicate_plot_profile(0)
+        self.assertTrue(duplicate.ok)
+        self.assertEqual(vm.state.active_plot_profile_index, 1)
+        self.assertEqual(vm.state.plot_profiles[1]["name"], "Plot 1 Copy")
+
+        rename = vm.rename_plot_profile(1, "Renamed Plot")
+        self.assertTrue(rename.ok)
+        self.assertEqual(vm.state.plot_profiles[1]["name"], "Renamed Plot")
+        self.assertFalse(vm.rename_plot_profile(1, "Plot 1").ok)
+
+        delete = vm.delete_plot_profile(1)
+        self.assertTrue(delete.ok)
+        self.assertEqual(len(vm.state.plot_profiles), 2)
+        self.assertEqual(vm.state.active_plot_profile_index, 1)
+
+        self.assertTrue(vm.delete_plot_profile(1).ok)
+        self.assertFalse(vm.delete_plot_profile(0).ok)
+        self.assertEqual(len(vm.state.plot_profiles), 1)
+
     def test_save_and_load_round_trip(self) -> None:
         source = self._populated_vm()
         with tempfile.TemporaryDirectory() as tmp:
@@ -545,6 +594,24 @@ class MainWindowViewModelTests(unittest.TestCase):
             self.assertTrue(load_result.ok)
             self.assertEqual(target.state.plot_profiles[0]["x_column"], "Time")
             self.assertIn("Sum", target.state.calculated_channels)
+
+    def test_save_and_load_preserves_multiple_plot_profiles(self) -> None:
+        source = self._populated_vm()
+        source.state.plot_profiles = [
+            {"name": "Voltage", "x_column": "Time", "y_columns": ["A"], "title": "Voltage Plot"},
+            {"name": "Current", "x_column": "Time", "y_columns": ["B"], "title": "Current Plot"},
+        ]
+        source.state.active_plot_profile_index = 1
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session.json"
+            self.assertTrue(source.save_session(path).ok)
+
+            target = MainWindowViewModel()
+            self.assertTrue(target.load_session(path).ok)
+            self.assertEqual(len(target.state.plot_profiles), 2)
+            self.assertEqual(target.state.active_plot_profile_index, 1)
+            self.assertEqual(target.state.plot_profiles[0]["title"], "Voltage Plot")
+            self.assertEqual(target.state.plot_profiles[1]["y_columns"], ["B"])
 
     def test_load_missing_file_fails(self) -> None:
         self.assertFalse(MainWindowViewModel().load_session("missing.json").ok)

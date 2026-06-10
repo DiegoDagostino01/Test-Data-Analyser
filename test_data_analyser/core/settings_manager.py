@@ -74,9 +74,6 @@ DEFAULT_SETTINGS: dict[str, dict[str, Any]] = {
             "RMS",
             "Peak-to-Peak",
         ],
-        "fft_window_function": "hanning",
-        "available_fft_windows": ["hanning", "hamming", "blackman", "rectangular"],
-        "fft_overlap_percent": 50,
         "significant_figures_maths": 6,
     },
 }

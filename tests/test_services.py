@@ -17,7 +17,6 @@ import pandas as pd
 from test_data_analyser.domain import PlotData
 from test_data_analyser.services import (
     cursor_service,
-    fft_service,
     limits_service,
     maths_channel_service,
     plotting_data_service,
@@ -194,21 +193,6 @@ class PlottingDataServiceTests(unittest.TestCase):
         x = pd.Series([0.0, 1.0, 2.0])
         result = plotting_data_service.apply_analysis_window(x, {"A": x}, {"A": x}, xmin=None, xmax=None)
         self.assertEqual(len(result.y_map["A"].dropna()), 3)
-
-
-class FftServiceTests(unittest.TestCase):
-    def test_detects_known_frequency(self) -> None:
-        fs = 1000.0
-        t = np.arange(0, 1.0, 1.0 / fs)
-        signal = np.sin(2 * np.pi * 50 * t)
-        freqs, amp = fft_service.fft_spectrum(signal, fs, window_name="hanning", overlap_percent=0)
-        peak_freq = freqs[int(np.argmax(amp))]
-        self.assertAlmostEqual(peak_freq, 50.0, delta=2.0)
-
-    def test_window_sizes(self) -> None:
-        self.assertEqual(len(fft_service.fft_window("hamming", 16)), 16)
-        self.assertEqual(len(fft_service.fft_window("rectangular", 8)), 8)
-        self.assertTrue(np.allclose(fft_service.fft_window("rectangular", 4), np.ones(4)))
 
 
 class RawDataServiceTests(unittest.TestCase):

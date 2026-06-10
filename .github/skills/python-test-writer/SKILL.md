@@ -26,5 +26,5 @@ suite.
 - Numeric strings, blanks, `N/A`, commas, dashes, and units.
 - Grouped Excel-style columns and multiple Y columns.
 - Secondary Y-axis selections and analysis-window filtering.
-- Limit-line interpolation/margins, FFT, cursor point compare, raw-data edits,
+- Limit-line interpolation/margins, cursor point compare, raw-data edits,
   maths channels, runs comparison, session save/load, and figure export guards.

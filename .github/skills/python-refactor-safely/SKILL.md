@@ -19,7 +19,7 @@ Use this skill when refactoring the PySide6 / Qt Test Data Analyser codebase.
 - Do not reintroduce deleted Tkinter modules or `run_app.py`.
 - Preserve secondary Y-axis behaviour, sessions, plot/profile state,
   Engineering Notes, Requirements/Limits, Runs / Comparison, Raw Data editing,
-  Maths Channels, Point Compare, FFT, settings, and Eaton branding.
+  Maths Channels, Point Compare, settings, and Eaton branding.
 - Prefer small, focused modules and reviewable changes.
 
 ## Refactor process

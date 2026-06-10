@@ -52,8 +52,6 @@ FIELD_SPEC: dict[str, list[_Field]] = {
     ],
     "Analysis": [
         _Field("axis_scaling", "decimal_places_statistics", "Statistics decimal places", "int", minimum=0, maximum=10),
-        _Field("engineering_analysis", "fft_window_function", "FFT window", "combo"),
-        _Field("engineering_analysis", "fft_overlap_percent", "FFT overlap %", "int", minimum=0, maximum=90),
     ],
     "Axis Padding": [
         _Field("axis_scaling", "pad_x_axis", "Pad X-axis", "check"),

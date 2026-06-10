@@ -1,7 +1,7 @@
 """Plot-workspace viewmodel.
 
-Coordinates plot-data preparation, statistics, selected-data ranges, prepared
-render series, and FFT for the active dataframe through the service layer. It
+Coordinates plot-data preparation, statistics, selected-data ranges, and
+prepared render series for the active dataframe through the service layer. It
 pulls numeric series from ``AppState.df`` itself (via
 :func:`data_io.numeric_series`) and applies the per-channel X matching used for
 wide grouped files.
@@ -13,9 +13,8 @@ from typing import Optional, Tuple
 import pandas as pd
 
 from ..core.data_io import numeric_series
-from ..core.filters import estimate_sampling_rate
 from ..domain import PlotData
-from ..services import fft_service, plotting_data_service, statistics_service
+from ..services import plotting_data_service, statistics_service
 from ..services.results import OperationResult
 from ..core.utils import _matching_x_column_for_y
 from .app_state import AppState
@@ -89,24 +88,3 @@ class PlotWorkspaceViewModel:
 
     def comparison_series(self, items: list[dict]) -> list[dict]:
         return plotting_data_service.prepare_comparison_series(items)
-
-    def sampling_rate(self, data: PlotData) -> Optional[float]:
-        return estimate_sampling_rate(data.x)
-
-    def fft_series(
-        self,
-        data: PlotData,
-        fs: float,
-        window_name: str = "hanning",
-        overlap_percent: int = 50,
-    ) -> list[dict]:
-        return fft_service.fft_plot_series(data, fs, window_name, overlap_percent)
-
-    def fft(
-        self,
-        values,
-        fs: float,
-        window_name: str = "hanning",
-        overlap_percent: int = 50,
-    ):
-        return fft_service.fft_spectrum(values, fs, window_name, overlap_percent)

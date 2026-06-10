@@ -24,11 +24,13 @@ try:
         QApplication,
         QFrame,
         QGroupBox,
+        QLabel,
         QPushButton,
         QScrollArea,
         QSizePolicy,
         QSplitter,
         QStackedWidget,
+        QTabBar,
         QTabWidget,
     )
     from PySide6.QtTest import QTest
@@ -666,6 +668,28 @@ class PlotWorkspaceParityTests(unittest.TestCase):
         table_labels = [self.panel.legend_table.item(row, 1).text() for row in range(self.panel.legend_table.rowCount())]
         self.assertIn("A", table_labels)
         self.assertIn("B [Right Y]", table_labels)
+        swatch_cell = self.panel.legend_table.cellWidget(0, 0)
+        self.assertIsNotNone(swatch_cell)
+        assert swatch_cell is not None
+        swatch = swatch_cell.findChild(QFrame, "LegendColourSwatch")
+        self.assertIsNotNone(swatch)
+        assert swatch is not None
+        self.assertIn("background-color:", swatch.styleSheet())
+
+    def test_legend_panel_is_resizable_and_collapsible(self) -> None:
+        splitter = self.panel.plot_legend_splitter
+        self.assertIsInstance(splitter, QSplitter)
+        self.assertFalse(splitter.isCollapsible(0))
+        self.assertTrue(splitter.isCollapsible(1))
+        self.assertEqual(self.panel.legend_panel.maximumWidth(), self.panel.LEGEND_MAXIMUM_WIDTH)
+
+        self.panel.resize(900, 420)
+        self.panel.show()
+        QApplication.processEvents()
+        splitter.setSizes([900, 0])
+        QApplication.processEvents()
+        self.assertEqual(splitter.sizes()[1], 0)
+        self.assertGreater(splitter.sizes()[0], 0)
 
     def test_graph_legend_mode_hides_panel_and_draws_canvas_legend(self) -> None:
         self.panel.set_legend_display("graph")
@@ -713,7 +737,7 @@ class PlotWorkspaceParityTests(unittest.TestCase):
                 captured["matplotlib_data"] = data
 
             matplotlib_qt_adapter._formlayout.fedit(
-                [([("Title", "")], "Axes", "")],
+                [([("Title", ""), ("(Re-)Generate automatic legend", False)], "Axes", "")],
                 title="Figure options",
                 parent=parent,
                 apply=apply,
@@ -721,6 +745,7 @@ class PlotWorkspaceParityTests(unittest.TestCase):
 
         def fake_fedit(data, title="", comment="", icon=None, parent=None, apply=None):
             captured["tabs"] = [section[1] for section in data]
+            captured["axes_fields"] = [field[0] for field in data[0][0]]
             if apply is not None:
                 apply([["updated title"], ["graph"]])
 
@@ -733,8 +758,62 @@ class PlotWorkspaceParityTests(unittest.TestCase):
             matplotlib_qt_adapter._formlayout.fedit = original_fedit
 
         self.assertEqual(captured["tabs"], ["Axes", "Legend"])
-        self.assertEqual(captured["matplotlib_data"], [["updated title"]])
+        self.assertNotIn("(Re-)Generate automatic legend", captured["axes_fields"])
+        self.assertEqual(captured["matplotlib_data"], [["updated title", False]])
         self.assertEqual(self.panel.legend_display(), "graph")
+
+    def test_figure_options_auto_label_button_updates_axes_fields(self) -> None:
+        self.panel.generate_plot("Time", ["A"])
+        toolbar = self.panel.canvas.toolbar
+        toolbar._figure_edit_with_legend(self.panel.canvas.axes)
+        dialog = toolbar._fedit_dialog
+        try:
+            axes_form = dialog.formwidget.widgetlist[0]
+            fields = toolbar._axes_form_fields(axes_form)
+            buttons = {button.objectName(): button for button in axes_form.findChildren(QPushButton)}
+
+            buttons["AxisAutoLabelButton"].click()
+
+            self.assertEqual(fields["title"].text(), "A vs Time")
+            self.assertEqual(fields["axes"]["x"]["label"].text(), "Time")
+            self.assertEqual(fields["axes"]["y"]["label"].text(), "A")
+        finally:
+            dialog.close()
+
+    def test_figure_options_auto_fit_buttons_use_axis_padding_settings(self) -> None:
+        panel = self._panel_with_padding(
+            {
+                ("axis_scaling", "pad_x_percent"): 10,
+                ("axis_scaling", "pad_y_axis"): False,
+            }
+        )
+        panel.generate_plot(
+            "Time",
+            ["A"],
+            axis_limits={"xmin": -5.0, "xmax": 5.0, "ymin": -5.0, "ymax": 5.0},
+            auto_fit_axes=False,
+        )
+        toolbar = panel.canvas.toolbar
+        toolbar._figure_edit_with_legend(panel.canvas.axes)
+        dialog = toolbar._fedit_dialog
+        try:
+            axes_form = dialog.formwidget.widgetlist[0]
+            fields = toolbar._axes_form_fields(axes_form)
+            buttons = {button.objectName(): button for button in axes_form.findChildren(QPushButton)}
+
+            buttons["AxisAutoFitXButton"].click()
+            buttons["AxisAutoFitYButton"].click()
+
+            self.assertAlmostEqual(float(fields["axes"]["x"]["min"].text()), -0.1, places=3)
+            self.assertAlmostEqual(float(fields["axes"]["x"]["max"].text()), 1.1, places=3)
+            source_df = self.state.df
+            self.assertIsNotNone(source_df)
+            assert source_df is not None
+            line_y = [float(value) for value in source_df["A"].to_list()]
+            self.assertAlmostEqual(float(fields["axes"]["y"]["min"].text()), min(line_y), places=5)
+            self.assertAlmostEqual(float(fields["axes"]["y"]["max"].text()), max(line_y), places=5)
+        finally:
+            dialog.close()
 
     def test_panel_legend_is_rendered_into_saved_figure(self) -> None:
         self.panel.generate_plot("Time", ["A", "B"], secondary_y=["B"])
@@ -1048,6 +1127,13 @@ class MainWindowLayoutTests(unittest.TestCase):
         assert logo is not None  # narrow for the type checker
         self.assertFalse(logo.pixmap().isNull())
 
+    def test_header_subtitle_uses_workspace_name(self) -> None:
+        window = self._window()
+        subtitle = window.findChild(QLabel, "EatonHeaderSubtitle")
+        self.assertIsNotNone(subtitle)
+        assert subtitle is not None
+        self.assertEqual(subtitle.text(), "Eaton Engineering - Analysis Workspace (V1.00)")
+
     def test_plot_and_lower_splitter_can_fully_collapse(self) -> None:
         window = self._window()
         window.show()
@@ -1072,6 +1158,7 @@ class MainWindowLayoutTests(unittest.TestCase):
         window.right_splitter.setSizes([0, total_height])
         QApplication.processEvents()
         self.assertEqual(window.right_splitter.sizes()[0], 0)
+        self.assertEqual(window.plot_area.height(), 0)
 
     def test_plot_layout_refreshes_when_splitter_shrinks(self) -> None:
         window = self._window()
@@ -1120,7 +1207,6 @@ class MainWindowLayoutTests(unittest.TestCase):
             "FILE:Load Session",
             "FILE:Export Data",
             "PLOT:Generate Plot",
-            "PLOT:FFT",
             "PLOT:Save Plot",
             "PLOT:Clear Plot",
             "PLOT:Runs / Comparison",
@@ -1140,6 +1226,11 @@ class MainWindowLayoutTests(unittest.TestCase):
         self.assertIsInstance(window.lower_stack, QStackedWidget)
         self.assertEqual(window.lower_stack.count(), 4)
         self.assertEqual(window.right_panel.layout().itemAt(0).widget(), window.right_splitter)
+        self.assertEqual(window.right_splitter.widget(0), window.plot_area)
+        self.assertIsInstance(window.plot_tab_bar, QTabBar)
+        self.assertEqual(window.plot_tab_bar.count(), 2)
+        self.assertEqual(window.plot_tab_bar.tabText(1), "+")
+        self.assertNotIn("PLOT:New Plot", window.ribbon_buttons)
 
     def test_ribbon_can_be_collapsed_and_restored(self) -> None:
         window = self._window()
@@ -1198,6 +1289,46 @@ class MainWindowLayoutTests(unittest.TestCase):
         self.assertTrue(window.ribbon_buttons["PLOT:Clear Plot"].isEnabled())
         self.assertEqual(window.plot_group.count(), 2)
         self.assertIs(window.plot_group.currentWidget(), window.runs_panel)
+        self.assertFalse(hasattr(window, "new_plot_button"))
+        self.assertEqual(window.plot_tab_bar.tabText(window.plot_tab_bar.count() - 1), "+")
+
+    def test_plus_plot_tab_creates_new_profile(self) -> None:
+        window = self._window()
+        window.plot_tab_bar.setCurrentIndex(window.plot_tab_bar.count() - 1)
+        self.assertEqual(len(window.vm.state.plot_profiles), 2)
+        self.assertEqual(window.vm.state.active_plot_profile_index, 1)
+        self.assertEqual(window.plot_tab_bar.count(), 3)
+        self.assertEqual(window.plot_tab_bar.tabText(1), "Plot 2")
+        self.assertEqual(window.plot_tab_bar.tabText(2), "+")
+
+    def test_plot_tabs_preserve_axis_selection_when_switching(self) -> None:
+        window = self._window()
+        window.vm.state.df = pd.DataFrame({"Time": [0.0, 1.0], "A": [1.0, 2.0], "B": [3.0, 4.0]})
+        window._on_file_loaded(window.vm.state.column_names())
+        window.axis_panel.apply_selection(window.vm.state.column_names(), "Time", ["A"], [])
+
+        window._new_plot_profile()
+        self.assertEqual(window.plot_tab_bar.count(), 3)
+        self.assertEqual(window.vm.state.active_plot_profile_index, 1)
+        window.axis_panel.apply_selection(window.vm.state.column_names(), "Time", ["B"], [])
+
+        window.plot_tab_bar.setCurrentIndex(0)
+        self.assertEqual(window.axis_panel.selected_y(), ["A"])
+        window.plot_tab_bar.setCurrentIndex(1)
+        self.assertEqual(window.axis_panel.selected_y(), ["B"])
+
+    def test_plot_tab_duplicate_rename_delete_handlers(self) -> None:
+        window = self._window()
+        window._duplicate_plot_profile(0)
+        self.assertEqual(window.plot_tab_bar.count(), 3)
+        self.assertEqual(window.plot_tab_bar.tabText(1), "Plot 1 Copy")
+        self.assertEqual(window.vm.state.active_plot_profile_index, 1)
+
+        window._rename_plot_profile(1, "Renamed Plot")
+        self.assertEqual(window.plot_tab_bar.tabText(1), "Renamed Plot")
+        window._delete_plot_profile(1, confirm=False)
+        self.assertEqual(window.plot_tab_bar.count(), 2)
+        self.assertEqual(window.vm.state.active_plot_profile_index, 0)
 
     def test_lower_middle_tab_widgets_are_removed(self) -> None:
         window = self._window()
@@ -1279,10 +1410,25 @@ class MainWindowLayoutTests(unittest.TestCase):
         QApplication.processEvents()
         self.assertIsInstance(window.body_splitter, QSplitter)
         self.assertFalse(window.body_splitter.childrenCollapsible())
+        self.assertTrue(window.body_splitter.isCollapsible(0))
+        self.assertFalse(window.body_splitter.isCollapsible(1))
         self.assertEqual(window.left_scroll.minimumWidth(), MainWindow.LEFT_RAIL_MINIMUM_WIDTH)
+        self.assertEqual(window.left_scroll.maximumWidth(), MainWindow.LEFT_RAIL_MAXIMUM_WIDTH)
         self.assertLess(window.left_scroll.minimumWidth(), MainWindow.LEFT_RAIL_INITIAL_WIDTH)
         self.assertGreaterEqual(window.body_splitter.sizes()[0], MainWindow.LEFT_RAIL_INITIAL_WIDTH - 5)
         self.assertEqual(window.lower_stack.sizePolicy().horizontalPolicy(), QSizePolicy.Policy.Ignored)
+
+        total_width = sum(window.body_splitter.sizes())
+        window.body_splitter.setSizes([total_width, 0])
+        QApplication.processEvents()
+        self.assertLessEqual(window.body_splitter.sizes()[0], MainWindow.LEFT_RAIL_MAXIMUM_WIDTH)
+        self.assertGreater(window.body_splitter.sizes()[1], 0)
+
+        total_width = sum(window.body_splitter.sizes())
+        window.body_splitter.setSizes([0, total_width])
+        QApplication.processEvents()
+        self.assertEqual(window.body_splitter.sizes()[0], 0)
+        self.assertGreater(window.body_splitter.sizes()[1], 0)
 
     def test_load_session_uses_remembered_session_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

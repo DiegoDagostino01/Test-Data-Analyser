@@ -2,7 +2,7 @@
 
 A **PySide6 / Qt** desktop application for loading engineering test data
 (CSV/XLSX/XLS), plotting it, and analysing it: statistics, requirement/limit
-margins, FFT, multi-run comparison, cursor point comparison, maths (calculated)
+margins, multi-run comparison, cursor point comparison, maths (calculated)
 channels, and structured engineering notes — with full analysis-session
 save/load.
 
@@ -53,7 +53,7 @@ run without it (the Qt tests skip automatically when PySide6 is absent).
 
 All tests are framework-independent and run headless — no visible GUI is
 required. They cover the domain models, the service layer, the viewmodels
-(statistics, limit margins, maths-channel formulas, plot-data windowing, FFT,
+(statistics, limit margins, maths-channel formulas, plot-data windowing,
 raw-data filtering/editing, run comparison, cursor compare, settings, and
 session save/restore), and the Qt panels/adapters under the offscreen platform:
 
@@ -122,8 +122,13 @@ right-hand axis (drawn on a Matplotlib `twinx` with an offset colour cycle and a
 merged legend). Choose the **plot kind** (Line, Scatter, or Line + Markers),
 optionally constrain the **analysis window** (X min/max), and enable the
 **low-pass filter** (cutoff Hz + order) to apply a zero-phase Butterworth filter
-per channel. Use **FFT** to plot averaged amplitude spectra for the selected
-channels.
+per channel.
+
+Use the **+** tab beside the plot tabs above the canvas to create additional
+plots. Each plot tab keeps its own X-axis selection, Y-axis selections, plot
+title, axis labels, limits, notes, and requirement overlays. Right-click a plot
+tab to duplicate, rename, or delete it; all plot tabs are saved and restored
+with analysis sessions.
 
 ## Requirements / Limits
 
@@ -180,7 +185,7 @@ core/        shared infrastructure (config, data I/O, filters, settings, utils)
 | --- | --- |
 | `core/` | Shared infrastructure: `config.py` (Eaton brand colours, version, domain keyword config), `data_io.py` (file/sheet loading, numeric coercion), `filters.py` (sampling-rate estimate, low-pass filter), `settings_manager.py` (persisted settings), `utils.py` (column-name helpers). |
 | `domain/` | Framework-independent dataclasses (plot/profile/session state, requirement limits, engineering notes, runs, calculated channels) with JSON-compatible `from_dict`/`to_dict`. Import directly, e.g. `from test_data_analyser.domain import PlotData`. |
-| `services/` | Pure engineering/data logic (statistics, limits, maths channels, plotting data, FFT, plot-render colours, raw data, run comparison, cursor compare, settings, session). No UI imports; returns values or `OperationResult`. |
+| `services/` | Pure engineering/data logic (statistics, limits, maths channels, plotting data, plot-render colours, raw data, run comparison, cursor compare, settings, session). No UI imports; returns values or `OperationResult`. |
 | `viewmodels/` | UI-independent coordinators over `AppState` (data-loading, plot-workspace, raw-data, maths-channels, runs-comparison, limits, engineering-notes, cursor-compare, settings, and the aggregating main-window VM). Return `OperationResult`; never open dialogs or import Qt. |
 | `qt_app/` | The only place PySide6 is imported. `main_qt.py` entry point, `main_window.py`, Eaton `theme.py`, `widgets/` (the migrated panels), and `adapters/` (pandas table model, Matplotlib Qt canvas, file dialogs, message service). |
 
@@ -193,8 +198,8 @@ test_data_analyser/
 ├─ domain/      conversions.py  models.py  settings.py  engineering_notes.py
 │               limits.py  plot_profile.py  run_model.py  session.py
 ├─ services/    statistics_service.py  limits_service.py  maths_channel_service.py
-│               plotting_data_service.py  plot_render_service.py  fft_service.py
-│               raw_data_service.py  run_comparison_service.py  cursor_service.py
+│               plotting_data_service.py  plot_render_service.py  raw_data_service.py
+│               run_comparison_service.py  cursor_service.py
 │               settings_service.py  session_service.py  results.py
 ├─ viewmodels/  app_state.py  main_window_vm.py  data_loading_vm.py
 │               plot_workspace_vm.py  raw_data_vm.py  maths_channels_vm.py

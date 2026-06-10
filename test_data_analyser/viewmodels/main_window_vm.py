@@ -7,6 +7,7 @@ and opens no dialogs; the UI supplies an explicit path for session I/O.
 """
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Optional
 
@@ -38,6 +39,101 @@ class MainWindowViewModel:
         self.limits = LimitsViewModel(self.state)
         self.engineering_notes = EngineeringNotesViewModel(self.state)
         self.cursor_compare = CursorCompareViewModel()
+
+    # ------------------------------------------------------------------
+    # Plot-profile list management
+    # ------------------------------------------------------------------
+    def ensure_plot_profiles(self) -> None:
+        """Ensure the state has at least one normalised plot profile."""
+        if not self.state.plot_profiles:
+            self.state.plot_profiles = [normalise_plot_profile({"name": "Plot 1"})]
+        else:
+            self.state.plot_profiles = [normalise_plot_profile(profile) for profile in self.state.plot_profiles]
+        self.state.active_plot_profile_index = self._clamped_profile_index(self.state.active_plot_profile_index)
+
+    def reset_plot_profiles(self) -> None:
+        """Start a fresh one-plot workspace for a newly opened data file."""
+        self.state.plot_profiles = [normalise_plot_profile({"name": "Plot 1"})]
+        self.state.active_plot_profile_index = 0
+        self.state.limit_lines = []
+        self.state.active_limit_line_index = 0
+        self.state.engineering_notes = {}
+
+    def add_plot_profile(self, name: str = "") -> OperationResult:
+        self.ensure_plot_profiles()
+        profile_name = name.strip() or self._next_plot_name()
+        profile_name = self._unique_profile_name(profile_name)
+        self.state.plot_profiles.append(normalise_plot_profile({"name": profile_name}))
+        self.state.active_plot_profile_index = len(self.state.plot_profiles) - 1
+        return OperationResult.success(f"Created plot '{profile_name}'.", payload=self.state.active_plot_profile_index)
+
+    def duplicate_plot_profile(self, index: int | None = None) -> OperationResult:
+        self.ensure_plot_profiles()
+        source_index = self._clamped_profile_index(self.state.active_plot_profile_index if index is None else index)
+        source = deepcopy(self.state.plot_profiles[source_index])
+        source_name = str(source.get("name", f"Plot {source_index + 1}")).strip() or f"Plot {source_index + 1}"
+        source["name"] = self._unique_profile_name(f"{source_name} Copy")
+        insert_index = source_index + 1
+        self.state.plot_profiles.insert(insert_index, normalise_plot_profile(source))
+        self.state.active_plot_profile_index = insert_index
+        return OperationResult.success(f"Duplicated plot '{source_name}'.", payload=insert_index)
+
+    def rename_plot_profile(self, index: int, name: str) -> OperationResult:
+        self.ensure_plot_profiles()
+        target_index = self._clamped_profile_index(index)
+        new_name = name.strip()
+        if not new_name:
+            return OperationResult.failure("Enter a plot name.")
+        existing_names = {
+            str(profile.get("name", "")).strip()
+            for current, profile in enumerate(self.state.plot_profiles)
+            if current != target_index
+        }
+        if new_name in existing_names:
+            return OperationResult.failure(f"A plot named '{new_name}' already exists.")
+        self.state.plot_profiles[target_index]["name"] = new_name
+        return OperationResult.success(f"Renamed plot to '{new_name}'.", payload=target_index)
+
+    def delete_plot_profile(self, index: int | None = None) -> OperationResult:
+        self.ensure_plot_profiles()
+        if len(self.state.plot_profiles) <= 1:
+            return OperationResult.failure("At least one plot must remain in the session.")
+        target_index = self._clamped_profile_index(self.state.active_plot_profile_index if index is None else index)
+        deleted = self.state.plot_profiles.pop(target_index)
+        active = self.state.active_plot_profile_index
+        if active > target_index:
+            active -= 1
+        elif active == target_index:
+            active = min(target_index, len(self.state.plot_profiles) - 1)
+        self.state.active_plot_profile_index = self._clamped_profile_index(active)
+        name = str(deleted.get("name", f"Plot {target_index + 1}"))
+        return OperationResult.success(f"Deleted plot '{name}'.", payload=self.state.active_plot_profile_index)
+
+    def select_plot_profile(self, index: int) -> OperationResult:
+        self.ensure_plot_profiles()
+        if not 0 <= index < len(self.state.plot_profiles):
+            return OperationResult.failure("Plot tab is out of range.")
+        self.state.active_plot_profile_index = index
+        profile = self.state.active_plot_profile() or {}
+        return OperationResult.success(f"Selected plot '{profile.get('name', index + 1)}'.", payload=index)
+
+    def _clamped_profile_index(self, index: int) -> int:
+        if not self.state.plot_profiles:
+            return 0
+        return max(0, min(index, len(self.state.plot_profiles) - 1))
+
+    def _next_plot_name(self) -> str:
+        return self._unique_profile_name(f"Plot {len(self.state.plot_profiles) + 1}")
+
+    def _unique_profile_name(self, base_name: str) -> str:
+        existing = {str(profile.get("name", "")).strip() for profile in self.state.plot_profiles}
+        candidate = base_name.strip() or "Plot"
+        if candidate not in existing:
+            return candidate
+        counter = 2
+        while f"{candidate} {counter}" in existing:
+            counter += 1
+        return f"{candidate} {counter}"
 
     # ------------------------------------------------------------------
     # Session persistence
@@ -112,44 +208,46 @@ class MainWindowViewModel:
         filter_settings: dict[str, Any] | None = None,
         generated: bool = False,
     ) -> None:
-        """Fold the current top-level limits/notes + axis selection into one profile.
+        """Fold the current top-level limits/notes + axis selection into the active profile.
 
         The Qt shell keeps limit lines and engineering notes as top-level working
-        state and the axis selection in the panel; this folds them into a single
-        plot profile so :meth:`save_session` persists a session compatible with
+        state and the axis selection in the panel; this folds them into the
+        active plot profile so :meth:`save_session` persists every plot tab with
         the existing on-disk format.
         """
-        name = self.state.plot_profiles[0]["name"] if self.state.plot_profiles else "Plot 1"
-        self.state.plot_profiles = [
-            normalise_plot_profile(
-                {
-                    "name": name,
-                    "x_column": x_column,
-                    "y_columns": list(y_columns or []),
-                    "secondary_y_columns": list(secondary_y_columns or []),
-                    "title": title.strip() or "Engineering Test Data",
-                    "x_label": x_label.strip(),
-                    "y_label": y_label.strip() or "Selected Signals",
-                    "secondary_y_label": secondary_y_label.strip(),
-                    "plot_kind": plot_kind or "Line",
-                    "auto_fit_axes": auto_fit_axes,
-                    "axis_limits": dict(axis_limits or {}),
-                    "legend": dict(legend_settings or {}),
-                    "analysis_window": dict(analysis_window or {}),
-                    "filter": dict(filter_settings or {}),
-                    "generated": bool(generated),
-                    "manual_labels": {
-                        "title": bool(title.strip()),
-                        "x_label": bool(x_label.strip()),
-                        "y_label": bool(y_label.strip()),
-                        "secondary_y_label": bool(secondary_y_label.strip()),
-                    },
-                    "limit_lines": [dict(line) for line in self.state.limit_lines],
-                    "engineering_notes": dict(self.state.engineering_notes),
-                }
-            )
-        ]
-        self.state.active_plot_profile_index = 0
+        self.ensure_plot_profiles()
+        index = self._clamped_profile_index(self.state.active_plot_profile_index)
+        existing = dict(self.state.plot_profiles[index])
+        profile = normalise_plot_profile(
+            {
+                **existing,
+                "name": existing.get("name", f"Plot {index + 1}"),
+                "x_column": x_column,
+                "y_columns": list(y_columns or []),
+                "secondary_y_columns": list(secondary_y_columns or []),
+                "title": title.strip() or "Engineering Test Data",
+                "x_label": x_label.strip(),
+                "y_label": y_label.strip() or "Selected Signals",
+                "secondary_y_label": secondary_y_label.strip(),
+                "plot_kind": plot_kind or "Line",
+                "auto_fit_axes": auto_fit_axes,
+                "axis_limits": dict(axis_limits or {}),
+                "legend": dict(legend_settings or {}),
+                "analysis_window": dict(analysis_window or {}),
+                "filter": dict(filter_settings or {}),
+                "generated": bool(generated),
+                "manual_labels": {
+                    "title": bool(title.strip()),
+                    "x_label": bool(x_label.strip()),
+                    "y_label": bool(y_label.strip()),
+                    "secondary_y_label": bool(secondary_y_label.strip()),
+                },
+                "limit_lines": [dict(line) for line in self.state.limit_lines],
+                "engineering_notes": dict(self.state.engineering_notes),
+            }
+        )
+        self.state.plot_profiles[index] = profile
+        self.state.active_plot_profile_index = index
 
     def restore_session(self, path: str | Path) -> OperationResult:
         """Load a session and fully restore the file, runs, and working state.
