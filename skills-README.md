@@ -33,9 +33,9 @@ The active VS Code discovery location is:
       SKILL.md
 ```
 
-The root `skills/` folder contains editable reference copies with the same
-content. When a skill changes, update both locations so agent discovery and the
-visible reference folder stay aligned.
+Skills are maintained only under `.github/skills/`. Do not recreate a root
+`skills/` mirror; update the active `.github/skills/<name>/SKILL.md` file when a
+skill changes.
 
 ## Skill triggers
 

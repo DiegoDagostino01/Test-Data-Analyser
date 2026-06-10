@@ -30,7 +30,7 @@ Qt-only and is documented in `ARCHITECTURE.md`.
 ## Skill workflow
 
 - Load and follow the relevant skill from `.github/skills/` before making task
-  changes. The root `skills/` folder contains editable reference copies.
+  changes. Skills are maintained only in `.github/skills/`.
 - Use `python-refactor-safely` for layered Python refactors.
 - Use `pyside6-qt-gui-maintainer` for Qt widgets, layout, signals, dialogs, and
   Matplotlib canvas work.
