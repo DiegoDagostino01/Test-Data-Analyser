@@ -1,10 +1,11 @@
 # VS Code Agent Skills for Test Data Analyser
 
-This package contains Markdown files for GitHub Copilot / VS Code Agent Skills and project-wide custom instructions.
+This repository contains GitHub Copilot / VS Code Agent Skills for the current
+PySide6 / Qt Test Data Analyser workflow.
 
-## Recommended repository placement
+## Active placement
 
-Copy these into your repository as follows:
+The active VS Code discovery location is:
 
 ```text
 .github/
@@ -12,7 +13,7 @@ Copy these into your repository as follows:
   skills/
     python-refactor-safely/
       SKILL.md
-    tkinter-gui-maintainer/
+    pyside6-qt-gui-maintainer/
       SKILL.md
     plotting-engine-separation/
       SKILL.md
@@ -20,7 +21,7 @@ Copy these into your repository as follows:
       SKILL.md
     code-review-bug-hunter/
       SKILL.md
-    pytest-test-writer/
+    python-test-writer/
       SKILL.md
     performance-cleanup/
       SKILL.md
@@ -32,6 +33,21 @@ Copy these into your repository as follows:
       SKILL.md
 ```
 
-## Included flat copies
+The root `skills/` folder contains editable reference copies with the same
+content. When a skill changes, update both locations so agent discovery and the
+visible reference folder stay aligned.
 
-Flat `.md` copies are also included for easy viewing/editing before placing them into the final `.github/skills/<skill-name>/SKILL.md` structure.
+## Skill triggers
+
+| Skill | Use when |
+| --- | --- |
+| `python-refactor-safely` | Refactoring layered Python modules or moving responsibilities. |
+| `pyside6-qt-gui-maintainer` | Modifying Qt widgets, layouts, signals, dialogs, or Matplotlib canvas code. |
+| `plotting-engine-separation` | Changing plotting, FFT, legends, axis limits, figure export, or plot data preparation. |
+| `pandas-data-cleaning-analysis` | Working on CSV/Excel loading, numeric coercion, raw data, filtering, statistics, or export. |
+| `code-review-bug-hunter` | Reviewing changed Python/Qt code for regressions. |
+| `python-test-writer` | Adding or updating the `unittest`-based test suite. |
+| `performance-cleanup` | Improving responsiveness, caching, dataframe operations, or UI rebuild cost. |
+| `session-profile-state-guardian` | Changing sessions, plot profiles, generated state, labels, limits, notes, or per-plot configuration. |
+| `engineering-app-documentation` | Updating README, architecture, migration, or engineering notes. |
+| `git-change-discipline` | Making multi-file changes that should stay reviewable and easy to revert. |
