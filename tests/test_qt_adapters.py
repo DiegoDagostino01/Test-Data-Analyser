@@ -42,6 +42,7 @@ try:
     from test_data_analyser.qt_app.adapters import matplotlib_qt_adapter, qt_file_dialogs, qt_message_service
     from test_data_analyser.qt_app.adapters.editable_raw_data_model import EditableRawDataTableModel
     from test_data_analyser.qt_app.adapters.pandas_table_model import PandasTableModel
+    from test_data_analyser.qt_app.main_qt import _app_icon_path
     from test_data_analyser.qt_app.main_window import MainWindow
     from test_data_analyser.qt_app.widgets.help_dialog import HelpDialog
     from test_data_analyser.qt_app.widgets.no_wheel_combo_box import NoWheelComboBox
@@ -1402,7 +1403,10 @@ class MainWindowLayoutTests(unittest.TestCase):
         subtitle = window.findChild(QLabel, "EatonHeaderSubtitle")
         self.assertIsNotNone(subtitle)
         assert subtitle is not None
-        self.assertEqual(subtitle.text(), "Eaton Engineering - Analysis Workspace (V1.00.00)")
+        self.assertEqual(subtitle.text(), "Eaton Engineering - Analysis Workspace (V1.00.01)")
+
+    def test_application_icon_asset_exists(self) -> None:
+        self.assertTrue(_app_icon_path().exists())
 
     def test_workflow_help_opens_reusable_modeless_dialog(self) -> None:
         window = self._window()

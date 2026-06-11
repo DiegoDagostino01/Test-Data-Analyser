@@ -19,6 +19,16 @@ current release format.
 When releasing an update, change `__version__` and add a new entry at the top of
 this file.
 
+## 1.00.01 - 2026-06-11
+
+Icon and packaging polish update.
+
+- Added the new Test Data Analyser application icon asset.
+- Set the icon for the running PySide6 / Qt application window.
+- Rebuilt the Windows executable bundle so `Test Data Analyser.exe` uses the new
+  icon.
+- Kept the launch folder structure tidy for new users.
+
 ## 1.00.00 - 2026-06-11
 
 First release baseline.
