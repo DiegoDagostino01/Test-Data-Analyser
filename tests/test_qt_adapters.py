@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from pathlib import Path
 
 import pandas as pd
 
@@ -561,6 +562,20 @@ class AxisSelectionPanelTests(unittest.TestCase):
             if self.panel.y_list.item(row).checkState() == Qt.CheckState.Checked
         ]
         self.assertEqual(checked, ["Current on Phase A"])
+
+    def test_maths_channels_use_dedicated_group(self) -> None:
+        self.panel.set_columns(
+            ["Time", "Outlet Pressure", "Pressure Drop", "Power"],
+            "Time",
+            maths_channel_names=["Pressure Drop", "Power"],
+        )
+        self.assertGreaterEqual(self.panel.group_combo.findText("Maths Channel"), 0)
+
+        self.panel.group_combo.setCurrentText("Pressure")
+        self.assertEqual(self._checkable_texts(self.panel.y_list), ["Outlet Pressure"])
+
+        self.panel.group_combo.setCurrentText("Maths Channel")
+        self.assertEqual(self._checkable_texts(self.panel.y_list), ["Power", "Pressure Drop"])
 
     def test_primary_select_all_respects_channel_group(self) -> None:
         self.panel.set_columns(["Time", "TC1", "TC2", "Outlet Pressure"], "Time")
@@ -1297,6 +1312,12 @@ class OpenDataFileInitialDirTests(unittest.TestCase):
         self.assertEqual(self.captured["caption"], "Save analysis session")
         self.assertEqual(self.captured["directory"], "C:/sessions")
 
+    def test_locate_data_file_uses_expected_filename_in_caption(self) -> None:
+        result = qt_file_dialogs.locate_data_file(None, "C:/moved", "run.xlsx")
+        self.assertEqual(result, "C:/data/file.csv")
+        self.assertEqual(self.captured["caption"], "Locate moved data file: run.xlsx")
+        self.assertEqual(self.captured["directory"], "C:/moved")
+
 
 @unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
 class MainWindowLayoutTests(unittest.TestCase):
@@ -1728,6 +1749,55 @@ class MainWindowLayoutTests(unittest.TestCase):
                 str(Path(save_path).resolve().parent),
             )
 
+    def test_save_session_prefills_loaded_session_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session_path = os.path.join(directory, "loaded_session.json")
+            selected_save_path = os.path.join(directory, "saved_session.json")
+            with open(session_path, "w", encoding="utf-8") as handle:
+                handle.write("{}")
+
+            manager = SettingsManager(os.path.join(directory, "settings.json"))
+            window = MainWindow(manager)
+
+            class _Result:
+                ok = True
+                message = "Session loaded."
+                warnings: list[str] = []
+                payload: object | None = {}
+
+            class _SaveResult:
+                ok = True
+                message = "Saved."
+                payload = selected_save_path
+
+            original_open_dialog = qt_file_dialogs.open_session_file
+            original_save_dialog = qt_file_dialogs.save_session_file
+            original_show_result = qt_message_service.show_result
+            captured: dict[str, str] = {}
+
+            qt_file_dialogs.open_session_file = lambda parent, initial_dir="": session_path
+            window.vm.restore_session = lambda path: _Result()
+            window._apply_loaded_session = lambda selection: None
+
+            def fake_save_dialog(parent, initial_dir=""):
+                captured["initial_dir"] = initial_dir
+                return selected_save_path
+
+            qt_file_dialogs.save_session_file = fake_save_dialog
+            qt_message_service.show_result = lambda *args, **kwargs: None
+            window.vm.capture_working_state = lambda **kwargs: None
+            window.vm.save_session = lambda path: _SaveResult()
+            try:
+                window.load_session()
+                window.save_session()
+            finally:
+                qt_file_dialogs.open_session_file = original_open_dialog
+                qt_file_dialogs.save_session_file = original_save_dialog
+                qt_message_service.show_result = original_show_result
+
+            self.assertEqual(captured["initial_dir"], session_path)
+            self.assertEqual(window._current_session_path, selected_save_path)
+
 
 @unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
 class MainWindowSessionRestoreTests(unittest.TestCase):
@@ -1823,6 +1893,54 @@ class MainWindowSessionRestoreTests(unittest.TestCase):
             self._load_session(target, session_path)
             self.assertFalse(target._plot_generated)
             self.assertFalse(target.plot_workspace.canvas.axes.get_lines())
+
+    def test_load_session_relinks_moved_main_data_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            old_dir = os.path.join(directory, "old")
+            new_dir = os.path.join(directory, "new")
+            os.mkdir(old_dir)
+            os.mkdir(new_dir)
+            data_path = os.path.join(old_dir, "data.csv")
+            moved_path = os.path.join(new_dir, "data.csv")
+            session_path = os.path.join(directory, "session.json")
+            pd.DataFrame({"Time": [0.0, 1.0, 2.0], "A": [1.0, 2.0, 3.0]}).to_csv(data_path, index=False)
+
+            source = self._make_window(directory)
+            source.vm.data_loading.load_file(data_path, None)
+            source._on_file_loaded(source.vm.state.column_names())
+            source.axis_panel.apply_selection(source.vm.state.column_names(), "Time", ["A"], [])
+            self._save_session(source, session_path)
+            os.replace(data_path, moved_path)
+
+            target = self._make_window(directory)
+            original_session_dialog = qt_file_dialogs.open_session_file
+            original_locate_dialog = qt_file_dialogs.locate_data_file
+            original_warning = qt_message_service.warning
+            captured: dict[str, str] = {}
+            warnings: list[str] = []
+
+            def fake_locate(parent, initial_dir="", expected_filename=""):
+                captured["initial_dir"] = initial_dir
+                captured["expected_filename"] = expected_filename
+                return moved_path
+
+            qt_file_dialogs.open_session_file = lambda parent, initial_dir="": session_path
+            qt_file_dialogs.locate_data_file = fake_locate
+            qt_message_service.warning = lambda parent, title, message: warnings.append(message)
+            try:
+                target.load_session()
+            finally:
+                qt_file_dialogs.open_session_file = original_session_dialog
+                qt_file_dialogs.locate_data_file = original_locate_dialog
+                qt_message_service.warning = original_warning
+
+            self.assertEqual(captured["expected_filename"], "data.csv")
+            self.assertEqual(target.vm.state.filepath, Path(moved_path))
+            self.assertEqual(target.vm.state.column_names(), ["Time", "A"])
+            self.assertEqual(target.axis_panel.x_column(), "Time")
+            self.assertEqual(target.axis_panel.selected_y(), ["A"])
+            self.assertIn("could not be loaded", warnings[0])
+            self.assertEqual(target.data_panel.file_label.text(), str(Path(moved_path)))
 
     def test_save_plot_handler_writes_png_via_dialog(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

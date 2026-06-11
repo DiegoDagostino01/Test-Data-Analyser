@@ -22,6 +22,18 @@ def open_data_file(parent: QWidget | None = None, initial_dir: str = "") -> Opti
     return filename or None
 
 
+def locate_data_file(
+    parent: QWidget | None = None,
+    initial_dir: str = "",
+    expected_filename: str = "",
+) -> Optional[str]:
+    caption = "Locate moved data file"
+    if expected_filename:
+        caption = f"Locate moved data file: {expected_filename}"
+    filename, _ = QFileDialog.getOpenFileName(parent, caption, initial_dir or "", DATA_FILE_FILTER)
+    return filename or None
+
+
 def open_session_file(parent: QWidget | None = None, initial_dir: str = "") -> Optional[str]:
     filename, _ = QFileDialog.getOpenFileName(
         parent, "Load analysis session", initial_dir or "", SESSION_FILTER

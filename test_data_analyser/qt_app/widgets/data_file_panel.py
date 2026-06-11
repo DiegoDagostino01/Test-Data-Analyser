@@ -87,3 +87,28 @@ class DataFilePanel(QFrame):
             return
         self.file_label.setText(str(self.vm.state.filepath))
         self.fileLoaded.emit(result.payload or [])
+
+    def refresh_from_state(self) -> None:
+        path = self.vm.state.filepath
+        if path is None:
+            self._current_path = None
+            self.file_label.setText("No file loaded.")
+            self.sheet_combo.clear()
+            self.sheet_row.setVisible(False)
+            return
+
+        self._current_path = str(path)
+        self.file_label.setText(str(path))
+        sheets = self.vm.get_sheets(path)
+        if not sheets:
+            self.sheet_combo.clear()
+            self.sheet_row.setVisible(False)
+            return
+
+        selected_sheet = self.vm.state.sheet_name if self.vm.state.sheet_name in sheets else sheets[0]
+        self.sheet_combo.blockSignals(True)
+        self.sheet_combo.clear()
+        self.sheet_combo.addItems(sheets)
+        self.sheet_combo.setCurrentText(selected_sheet)
+        self.sheet_combo.blockSignals(False)
+        self.sheet_row.setVisible(True)

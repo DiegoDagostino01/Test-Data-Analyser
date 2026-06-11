@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Callable
-from typing import Optional
+from pathlib import Path
+from typing import Any, Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication, QPixmap
@@ -67,6 +68,7 @@ class MainWindow(QMainWindow):
         self._plot_generated = False
         self._syncing_plot_tabs = False
         self._active_plot_tab_index = self.vm.state.active_plot_profile_index
+        self._current_session_path: str | None = None
 
         self.setWindowTitle("Test Data Analyser — Eaton Edition")
         self.resize(1320, 840)
@@ -623,6 +625,7 @@ class MainWindow(QMainWindow):
             str(profile.get("x_column", "")),
             list(profile.get("y_columns", [])),
             list(profile.get("secondary_y_columns", [])),
+            maths_channel_names=self._maths_channel_names(),
         )
         self.axis_panel.apply_plot_settings(profile)
         axis_ticks = profile.get("axis_ticks", {}) if isinstance(profile, dict) else {}
@@ -724,18 +727,25 @@ class MainWindow(QMainWindow):
         )
 
     def save_session(self) -> None:
-        initial_dir = qt_widget_helpers.save_session_initial_directory(
-            self.settings_manager,
-            self.vm.state.filepath,
-        )
+        initial_dir = self._save_session_initial_path()
         path = qt_file_dialogs.save_session_file(self, initial_dir)
         if not path:
             return
         qt_widget_helpers.remember_session_directory(self.settings_manager, path)
         self._capture_current_plot_profile()
         result = self.vm.save_session(path)
+        if result.ok:
+            self._current_session_path = str(getattr(result, "payload", None) or path)
         qt_message_service.show_result(self, "Save Session", result)
         self.statusBar().showMessage(result.message)
+
+    def _save_session_initial_path(self) -> str:
+        if self._current_session_path:
+            return self._current_session_path
+        return qt_widget_helpers.save_session_initial_directory(
+            self.settings_manager,
+            self.vm.state.filepath,
+        )
 
     def load_session(self) -> None:
         initial_dir = qt_widget_helpers.last_session_directory(self.settings_manager)
@@ -743,20 +753,84 @@ class MainWindow(QMainWindow):
         if not path:
             return
         qt_widget_helpers.remember_session_directory(self.settings_manager, path)
-        result = self.vm.restore_session(path)
+        result, main_data_warning_shown = self._restore_session_with_optional_relink(path)
         if not result.ok:
             qt_message_service.error(self, "Load Session", result.message)
             self.statusBar().showMessage(result.message)
             return
+        self._current_session_path = path
         selection = result.payload if isinstance(result.payload, dict) else {}
         self._apply_loaded_session(selection)
-        if result.warnings:
-            qt_message_service.warning(self, "Load Session", "\n".join(result.warnings))
+        warnings = self._warnings_for_display(result.warnings, main_data_warning_shown)
+        if warnings:
+            qt_message_service.warning(self, "Load Session", "\n".join(warnings))
         self.statusBar().showMessage(result.message)
 
     def _apply_loaded_session(self, selection: dict) -> None:
+        self.data_panel.refresh_from_state()
         self._sync_plot_tabs()
         self._apply_active_plot_profile(clear_global_forms=True)
+
+    def _restore_session_with_optional_relink(self, path: str) -> tuple[Any, bool]:
+        result = self.vm.restore_session(path)
+        main_data_warning_shown = False
+        while result.ok and self._needs_main_data_relink(result):
+            replacement = self._prompt_for_relocated_source_file(result)
+            main_data_warning_shown = True
+            if not replacement:
+                break
+            result = self.vm.restore_session(path, data_file_override=replacement)
+            if result.ok and not self._needs_main_data_relink(result):
+                qt_widget_helpers.remember_data_directory(self.settings_manager, replacement)
+        return result, main_data_warning_shown
+
+    @staticmethod
+    def _needs_main_data_relink(result) -> bool:
+        payload = result.payload if isinstance(result.payload, dict) else {}
+        return bool(payload.get("main_data_warning")) and not bool(payload.get("main_data_loaded"))
+
+    def _prompt_for_relocated_source_file(self, result) -> str | None:
+        payload = result.payload if isinstance(result.payload, dict) else {}
+        source_file_path = str(payload.get("source_file_path") or "")
+        main_data_warning = str(payload.get("main_data_warning") or "The source data file could not be loaded.")
+        message = (
+            "The data file saved in this session could not be loaded:\n"
+            f"{source_file_path or '(no source path saved)'}\n\n"
+            f"{main_data_warning}\n\n"
+            "Select the moved CSV/Excel file to continue loading the session, "
+            "or cancel to open the session without data."
+        )
+        qt_message_service.warning(self, "Load Session", message)
+        return qt_file_dialogs.locate_data_file(
+            self,
+            self._initial_relink_directory(source_file_path),
+            self._source_filename(source_file_path),
+        )
+
+    def _initial_relink_directory(self, source_file_path: str) -> str:
+        try:
+            source_parent = Path(source_file_path).expanduser().resolve().parent
+            if source_file_path and source_parent.is_dir():
+                return str(source_parent)
+        except Exception:
+            pass
+        return (
+            qt_widget_helpers.last_data_directory(self.settings_manager)
+            or qt_widget_helpers.last_session_directory(self.settings_manager)
+        )
+
+    @staticmethod
+    def _source_filename(source_file_path: str) -> str:
+        try:
+            return Path(source_file_path).name
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _warnings_for_display(warnings: list[str], main_data_warning_shown: bool) -> list[str]:
+        if not main_data_warning_shown:
+            return warnings
+        return [warning for warning in warnings if not warning.startswith("Main data file:")]
 
     def _restore_generated_plot(self, profile: dict) -> None:
         """Re-render the plot that was on screen when the session was saved.
@@ -792,12 +866,13 @@ class MainWindow(QMainWindow):
 
     def _on_file_loaded(self, columns: list[str]) -> None:
         suggested_x = self.vm.data_loading.suggested_x_column(columns)
+        self._current_session_path = None
         self._plot_generated = False
         self.vm.reset_plot_profiles()
         self._sync_plot_tabs()
         self.plot_workspace.clear_plot()
         self.cursor_panel.refresh()
-        self.axis_panel.set_columns(columns, suggested_x)
+        self.axis_panel.set_columns(columns, suggested_x, maths_channel_names=self._maths_channel_names())
         self.statistics_panel.set_statistics(self.vm.plot_workspace.statistics([]))
         self.raw_data_panel.clear()
         self.maths_panel.clear_form()
@@ -919,10 +994,13 @@ class MainWindow(QMainWindow):
         xmin, xmax = self.axis_panel.analysis_window()
         return self.axis_panel.x_column(), self.axis_panel.all_selected_y(), xmin, xmax
 
+    def _maths_channel_names(self) -> list[str]:
+        return list(self.vm.state.calculated_channels.keys())
+
     def _on_channels_changed(self) -> None:
         columns = self.vm.maths_channels.state.column_names()
         if columns:
-            self.axis_panel.update_columns(columns)
+            self.axis_panel.update_columns(columns, maths_channel_names=self._maths_channel_names())
         self.raw_data_panel.refresh()
 
     def _on_cursor_window(self, xmin: float, xmax: float) -> None:

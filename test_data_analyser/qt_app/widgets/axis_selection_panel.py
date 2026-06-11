@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ...core.config import MATHS_CHANNEL_GROUP
 from ...core.utils import channel_group_options, classify_channel_name, natural_sort_key
 from .no_wheel_combo_box import NoWheelComboBox
 
@@ -233,9 +234,14 @@ class AxisSelectionPanel(QFrame):
         item.setFont(font)
         return item
 
-    def set_columns(self, columns: list[str], suggested_x: str) -> None:
+    def set_columns(
+        self,
+        columns: list[str],
+        suggested_x: str,
+        maths_channel_names: list[str] | None = None,
+    ) -> None:
         self._columns = list(columns)
-        self._channel_groups = {column: classify_channel_name(column) for column in self._columns}
+        self._channel_groups = self._build_channel_groups(self._columns, maths_channel_names)
         self._checked_primary.clear()
         self._checked_secondary.clear()
         self.x_combo.blockSignals(True)
@@ -251,7 +257,7 @@ class AxisSelectionPanel(QFrame):
 
         self._refresh_channel_lists()
 
-    def update_columns(self, columns: list[str]) -> None:
+    def update_columns(self, columns: list[str], maths_channel_names: list[str] | None = None) -> None:
         """Refresh the available columns, preserving the current X and checked Y.
 
         Used when calculated channels add or remove columns so the user's current
@@ -259,7 +265,7 @@ class AxisSelectionPanel(QFrame):
         """
         current_x = self.x_column()
         self._columns = list(columns)
-        self._channel_groups = {column: classify_channel_name(column) for column in self._columns}
+        self._channel_groups = self._build_channel_groups(self._columns, maths_channel_names)
         available = set(self._columns)
         self._checked_primary &= available
         self._checked_secondary &= available
@@ -279,10 +285,11 @@ class AxisSelectionPanel(QFrame):
         x_column: str,
         y_columns: list[str],
         secondary_y_columns: list[str],
+        maths_channel_names: list[str] | None = None,
     ) -> None:
         """Populate the columns and restore a saved X / Y / secondary-Y selection."""
         self._columns = list(columns)
-        self._channel_groups = {column: classify_channel_name(column) for column in self._columns}
+        self._channel_groups = self._build_channel_groups(self._columns, maths_channel_names)
         available = set(self._columns)
         self._checked_primary = set(y_columns) & available
         self._checked_secondary = set(secondary_y_columns) & available
@@ -338,6 +345,17 @@ class AxisSelectionPanel(QFrame):
     @staticmethod
     def _sort_columns(columns: list[str]) -> list[str]:
         return sorted(columns, key=natural_sort_key)
+
+    @staticmethod
+    def _build_channel_groups(
+        columns: list[str],
+        maths_channel_names: list[str] | None = None,
+    ) -> dict[str, str]:
+        maths_channels = set(maths_channel_names or [])
+        return {
+            column: MATHS_CHANNEL_GROUP if column in maths_channels else classify_channel_name(column)
+            for column in columns
+        }
 
     def _on_primary_item_changed(self, item: QListWidgetItem) -> None:
         if item.data(Qt.ItemDataRole.UserRole) == _GROUP_HEADER_ROLE:

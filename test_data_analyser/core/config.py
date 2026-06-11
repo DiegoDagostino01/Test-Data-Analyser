@@ -145,10 +145,11 @@ DOMAIN_CONFIG = {
 }
 
 TEMPERATURE_KEYWORDS = ("temp", "temperature", "tc", "deg c", "degc", "°c")
+MATHS_CHANNEL_GROUP = "Maths Channel"
 
 COLUMN_GROUP_ORDER = (
     "Time", "Temperature", "Flow", "Pressure", "Current", "Voltage", "Speed",
-    "Other Numeric", "Non-numeric / Metadata",
+    MATHS_CHANNEL_GROUP, "Other Numeric", "Non-numeric / Metadata",
 )
 
 NUMERIC_EXTRACT_RE = re.compile(r"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)")

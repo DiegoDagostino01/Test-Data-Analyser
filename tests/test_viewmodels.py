@@ -764,6 +764,57 @@ class MainWindowViewModelTests(unittest.TestCase):
             result = target.restore_session(session_path)
             self.assertTrue(result.ok)
             self.assertTrue(result.warnings)
+            self.assertFalse(result.payload["main_data_loaded"])
+            self.assertIsNone(target.state.df)
+
+    def test_restore_session_uses_data_file_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            old_dir = Path(tmp) / "old"
+            new_dir = Path(tmp) / "new"
+            old_dir.mkdir()
+            new_dir.mkdir()
+            original_path = old_dir / "data.csv"
+            moved_path = new_dir / "data.csv"
+            pd.DataFrame({"Time": [0.0, 1.0], "A": [2.0, 3.0]}).to_csv(original_path, index=False)
+
+            source = MainWindowViewModel()
+            self.assertTrue(source.data_loading.load_file(original_path, None).ok)
+            source.capture_working_state(x_column="Time", y_columns=["A"], secondary_y_columns=[])
+            session_path = Path(tmp) / "s.json"
+            self.assertTrue(source.save_session(session_path).ok)
+
+            original_path.replace(moved_path)
+
+            target = MainWindowViewModel()
+            result = target.restore_session(session_path, data_file_override=moved_path)
+            self.assertTrue(result.ok, result.message)
+            self.assertEqual(result.warnings, [])
+            self.assertTrue(result.payload["main_data_loaded"])
+            self.assertEqual(target.state.filepath, moved_path)
+            self.assertEqual(target.state.column_names(), ["Time", "A"])
+
+    def test_restore_missing_main_file_clears_previous_dataframe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session_path = Path(tmp) / "s.json"
+            session = {
+                "version": "test",
+                "file_path": str(Path(tmp) / "gone.csv"),
+                "sheet_name": "",
+                "runs": [],
+                "active_plot_profile_index": 0,
+                "plot_profiles": [{"name": "Plot 1", "x_column": "Time", "y_columns": ["A"]}],
+                "calculated_channels": {},
+            }
+            from test_data_analyser.services import session_service
+
+            session_service.save_session_dict(session_path, session)
+
+            target = MainWindowViewModel()
+            target.state.df = pd.DataFrame({"Old": [1.0]})
+            result = target.restore_session(session_path)
+            self.assertTrue(result.ok)
+            self.assertIsNone(target.state.df)
+            self.assertIsNone(target.state.filepath)
 
 
 if __name__ == "__main__":

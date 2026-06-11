@@ -278,15 +278,21 @@ class MainWindowViewModel:
         self.state.plot_profiles[index] = profile
         self.state.active_plot_profile_index = index
 
-    def restore_session(self, path: str | Path) -> OperationResult:
+    def restore_session(
+        self,
+        path: str | Path,
+        data_file_override: str | Path | None = None,
+    ) -> OperationResult:
         """Load a session and fully restore the file, runs, and working state.
 
         Reloads the source dataframe, recalculates maths channels, reloads the
         comparison runs from their saved paths, and pulls the active profile's
         limit lines / engineering notes into the top-level working state. The
-        payload is the restored axis selection
-        (``x_column``/``y_columns``/``secondary_y_columns``) so the UI can apply
-        it; ``warnings`` lists anything that could not be reloaded.
+        ``data_file_override`` lets the UI relink a moved source file without
+        rewriting the session first. The payload is the restored axis selection
+        plus main-data restore metadata so the UI can apply it and decide
+        whether to prompt for a replacement file; ``warnings`` lists anything
+        that could not be reloaded.
         """
         result = self.load_session(path)
         if not result.ok:
@@ -299,10 +305,16 @@ class MainWindowViewModel:
         self.state.active_limit_line_index = 0
         self.state.engineering_notes = dict(profile.get("engineering_notes", {}))
 
-        if session.file_path:
-            load_result = self.data_loading.load_file(session.file_path, session.sheet_name or None)
+        source_file_path = str(data_file_override) if data_file_override else session.file_path
+        main_data_warning = ""
+        self.state.df = None
+        self.state.filepath = None
+        self.state.sheet_name = session.sheet_name
+        if source_file_path:
+            load_result = self.data_loading.load_file(source_file_path, session.sheet_name or None)
             if not load_result.ok:
-                warnings.append(f"Main data file: {load_result.message}")
+                main_data_warning = load_result.message
+                warnings.append(f"Main data file: {main_data_warning}")
 
         if self.state.df is not None and self.state.calculated_channels:
             warnings.extend(self.maths_channels.recalculate().errors)
@@ -327,6 +339,9 @@ class MainWindowViewModel:
             "x_column": profile.get("x_column", ""),
             "y_columns": list(profile.get("y_columns", [])),
             "secondary_y_columns": list(profile.get("secondary_y_columns", [])),
+            "source_file_path": source_file_path,
+            "main_data_loaded": self.state.df is not None,
+            "main_data_warning": main_data_warning,
         }
         message = "Session loaded."
         if warnings:
