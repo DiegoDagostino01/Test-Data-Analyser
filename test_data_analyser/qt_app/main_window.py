@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QGuiApplication, QPixmap
+from PySide6.QtGui import QAction, QGuiApplication, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -42,6 +42,7 @@ from .widgets.axis_selection_panel import AxisSelectionPanel
 from .widgets.cursor_compare_panel import CursorComparePanel
 from .widgets.data_file_panel import DataFilePanel
 from .widgets.engineering_notes_panel import EngineeringNotesPanel
+from .widgets.help_dialog import HelpDialog
 from .widgets.limits_panel import LimitsPanel
 from .widgets.maths_channels_panel import MathsChannelsPanel
 from .widgets.plot_workspace import PlotWorkspace
@@ -69,6 +70,7 @@ class MainWindow(QMainWindow):
         self._syncing_plot_tabs = False
         self._active_plot_tab_index = self.vm.state.active_plot_profile_index
         self._current_session_path: str | None = None
+        self._help_dialog: HelpDialog | None = None
 
         self.setWindowTitle("Test Data Analyser — Eaton Edition")
         self.resize(1320, 840)
@@ -83,36 +85,28 @@ class MainWindow(QMainWindow):
     # Construction
     # ------------------------------------------------------------------
     def _build_menu(self) -> None:
-        file_menu = self.menuBar().addMenu("&File")
-        open_action = file_menu.addAction("&Open Data File…")
-        open_action.setShortcut("Ctrl+O")
-        open_action.triggered.connect(self._open_via_panel)
-        file_menu.addSeparator()
-        save_session_action = file_menu.addAction("&Save Session…")
-        save_session_action.setShortcut("Ctrl+S")
-        save_session_action.triggered.connect(self.save_session)
-        load_session_action = file_menu.addAction("&Load Session…")
-        load_session_action.setShortcut("Ctrl+L")
-        load_session_action.triggered.connect(self.load_session)
-        file_menu.addSeparator()
-        exit_action = file_menu.addAction("E&xit")
-        exit_action.triggered.connect(self.close)
-
-        edit_menu = self.menuBar().addMenu("&Edit")
-        settings_action = edit_menu.addAction("&Settings…")
+        settings_action = self.menuBar().addAction("&Settings")
         settings_action.triggered.connect(self.open_settings)
+        self._build_file_shortcuts()
 
-        view_menu = self.menuBar().addMenu("&View")
-        self.show_ribbon_action = view_menu.addAction("Show Ribbon")
+        self.show_ribbon_action = QAction("Show Ribbon", self)
         self.show_ribbon_action.setCheckable(True)
         self.show_ribbon_action.setChecked(True)
         self.show_ribbon_action.toggled.connect(self._set_ribbon_visible)
 
-        help_menu = self.menuBar().addMenu("&Help")
-        workflow_action = help_menu.addAction("&Workflow Help")
-        workflow_action.triggered.connect(self.show_workflow_help)
-        about_action = help_menu.addAction("&About Test Data Analyser")
-        about_action.triggered.connect(self.show_about)
+        help_action = self.menuBar().addAction("&Help")
+        help_action.triggered.connect(self.show_workflow_help)
+
+    def _build_file_shortcuts(self) -> None:
+        for text, shortcut, handler in [
+            ("Open Data", "Ctrl+O", self._open_via_panel),
+            ("Save Session", "Ctrl+S", self.save_session),
+            ("Load Session", "Ctrl+L", self.load_session),
+        ]:
+            action = QAction(text, self)
+            action.setShortcut(shortcut)
+            action.triggered.connect(handler)
+            self.addAction(action)
 
     def _build_central_layout(self) -> None:
         central = QWidget()
@@ -456,6 +450,8 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(theme.build_stylesheet(theme_name))
         if hasattr(self, "plot_workspace"):
             self.plot_workspace.apply_theme(theme_name)
+        if self._help_dialog is not None:
+            self._help_dialog.apply_theme(theme_name)
 
     # ------------------------------------------------------------------
     # Actions
@@ -711,20 +707,11 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Settings saved.")
 
     def show_workflow_help(self) -> None:
-        qt_message_service.info(
-            self,
-            "Workflow Help",
-            "Open a CSV or Excel file, select X/Y channels, then generate plots, statistics, "
-            "raw-data views, maths channels, limits, notes, comparisons, and sessions from the panels.",
-        )
-
-    def show_about(self) -> None:
-        qt_message_service.info(
-            self,
-            "About Test Data Analyser",
-            f"Test Data Analyser\nEaton Edition\nVersion {__version__}\n\n"
-            "PySide6 desktop application for engineering test data analysis.",
-        )
+        if self._help_dialog is None:
+            self._help_dialog = HelpDialog(self, self.vm.settings.theme_name())
+        self._help_dialog.show()
+        self._help_dialog.raise_()
+        self._help_dialog.activateWindow()
 
     def save_session(self) -> None:
         initial_dir = self._save_session_initial_path()

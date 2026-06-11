@@ -36,13 +36,14 @@ try:
     )
     from PySide6.QtTest import QTest
 
-    from test_data_analyser.core.config import EATON_HEADER_BLUE, EATON_PLOT_COLORS
+    from test_data_analyser.core.config import __version__, EATON_HEADER_BLUE, EATON_PLOT_COLORS
     from test_data_analyser.core.settings_manager import SettingsManager
     from test_data_analyser.qt_app import theme
     from test_data_analyser.qt_app.adapters import matplotlib_qt_adapter, qt_file_dialogs, qt_message_service
     from test_data_analyser.qt_app.adapters.editable_raw_data_model import EditableRawDataTableModel
     from test_data_analyser.qt_app.adapters.pandas_table_model import PandasTableModel
     from test_data_analyser.qt_app.main_window import MainWindow
+    from test_data_analyser.qt_app.widgets.help_dialog import HelpDialog
     from test_data_analyser.qt_app.widgets.no_wheel_combo_box import NoWheelComboBox
     from test_data_analyser.services import plot_render_service
     from test_data_analyser.viewmodels.app_state import AppState
@@ -1175,6 +1176,67 @@ class SettingsDialogTests(unittest.TestCase):
 
 
 @unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
+class HelpDialogTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.dialog = HelpDialog(theme_name="light")
+
+    def tearDown(self) -> None:
+        self.dialog.close()
+
+    def _visible_topics(self) -> list[str]:
+        return [
+            self.dialog.topic_list.item(row).text()
+            for row in range(self.dialog.topic_list.count())
+            if not self.dialog.topic_list.item(row).isHidden()
+        ]
+
+    def test_initial_page_selected(self) -> None:
+        self.assertEqual(self.dialog.windowTitle(), "Test Data Analyser Help")
+        self.assertFalse(self.dialog.isModal())
+        self.assertEqual(self.dialog.topic_list.count(), 13)
+        self.assertEqual(self.dialog.topic_list.currentItem().text(), "Getting Started")
+        self.assertIn("Normal workflow", self.dialog.content_browser.toPlainText())
+
+    def test_topic_selection_updates_content(self) -> None:
+        matches = self.dialog.topic_list.findItems("Troubleshooting", Qt.MatchFlag.MatchExactly)
+        self.assertEqual(len(matches), 1)
+
+        self.dialog.topic_list.setCurrentItem(matches[0])
+
+        self.assertIn("Plot is blank", self.dialog.content_browser.toPlainText())
+
+    def test_search_filters_topic_titles_and_page_text(self) -> None:
+        self.dialog.search_box.setText("legend is unclear")
+
+        self.assertEqual(self._visible_topics(), ["Troubleshooting"])
+        self.assertEqual(self.dialog.topic_list.currentItem().text(), "Troubleshooting")
+        self.assertIn("Legend is unclear", self.dialog.content_browser.toPlainText())
+
+    def test_search_no_match_shows_empty_state(self) -> None:
+        self.dialog.search_box.setText("not a real topic")
+
+        self.assertEqual(self._visible_topics(), [])
+        self.assertIn("No help topics matched", self.dialog.content_browser.toPlainText())
+
+    def test_apply_theme_keeps_current_topic_content(self) -> None:
+        matches = self.dialog.topic_list.findItems("Run Management", Qt.MatchFlag.MatchExactly)
+        self.dialog.topic_list.setCurrentItem(matches[0])
+
+        self.dialog.apply_theme("dark")
+
+        self.assertIn("Generate Comparison Plot", self.dialog.content_browser.toPlainText())
+        self.assertIn("QTextBrowser#HelpContent", self.dialog.styleSheet())
+
+    def test_about_topic_contains_version_information(self) -> None:
+        matches = self.dialog.topic_list.findItems("About", Qt.MatchFlag.MatchExactly)
+        self.dialog.topic_list.setCurrentItem(matches[0])
+
+        text = self.dialog.content_browser.toPlainText()
+        self.assertIn("Test Data Analyser - Eaton Edition", text)
+        self.assertIn(f"Version: {__version__}", text)
+
+
+@unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
 class CursorComparePanelTests(unittest.TestCase):
     class _Event:
         def __init__(self, xdata, inaxes, button=1):
@@ -1341,6 +1403,78 @@ class MainWindowLayoutTests(unittest.TestCase):
         self.assertIsNotNone(subtitle)
         assert subtitle is not None
         self.assertEqual(subtitle.text(), "Eaton Engineering - Analysis Workspace (V1.00)")
+
+    def test_workflow_help_opens_reusable_modeless_dialog(self) -> None:
+        window = self._window()
+
+        window.show_workflow_help()
+        QApplication.processEvents()
+        first_dialog = window._help_dialog
+        window.show_workflow_help()
+        QApplication.processEvents()
+
+        self.assertIsInstance(first_dialog, HelpDialog)
+        self.assertIs(window._help_dialog, first_dialog)
+        self.assertFalse(first_dialog.isModal())
+        self.assertTrue(first_dialog.isVisible())
+        first_dialog.close()
+
+    def test_direct_help_action_opens_help_dialog(self) -> None:
+        window = self._window()
+        help_action = window.menuBar().actions()[1]
+
+        self.assertEqual(help_action.text(), "&Help")
+        self.assertIsNone(help_action.menu())
+        help_action.trigger()
+        QApplication.processEvents()
+        self.assertIsInstance(window._help_dialog, HelpDialog)
+        self.assertTrue(window._help_dialog.isVisible())
+        window._help_dialog.close()
+
+    def test_top_menu_uses_direct_settings_action(self) -> None:
+        window = self._window()
+        menu_actions = window.menuBar().actions()
+        labels = [action.text() for action in menu_actions]
+
+        self.assertEqual(labels, ["&Settings", "&Help"])
+        self.assertNotIn("&File", labels)
+        self.assertNotIn("&Edit", labels)
+        self.assertNotIn("&View", labels)
+        settings_action = menu_actions[0]
+        self.assertEqual(settings_action.text(), "&Settings")
+        self.assertIsNone(settings_action.menu())
+        self.assertIsNone(menu_actions[1].menu())
+        self.assertEqual(window.show_ribbon_action.text(), "Show Ribbon")
+        self.assertTrue(window.show_ribbon_action.isCheckable())
+
+        shortcuts = {action.text(): action.shortcut().toString() for action in window.actions()}
+        self.assertEqual(shortcuts.get("Open Data"), "Ctrl+O")
+        self.assertEqual(shortcuts.get("Save Session"), "Ctrl+S")
+        self.assertEqual(shortcuts.get("Load Session"), "Ctrl+L")
+
+    def test_direct_settings_action_opens_settings_dialog(self) -> None:
+        from test_data_analyser.qt_app import main_window as main_window_module
+
+        opened = []
+
+        class _FakeSettingsDialog:
+            def __init__(self, view_model, parent) -> None:
+                opened.append((view_model, parent))
+
+            def exec(self) -> bool:
+                return False
+
+        original_dialog = main_window_module.SettingsDialog
+        main_window_module.SettingsDialog = _FakeSettingsDialog
+        try:
+            window = self._window()
+            settings_action = window.menuBar().actions()[0]
+            settings_action.trigger()
+        finally:
+            main_window_module.SettingsDialog = original_dialog
+
+        self.assertEqual(len(opened), 1)
+        self.assertIs(opened[0][1], window)
 
     def test_plot_and_lower_splitter_can_fully_collapse(self) -> None:
         window = self._window()
