@@ -5,9 +5,7 @@ framework-independent core. The engineering and data logic lives in layers that
 import no UI toolkit, with a thin Qt UI on top. This makes the logic
 unit-testable without a GUI and keeps the UI swappable.
 
-> The application was migrated from an original Tkinter implementation. That
-> staged migration is recorded in [MIGRATION_PROGRESS.md](MIGRATION_PROGRESS.md);
-> this document describes only the **current** architecture.
+This document describes the **current** architecture.
 
 ## Layers
 
@@ -48,7 +46,8 @@ Low-level, cross-cutting modules every other layer can use:
   (Butterworth) filter used by the plot canvas.
 - `settings_manager.py` — `SettingsManager`, the persisted user-settings store
   (now also carrying axis-padding defaults and the remembered data/session
-  import directories), resolved against the repository root.
+  import directories), stored by default at `config/settings.json` with a
+  one-time migration from the legacy root `settings.json` path.
 - `utils.py` — column-name helpers (natural sort, grouped-column matching,
   keyword inference) plus `classify_channel_name`/`channel_group_options`, the
   deterministic engineering channel grouping used by the axis panel's channel
@@ -158,8 +157,8 @@ The only package that imports PySide6.
 - `main_window.py` — `MainWindow`: the Eaton-branded header and logo, the
   grouped ribbon command bar, the axis/data controls, the Matplotlib plot
   canvas, multiple plot-profile tabs (new/duplicate/rename/delete), the lower
-  analysis tabs, the File/Edit menus (Open, Save/Load Session, Settings),
-  Help/About dialogs, and the wiring between every panel and the viewmodels.
+  analysis tabs, the direct Settings and Help menu-bar actions, and the wiring
+  between every panel and the viewmodels.
 - `theme.py` — the centralised Eaton Qt stylesheet/palette, sourced from
   `core/config.py` and honouring light/dark.
 - `widgets/` — one thin panel per feature: `data_file_panel`,
@@ -223,9 +222,9 @@ the Matplotlib canvas surfaces, and the plot colour cycles.
 
 ## Recent enhancements
 
-A post-migration usability and feature-refinement pass built on the Qt-only
-architecture above; the detailed step-by-step log lives in
-[pyside6-migration.md](pyside6-migration.md). Highlights:
+Recent usability and feature refinements built on the Qt-only architecture
+above. Historical step-by-step migration notes are archived under
+[Archive/](Archive/). Highlights:
 
 - **Multiple plot profiles.** Each plot is a named, switchable tab whose full
   state (channels, labels, axis limits/ticks, legend mode, generated flag)

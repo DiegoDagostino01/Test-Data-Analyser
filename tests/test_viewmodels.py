@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from test_data_analyser.core.settings_manager import SettingsManager
 from test_data_analyser.domain import PlotData
 from test_data_analyser.services import plot_render_service
 from test_data_analyser.viewmodels import (
@@ -133,6 +134,28 @@ class SettingsViewModelTests(unittest.TestCase):
         self.assertEqual(vm.get("general_ui", "theme", "light"), "light")
         self.assertFalse(vm.set("general_ui", "theme", "dark").ok)
         self.assertFalse(vm.save().ok)
+
+
+class SettingsManagerPathTests(unittest.TestCase):
+    def test_default_settings_path_uses_config_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = SettingsManager.default_settings_path(Path(directory))
+
+        self.assertEqual(path, Path(directory) / "config" / "settings.json")
+
+    def test_default_settings_path_migrates_legacy_root_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy_path = root / "settings.json"
+            legacy_path.write_text('{"general_ui": {"theme": "dark"}}', encoding="utf-8")
+
+            path = SettingsManager.default_settings_path(root)
+            manager = SettingsManager(path)
+
+            self.assertEqual(path, root / "config" / "settings.json")
+            self.assertFalse(legacy_path.exists())
+            self.assertTrue(path.exists())
+            self.assertEqual(manager.get("general_ui", "theme"), "dark")
 
 
 class PlotWorkspaceViewModelTests(unittest.TestCase):

@@ -85,13 +85,20 @@ class SettingsManager:
     """Load, save, access, and reset application settings."""
 
     def __init__(self, settings_path: Optional[str | Path] = None) -> None:
-        # settings.json lives at the repository root (one level above the
-        # ``test_data_analyser`` package). ``__file__`` is ``core/settings_manager.py``,
-        # so three ``.parent`` hops are needed: core -> test_data_analyser -> repo root.
-        repo_root = Path(__file__).resolve().parent.parent.parent
-        self.settings_path = Path(settings_path) if settings_path is not None else repo_root / "settings.json"
+        self.settings_path = Path(settings_path) if settings_path is not None else self.default_settings_path()
         self._callbacks: list[SettingsCallback] = []
         self._settings = self._load_or_create_settings()
+
+    @staticmethod
+    def default_settings_path(repo_root: Path | None = None) -> Path:
+        """Return the default settings path, migrating the legacy root file."""
+        root = repo_root or Path(__file__).resolve().parent.parent.parent
+        settings_path = root / "config" / "settings.json"
+        legacy_path = root / "settings.json"
+        if not settings_path.exists() and legacy_path.exists():
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            legacy_path.replace(settings_path)
+        return settings_path
 
     def get(self, section: str, key: str) -> Any:
         """Return a setting value, falling back to the default if needed."""

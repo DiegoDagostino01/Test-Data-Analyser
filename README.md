@@ -9,9 +9,7 @@ save/load.
 The application is built on a **framework-independent core** (domain models,
 services, and viewmodels that import no UI toolkit) with a thin Qt UI on top, so
 the engineering logic is unit-testable without a GUI. See
-[ARCHITECTURE.md](ARCHITECTURE.md) for the layered design and
-[MIGRATION_PROGRESS.md](MIGRATION_PROGRESS.md) for the history of the migration
-from the original Tkinter app.
+[ARCHITECTURE.md](ARCHITECTURE.md) for the layered design.
 
 ## Running the app
 
@@ -48,6 +46,12 @@ pip install -r requirements.txt
 
 PySide6 must be installed in the interpreter you launch with; the headless tests
 run without it (the Qt tests skip automatically when PySide6 is absent).
+
+## User settings
+
+Application settings are stored in `config/settings.json`. If an older checkout
+still has `settings.json` in the repository root, the app migrates it into the
+`config/` folder on startup.
 
 ## Tests
 
@@ -130,7 +134,7 @@ Use the toolbar's **Figure Options** to fine-tune the plot: edit axis titles and
 limits with **auto-label** / **auto-fit** helpers, set per-axis major-tick
 spacing (and optionally align the secondary-Y grid to the primary), and switch
 the legend between the right-side **Legend** panel and an in-graph Matplotlib
-legend. Configurable axis padding (Edit ▸ Settings ▸ Axis Padding) keeps a
+legend. Configurable axis padding (Settings ▸ Axis Padding) keeps a
 margin around auto-fitted data, and saved figure exports include the legend.
 
 Use the **+** tab beside the plot tabs above the canvas to create additional
@@ -166,11 +170,12 @@ into the analysis-window fields.
 
 ## Analysis sessions
 
-**File ▸ Save Session** writes the current file reference, axis selection, plot
-profiles, calculated-channel definitions, limit lines, engineering notes, and
-run/comparison settings to a JSON file. **File ▸ Load Session** restores them —
-reloading the source file and comparison runs from their saved paths,
-recalculating maths channels, and re-applying the selection across every panel.
+The **File** ribbon's **Save Session** command writes the current file
+reference, axis selection, plot profiles, calculated-channel definitions, limit
+lines, engineering notes, and run/comparison settings to a JSON file. **Load
+Session** restores them — reloading the source file and comparison runs from
+their saved paths, recalculating maths channels, and re-applying the selection
+across every panel.
 Saved sessions remain compatible with the original on-disk format.
 
 ## Architecture
