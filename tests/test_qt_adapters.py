@@ -1402,7 +1402,7 @@ class MainWindowLayoutTests(unittest.TestCase):
         subtitle = window.findChild(QLabel, "EatonHeaderSubtitle")
         self.assertIsNotNone(subtitle)
         assert subtitle is not None
-        self.assertEqual(subtitle.text(), "Eaton Engineering - Analysis Workspace (V1.00)")
+        self.assertEqual(subtitle.text(), "Eaton Engineering - Analysis Workspace (V1.00.00)")
 
     def test_workflow_help_opens_reusable_modeless_dialog(self) -> None:
         window = self._window()

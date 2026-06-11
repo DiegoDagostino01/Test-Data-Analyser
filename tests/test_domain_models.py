@@ -174,7 +174,7 @@ class PlotProfileTests(unittest.TestCase):
 class SessionStateTests(unittest.TestCase):
     def _sample_session(self) -> dict:
         return {
-            "version": "1.00",
+            "version": "1.00.00",
             "file_path": r"C:\\data\\run1.xlsx",
             "sheet_name": "Sheet1",
             "runs": [

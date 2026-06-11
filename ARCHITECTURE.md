@@ -218,7 +218,8 @@ is preserved across subsequent X/Y channel changes for that plot, and auto-label
 behaviour can return label fields to automatic generation. Eaton brand colours,
 the version string, the header logo, and the light/dark theme palettes all live
 in `core/config.py` and are the single source of truth for the Qt stylesheet,
-the Matplotlib canvas surfaces, and the plot colour cycles.
+the Matplotlib canvas surfaces, and the plot colour cycles. Release history is
+tracked in `VERSION_HISTORY.md`.
 
 ## Recent enhancements
 

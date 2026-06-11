@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-__version__ = "1.00"
+__version__ = "1.00.00"
 
 EATON_BLUE       = "#007AC2"
 

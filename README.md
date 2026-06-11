@@ -9,7 +9,8 @@ save/load.
 The application is built on a **framework-independent core** (domain models,
 services, and viewmodels that import no UI toolkit) with a thin Qt UI on top, so
 the engineering logic is unit-testable without a GUI. See
-[ARCHITECTURE.md](ARCHITECTURE.md) for the layered design.
+[ARCHITECTURE.md](ARCHITECTURE.md) for the layered design and
+[VERSION_HISTORY.md](VERSION_HISTORY.md) for release history.
 
 ## Running the app
 
