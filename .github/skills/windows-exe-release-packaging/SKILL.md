@@ -18,8 +18,11 @@ Test Data Analyser.
   edits in the repo do not update the existing `.exe` automatically.
 - Rebuild the bundle after Python code, dependency, version, icon, import, or
   packaging changes.
-- Replacing individual files in `_internal/` is acceptable only for deliberate
-  loose non-code assets or config files, and only after a smoke test.
+- Replacing individual files in `_internal/` is acceptable only for files that
+  are not compiled or linked code: specifically, config files such as
+  `config/settings.json` and image/icon assets such as `app_icon.png` or
+  `app_icon.ico`; and only after a smoke test confirms the packaged app still
+  starts correctly.
 
 ## Pre-Build Checks
 
@@ -56,6 +59,10 @@ python -m PyInstaller --noconfirm --clean --onedir --windowed `
 If a dependency is removed from the app, remove unnecessary hidden imports only
 after checking that the packaged app still starts and the full test suite passes.
 
+If the PyInstaller command exits with a non-zero code, stop immediately. Do not
+proceed with Refresh Launch Folder or Cleanup. Report the last 30 lines of
+PyInstaller output and ask the user how to proceed.
+
 ## Refresh Launch Folder
 
 After a successful build, replace the user-facing launch folder with the new
@@ -65,6 +72,11 @@ After a successful build, replace the user-facing launch folder with the new
 Remove-Item -Recurse -Force "Test Data Analyser Launch" -ErrorAction Stop
 Copy-Item -Recurse "dist\Test Data Analyser" "Test Data Analyser Launch" -ErrorAction Stop
 ```
+
+If `Copy-Item` fails after `Remove-Item` has already deleted the launch folder,
+warn the user immediately: the previous launch folder has been deleted and the
+replacement failed. Advise them to re-run the build and refresh steps, or
+restore from source control before distributing.
 
 Keep this release shape for handoff:
 
@@ -81,6 +93,11 @@ The `.exe` must stay beside `_internal/`. Do not distribute the `.exe` alone.
 
 Recreate or update the root shortcut so its target, working directory, and icon
 all point at the refreshed launch folder:
+
+Before running the shortcut script, confirm that `Get-Location` returns the repo
+root: the directory containing `Test Data Analyser Launch\`. If it does not,
+instruct the user to `cd` to the repo root first, or replace `(Get-Location)`
+with the explicit absolute path.
 
 ```powershell
 $shortcutPath = Join-Path (Get-Location) 'Test Data Analyser.lnk'
@@ -121,13 +138,20 @@ if ($exited -and $process.ExitCode -ne 0) { exit $process.ExitCode }
 if (-not $exited) { $process.Kill(); $process.WaitForExit() }
 ```
 
+Expected outcome: the process should not exit within 8 seconds, meaning
+`$exited` is `$false` and the GUI is running. If it exits within 8 seconds with
+a non-zero exit code, the smoke test fails. If it exits within 8 seconds with
+exit code 0, treat this as unexpected and flag it for manual verification,
+because a healthy GUI app should not self-terminate.
+
 For the smoke test, staying alive until killed means the GUI started
 successfully under the offscreen platform.
 
 ## Cleanup
 
 After copying the refreshed launch folder, remove generated build leftovers
-unless the user explicitly wants to inspect or keep them:
+unless the user has stated in the current conversation that they want to keep or
+inspect the `build/`, `dist/`, `.spec`, or `__pycache__/` artifacts:
 
 ```powershell
 Remove-Item -Recurse -Force "build", "dist" -ErrorAction SilentlyContinue

@@ -10,34 +10,35 @@ program runnable after each step.
 
 ## Planning Rules
 
-- Plan in read-only mode first. Do not edit code while discovering the task structure.
-- Start from the spec, failing behavior, or user workflow.
-- Identify affected layers before choosing an implementation order.
-- Prefer vertical slices that include state/service/viewmodel/UI only when all are required for one user-visible result.
-- Keep each task small enough to test and review in one focused session.
-- Put risky or uncertain work early so it fails fast.
-- Do not mix refactors, behavior changes, formatting churn, and documentation updates unless they are inseparable.
+- Plan in read-only mode first. Do not edit code while discovering the task structure. (required)
+- Start from the spec, failing behavior, or user workflow. (required)
+- If the spec is ambiguous or missing information needed to identify affected layers, list the open questions explicitly before producing any tasks. Do not invent answers to unresolved spec questions. (required)
+- Identify affected layers before choosing an implementation order. (required)
+- Use vertical slices (state + service + viewmodel + UI in one task) only when the user-visible result is impossible to verify without all layers present. Otherwise, follow the Layer Ordering Guide and build bottom-up, one layer per task. (required)
+- Keep each task small enough to test and review in one focused session. Aim for tasks that take 30-90 minutes of focused work. If a plan exceeds 10 tasks, split it into phases and plan one phase at a time. (required)
+- Put risky or uncertain work early so it fails fast. (required)
+- Do not mix refactors, behavior changes, formatting churn, and documentation updates unless they are inseparable. (required)
 
 ## Task Template
 
-Use this shape for each task:
+Use this shape for each task: (required)
 
 ```markdown
 ## Task N: Short title
 
-Goal: One sentence.
+Goal: One sentence. (required)
 
-Likely files:
+Likely files: (required)
 - path/to/file.py
 
-Acceptance:
+Acceptance: (required)
 - [ ] Specific observable result.
 
-Verification:
+Verification: (required)
 - [ ] Focused test or manual check.
 
-Dependencies: Task numbers or None.
-Risk: Low/Medium/High and why.
+Dependencies: Task numbers or None. (required)
+Risk: Low/Medium/High and why. (required)
 ```
 
 ## Layer Ordering Guide
@@ -56,11 +57,3 @@ Add checkpoints after every two or three tasks for larger work:
 - Full suite passes when shared behavior changed.
 - Manual Qt workflow is checked if UI behavior changed.
 - Plan is adjusted if implementation reveals incorrect assumptions.
-
-## Verification
-
-- Every task has acceptance criteria.
-- Every task has a verification step.
-- Dependencies are ordered.
-- No task is an unbounded "implement the feature" bucket.
-- The plan calls out which app-specific skills should be loaded during implementation.

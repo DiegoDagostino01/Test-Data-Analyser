@@ -19,13 +19,15 @@ and analysis results while simplifying the codebase.
 
 ## Process
 
-1. Inventory consumers with search and targeted reads: runtime code, tests, docs, config, sessions, and exports.
+1. Inventory consumers with search and targeted reads: runtime code, tests, docs, config, sessions, and exports. If a complete inventory cannot be confirmed (for example, field names are constructed dynamically or used as serialized strings), do not proceed with removal. Flag the uncertainty explicitly in the response and propose a conservative compatibility wrapper as an intermediate step.
 2. Confirm the replacement exists and covers the important behavior.
-3. Preserve compatibility where reasonable, especially for session/profile/settings load paths.
+2a. If there is no replacement because the feature is being removed entirely, document the intentional removal in version notes, confirm no active user workflows depend on the feature via the inventory from Step 1, and skip Steps 3-5 for the deprecated path. Proceed directly to removal and update docs to state the feature is no longer available.
+3. Preserve compatibility for any field that is read from disk (session files, profiles, or settings). Compatibility shims for in-memory-only objects are not required.
 4. Migrate one consumer path at a time.
 5. Add tests for compatibility, fallback, or clear failure behavior.
-6. Remove old code only after references are gone.
-7. Update docs or version notes if user-visible behavior changes.
+5a. If a compatibility shim was added in Step 3, document its intended removal condition (for example, after one release cycle or after all known session files have been migrated). Do not remove the shim in the same change that removes the original code.
+6. Remove old code only after all references are gone from runtime code, tests, documentation, comments, and configuration files.
+7. Update docs or version notes if any of the following change: UI behavior, exported file format, session/profile field names, or settings keys.
 
 ## Decision Questions
 
@@ -47,5 +49,6 @@ and analysis results while simplifying the codebase.
 
 - No active references remain to removed code.
 - Compatibility behavior is tested or explicitly documented.
+- Session files written by the new implementation can still be loaded correctly if a user downgrades. If backward compatibility cannot be guaranteed, note this explicitly in the version notes and in the response.
 - Existing tests pass with `python -m unittest discover -s tests`.
 - User-visible migrations are mentioned in the final response and docs/version notes when appropriate.

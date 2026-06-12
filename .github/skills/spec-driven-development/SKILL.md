@@ -1,11 +1,11 @@
 ---
 name: spec-driven-development
-description: "Use when: starting a significant Test Data Analyser feature, changing cross-layer behavior, altering saved/session/profile state, or when requirements are ambiguous enough that coding would be guessing."
+description: "Use when any condition in the When To Use section applies."
 ---
 
 # Spec-Driven Development
 
-Write a small, explicit spec before non-trivial app work. The spec should clarify
+Write a spec of one to two pages (300-600 words) before any work that meets the criteria in the When To Use section. The spec should clarify
 the user workflow, the engineering boundaries, and how success will be verified.
 
 ## When To Use
@@ -15,6 +15,10 @@ the user workflow, the engineering boundaries, and how success will be verified.
 - Changes to saved sessions, plot profiles, labels, requirements/limits, runs, maths channels, or generated plot state.
 - Requirements with unclear scope, acceptance criteria, or preservation expectations.
 - Work that could plausibly affect CSV/XLSX/XLS loading, plotting, raw data editing/export, notes, or settings.
+
+## Override Policy
+
+If the user asks to skip the spec, explain that implementation without a spec risks misaligned scope. Offer to write a minimal spec (objective + proposed behavior + verification only) that can be reviewed in under two minutes before proceeding.
 
 ## Spec Contents
 
@@ -29,6 +33,7 @@ Keep the spec concise. Include:
 - Data impact: CSV/Excel/dataframe assumptions, numeric conversion, filtering, or export behavior.
 - Verification: focused tests, full suite command, and any manual Qt workflow.
 - Open questions: anything that needs user decision before implementation.
+If open questions exist, present them to the user and do not proceed to implementation or planning until each is resolved or explicitly deferred by the user.
 
 ## Project Defaults
 
@@ -41,8 +46,8 @@ Keep the spec concise. Include:
 
 ## Handoff
 
-After the spec is accepted, use `planning-and-task-breakdown` for multi-step work.
-For implementation, load the relevant app-specific skill before editing.
+After the user explicitly approves the spec in the conversation (e.g., replies "approved" or "looks good"), switch to the `planning-and-task-breakdown` prompt for multi-step work.
+Before editing implementation files, load the relevant skill from `.github/skills/` (for example, `pyside6-qt-gui-maintainer`, `pandas-data-cleaning-analysis`, `plotting-engine-separation`, `session-profile-state-guardian`, or `python-refactor-safely`).
 
 ## Verification
 
