@@ -16,7 +16,8 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QColorDialog,
@@ -27,15 +28,16 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
-    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSplitter,
+    QStyledItemDelegate,
     QTableView,
     QVBoxLayout,
     QWidget,
 )
 
+from ...services.limits_service import MARGIN_TABLE_COLUMNS
 from ...viewmodels.limits_vm import LimitsViewModel
 from .no_wheel_combo_box import NoWheelComboBox
 from ...viewmodels.plot_workspace_vm import PlotWorkspaceViewModel
@@ -45,6 +47,108 @@ from ..adapters.pandas_table_model import PandasTableModel
 SelectionProvider = Callable[[], tuple[str, list[str], Optional[float], Optional[float]]]
 
 _CUSTOM = "Custom"
+
+
+class MarginSummaryTableModel(QAbstractTableModel):
+    def __init__(self, rows: list[dict[str, object]] | None = None) -> None:
+        super().__init__()
+        self._rows = list(rows or [])
+
+    def set_rows(self, rows: list[dict[str, object]]) -> None:
+        self.beginResetModel()
+        self._rows = list(rows)
+        self.endResetModel()
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self._rows)
+
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(MARGIN_TABLE_COLUMNS)
+
+    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+        row = self._rows[index.row()]
+        column = MARGIN_TABLE_COLUMNS[index.column()]
+        value = row.get(column)
+        if role == Qt.ItemDataRole.DisplayRole:
+            return self._format_value(value, column)
+        if role == Qt.ItemDataRole.ToolTipRole:
+            return str(row.get("Details", ""))
+        if column == "Status" and role == Qt.ItemDataRole.UserRole:
+            return str(row.get("Severity", row.get("Status", "INFO")))
+        if role == Qt.ItemDataRole.TextAlignmentRole:
+            if column in {"Margin", "Margin %", "Worst X", "Data Value", "Limit Value", "First Failure X"}:
+                return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            if column == "Status":
+                return Qt.AlignmentFlag.AlignCenter
+            return Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        if column == "Status" and role == Qt.ItemDataRole.BackgroundRole:
+            return self._status_background(str(row.get("Severity", row.get("Status", "INFO"))))
+        if column == "Status" and role == Qt.ItemDataRole.ForegroundRole:
+            severity = str(row.get("Severity", row.get("Status", "INFO")))
+            return QBrush(QColor("#111111" if severity == "WARN" else "#FFFFFF"))
+        return None
+
+    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.ItemDataRole.DisplayRole):
+        if role != Qt.ItemDataRole.DisplayRole:
+            return None
+        if orientation == Qt.Orientation.Horizontal and 0 <= section < len(MARGIN_TABLE_COLUMNS):
+            return MARGIN_TABLE_COLUMNS[section]
+        if orientation == Qt.Orientation.Vertical:
+            return str(section + 1)
+        return None
+
+    @staticmethod
+    def _format_value(value: object, column: str) -> str:
+        if value is None:
+            return ""
+        if column == "Margin %":
+            try:
+                return f"{float(value):.3g}%"
+            except (TypeError, ValueError):
+                return ""
+        if column in {"Margin", "Worst X", "Data Value", "Limit Value", "First Failure X"}:
+            try:
+                return f"{float(value):.6g}"
+            except (TypeError, ValueError):
+                return ""
+        return str(value)
+
+    @staticmethod
+    def _status_background(severity: str) -> QBrush:
+        colours = {
+            "PASS": "#2E7D32",
+            "WARN": "#F9C74F",
+            "FAIL": "#C4262E",
+            "INFO": "#607D8B",
+            "SKIPPED": "#6C757D",
+        }
+        return QBrush(QColor(colours.get(severity, colours["INFO"])))
+
+    @staticmethod
+    def status_colour(severity: str) -> QColor:
+        colours = {
+            "PASS": "#2E7D32",
+            "WARN": "#F9C74F",
+            "FAIL": "#C4262E",
+            "INFO": "#607D8B",
+            "SKIPPED": "#6C757D",
+        }
+        return QColor(colours.get(severity, colours["INFO"]))
+
+
+class MarginStatusDelegate(QStyledItemDelegate):
+    def paint(self, painter: QPainter, option, index: QModelIndex) -> None:
+        text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+        severity = str(index.data(Qt.ItemDataRole.UserRole) or text or "INFO")
+        background = MarginSummaryTableModel.status_colour(severity)
+        foreground = QColor("#111111" if severity == "WARN" else "#FFFFFF")
+        painter.save()
+        painter.fillRect(option.rect.adjusted(2, 2, -2, -2), background)
+        painter.setPen(foreground)
+        painter.drawText(option.rect, Qt.AlignmentFlag.AlignCenter, text)
+        painter.restore()
 
 
 class LimitsPanel(QWidget):
@@ -193,13 +297,26 @@ class LimitsPanel(QWidget):
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
-        self.summary_text = QPlainTextEdit()
-        self.summary_text.setReadOnly(True)
-        self.summary_text.setMinimumHeight(160)
-        self.summary_text.setPlaceholderText(
+        self.summary_model = MarginSummaryTableModel()
+        self.summary_table = QTableView()
+        self.summary_table.setModel(self.summary_model)
+        self.summary_table.setAlternatingRowColors(True)
+        self.summary_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.summary_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.summary_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.summary_table.verticalHeader().setVisible(False)
+        self.summary_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.summary_table.horizontalHeader().setSectionResizeMode(
+            MARGIN_TABLE_COLUMNS.index("Details"), QHeaderView.ResizeMode.Stretch
+        )
+        self.summary_table.setItemDelegateForColumn(
+            MARGIN_TABLE_COLUMNS.index("Status"), MarginStatusDelegate(self.summary_table)
+        )
+        self.summary_table.setMinimumHeight(180)
+        layout.addWidget(self.summary_table, stretch=1)
+        self._set_margin_message(
             "Margin-to-limit results will appear here after a plot is generated or margins are refreshed."
         )
-        layout.addWidget(self.summary_text, stretch=1)
         return panel
 
     def _build_points_group(self) -> QWidget:
@@ -446,11 +563,24 @@ class LimitsPanel(QWidget):
             return
         x_col, selected_y, xmin, xmax = self._selection_provider()
         if not x_col or not selected_y:
-            self.summary_text.setPlainText("Select X/Y data and generate a plot to calculate margin-to-limit.")
+            self._set_margin_message("Select X/Y data and generate a plot to calculate margin-to-limit.")
             return
         try:
             data = self.plot_vm.prepare_plot_data(x_col, selected_y, xmin, xmax)
         except ValueError as exc:
-            self.summary_text.setPlainText(str(exc))
+            self._set_margin_message(str(exc), status="SKIPPED")
             return
-        self.summary_text.setPlainText(self.vm.margin_text(data, self.vm.lines))
+        self.summary_model.set_rows(self.vm.margin_table_rows(data, self.vm.lines))
+
+    def _set_margin_message(self, message: str, *, status: str = "INFO") -> None:
+        self.summary_model.set_rows(
+            [
+                {
+                    "Limit": "",
+                    "Channel": "",
+                    "Status": status,
+                    "Severity": status,
+                    "Details": message,
+                }
+            ]
+        )

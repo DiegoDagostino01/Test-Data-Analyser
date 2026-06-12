@@ -19,6 +19,33 @@ current release format.
 When releasing an update, change `__version__` and add a new entry at the top of
 this file.
 
+## 1.01.00 - 2026-06-12
+
+Plot styling, limits review, and channel-ordering update.
+
+- Added direct legend-row editing for plotted channels, including display name,
+  colour, plot type, line style, draw style, line width, marker style, marker
+  size, marker face colour, and marker edge colour.
+- Persisted per-channel legend styling in plot profiles and sessions, while
+  keeping recurring channels on the same colour across plots.
+- Moved curve styling out of Matplotlib Figure Options and into the Legend tab
+  channel editor, making the Figure Options Curves tab redundant.
+- Improved Generate Plot so plot-kind-only changes and similar channel additions
+  preserve manual axis labels, limits, and tick settings, while materially
+  different plot selections reset axis/tick appearance.
+- Improved Requirements / Limits margin calculations with interpolated limit
+  evaluation, channel-specific X data, first-failure reporting, data-value-based
+  margin percentage, and WARN severity for PASS results within 5% margin.
+- Replaced the margin-to-limit text summary with a structured table containing
+  PASS/WARN/FAIL status cells, margin values, worst point, first failure point,
+  and detailed messages.
+- Standardised user-facing channel ordering with natural sorting, including axis
+  selection, Maths Channels, Limits applies-to options, Statistics, Raw Data,
+  Point Compare, Runs / Comparison, and margin summary rows.
+- Added regression coverage for legend styling, plot appearance preservation,
+  margin summary behaviour, grouped channel ordering, and naturally sorted
+  channel outputs.
+
 ## 1.00.01 - 2026-06-11
 
 Icon and packaging polish update.

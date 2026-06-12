@@ -11,6 +11,7 @@ from typing import Mapping, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from ..core.utils import natural_sort_key
 from ..domain import PlotData
 
 # Canonical order of the statistics produced for the statistics table.
@@ -84,7 +85,8 @@ def compute_statistics(columns: Mapping[str, pd.Series], decimal_places: int = 4
         if cleaned.empty:
             continue
         rows[name] = compute_series_statistics(cleaned, decimal_places)
-    return pd.DataFrame.from_dict(rows, orient="index")
+    ordered = {name: rows[name] for name in sorted(rows, key=natural_sort_key)}
+    return pd.DataFrame.from_dict(ordered, orient="index")
 
 
 def selected_xy_ranges(

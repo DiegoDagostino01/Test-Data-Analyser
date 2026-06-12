@@ -65,7 +65,7 @@ sessions keep loading:
   `RawDataViewSettings`, `ManualLabelFlags`). `AxisTickSettings` holds the
   per-axis major-tick spacing and the align-secondary-Y-grid flag, and
   `LegendSettings` carries a `display_mode` (right-side Qt legend panel vs an
-  in-graph Matplotlib legend).
+  in-graph Matplotlib legend) plus per-channel legend style overrides.
 - `engineering_notes.py` — `EngineeringNotes` (accepts the structured dict form
   and the historical free-text string form).
 - `limits.py` — `LimitPoint`, `LimitLine`.
@@ -90,7 +90,9 @@ must not embed in a canvas or show dialogs; they return values or an
   statistics DataFrame, and selected-data X/Y ranges.
 - `limits_service.py` — limit-line normalisation, active limit ranges,
   applies-to resolution, and the margin-to-limit summary (`LimitMarginSummary`
-  rows plus display text).
+  rows plus display text/table rows), including interpolated limit evaluation,
+  channel-specific X data, first-failure reporting, and WARN severity for tight
+  PASS margins.
 - `maths_channel_service.py` — the restricted-AST `MathsChannelEvaluator`, the
   allowed-function set, and calculated-channel definition normalisation.
 - `plotting_data_service.py` — analysis-window data preparation plus cleaned,
@@ -191,12 +193,13 @@ The only package that imports PySide6.
   profile; switching tabs captures the current profile and applies the selected
   one. `MainWindowViewModel` owns the add/duplicate/rename/delete/select
   operations, and each profile round-trips its channels, labels, axis limits,
-  ticks, legend mode, and `generated` flag.
-- **Figure Options.** `LegendAwareNavigationToolbar` augments the Matplotlib
-  Figure Options dialog with legend, axis-tick, and auto-label/auto-fit
-  controls; the legend can be shown in the right-side Qt panel or in-graph, and
-  the export path temporarily draws the panel legend onto the axes so saved
-  PNGs match the on-screen plot.
+  ticks, legend mode, per-channel legend overrides, and `generated` flag.
+- **Figure Options and legend styling.** `LegendAwareNavigationToolbar` augments
+  the Matplotlib Figure Options dialog with legend, axis-tick, and
+  auto-label/auto-fit controls while leaving curve styling to the Qt Legend
+  panel's channel editor. The legend can be shown in the right-side Qt panel or
+  in-graph, and the export path temporarily draws the panel legend onto the axes
+  so saved PNGs match the on-screen plot.
 - **Signals.** Panels communicate with the main window via Qt signals
   (`fileLoaded`, `channelsChanged`, `limitsChanged`, `comparisonRequested`,
   `cursorPointsChanged`, `analysisWindowRequested`, `statusMessage`); the main
@@ -206,10 +209,11 @@ The only package that imports PySide6.
   data, so the logic stays GUI-free.
 - **Sessions.** `capture_working_state()` folds the top-level limit lines,
   engineering notes, axis selection, the `generated` flag, and the live plot
-  appearance into a plot profile; `restore_session()` reloads the file and runs,
-  recalculates maths channels, and returns the saved selection (plus warnings)
-  for the UI to re-apply and re-render. File and session dialogs reopen at the
-  last-used directory remembered in settings.
+  appearance, including legend channel overrides, into a plot profile;
+  `restore_session()` reloads the file and runs, recalculates maths channels,
+  and returns the saved selection (plus warnings) for the UI to re-apply and
+  re-render. File and session dialogs reopen at the last-used directory
+  remembered in settings.
 
 ## Branding
 
@@ -233,13 +237,28 @@ above. Historical step-by-step migration notes are archived under
 - **Figure Options & legends.** A `LegendAwareNavigationToolbar` adds legend,
   axis-tick, and auto-label/auto-fit controls to Matplotlib Figure Options, with
   a Qt-panel vs in-graph legend switch (`LegendSettings.display_mode`) and
-  legend-aware PNG export.
+  legend-aware PNG export; channel curve styling now lives in the Legend panel
+  channel editor.
+- **Legend channel overrides.** Clicking a Legend panel channel opens a Qt
+  editor for display name, colour, plot type, line style, draw style, line
+  width, marker style, marker size, and marker colours. Overrides are persisted
+  per plot profile, and colour overrides propagate to matching channels across
+  plots.
+- **Smarter plot regeneration.** Generate Plot preserves manual axis labels,
+  limits, and tick settings for plot-kind changes and similar channel additions,
+  but resets that appearance for materially different plot selections.
+- **Limit-margin table.** Margin-to-limit results are exposed as structured
+  table rows with PASS/WARN/FAIL severity, first failure data, data-value-based
+  margin percentage, and natural sorting by limit and channel.
 - **Axis ticks & padding.** New `AxisTickSettings` (per-axis major-tick spacing
   and secondary-grid alignment) plus configurable axis padding applied during
   rendering.
 - **Channel grouping & persistent colours.** Deterministic engineering channel
   classification (`core/utils`) drives the axis panel's channel filter, and
   `plot_render_service` keeps recurring channels on stable colours across plots.
+- **Natural channel ordering.** User-facing channel lists and tables use the
+  shared natural sort key, preserving channel group order where grouping is
+  displayed.
 - **Service-side plot prep.** `plotting_data_service.prepare_plot_series` /
   `prepare_comparison_series` move NaN dropping, filtering, and secondary-axis
   labelling out of the widgets.

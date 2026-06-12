@@ -153,6 +153,7 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
             apply=None,
         ):
             form_data, removed_auto_legend = self._without_auto_legend_checkbox(data) if include_legend else (data, False)
+            form_data, removed_curves = self._without_curves_tab(form_data)
             form_data, secondary_axes = self._with_secondary_y_axis_fields(form_data, axes)
             form_data = self._with_axis_tab_title(form_data)
             include_axis_ticks = self._axis_tick_settings_getter is not None and self._axis_tick_settings_setter is not None
@@ -163,7 +164,9 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
                 axis_tick_data = form_sections.pop() if include_axis_ticks and form_sections else []
                 secondary_data = self._pop_secondary_y_axis_data(form_sections, secondary_axes is not None)
                 if apply is not None:
-                    apply(self._restore_auto_legend_checkbox(form_sections, removed_auto_legend))
+                    restored = self._restore_auto_legend_checkbox(form_sections, removed_auto_legend)
+                    restored = self._restore_curves_tab(restored, removed_curves)
+                    apply(restored)
                 if secondary_axes is not None and secondary_data is not None:
                     self._apply_secondary_y_axis_data(secondary_axes, secondary_data)
                 if include_axis_ticks:
@@ -293,6 +296,52 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
         restored = list(form_sections)
         restored[0] = [*form_sections[0], False]
         return restored
+
+    @classmethod
+    def _without_curves_tab(cls, data) -> tuple[list, list[Any] | None]:
+        form_data = list(data)
+        removed_curves = None
+        kept = []
+        for section in form_data:
+            if isinstance(section, tuple) and len(section) == 3 and section[1] == "Curves":
+                removed_curves = cls._default_curves_values(section[0])
+                continue
+            kept.append(section)
+        return kept, removed_curves
+
+    @staticmethod
+    def _restore_curves_tab(form_sections: list[Any], removed_curves: list[Any] | None) -> list[Any]:
+        if removed_curves is None:
+            return form_sections
+        restored = list(form_sections)
+        restored.insert(1, removed_curves)
+        return restored
+
+    @classmethod
+    def _default_curves_values(cls, curves_section: object) -> list[list[Any]]:
+        if not isinstance(curves_section, list):
+            return []
+        return [cls._default_section_values(curve[0]) for curve in curves_section if isinstance(curve, list) and curve]
+
+    @classmethod
+    def _default_section_values(cls, fields: object) -> list[Any]:
+        if not isinstance(fields, list):
+            return []
+        values = []
+        for field in fields:
+            if not (isinstance(field, tuple) and len(field) >= 2):
+                continue
+            label, value = field[0], field[1]
+            if label is None:
+                continue
+            values.append(cls._default_field_value(value))
+        return values
+
+    @staticmethod
+    def _default_field_value(value: Any) -> Any:
+        if isinstance(value, list) and value:
+            return value[0]
+        return value
 
     def _install_axis_helper_buttons(self, axes) -> None:
         dialog = getattr(self, "_fedit_dialog", None)

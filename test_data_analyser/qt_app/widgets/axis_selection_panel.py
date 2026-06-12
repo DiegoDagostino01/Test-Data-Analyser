@@ -246,7 +246,7 @@ class AxisSelectionPanel(QFrame):
         self._checked_secondary.clear()
         self.x_combo.blockSignals(True)
         self.x_combo.clear()
-        self.x_combo.addItems(columns)
+        self.x_combo.addItems(self._sort_columns(columns))
         if suggested_x in columns:
             self.x_combo.setCurrentText(suggested_x)
         self.x_combo.blockSignals(False)
@@ -272,7 +272,7 @@ class AxisSelectionPanel(QFrame):
 
         self.x_combo.blockSignals(True)
         self.x_combo.clear()
-        self.x_combo.addItems(columns)
+        self.x_combo.addItems(self._sort_columns(columns))
         if current_x in columns:
             self.x_combo.setCurrentText(current_x)
         self.x_combo.blockSignals(False)
@@ -293,10 +293,11 @@ class AxisSelectionPanel(QFrame):
         available = set(self._columns)
         self._checked_primary = set(y_columns) & available
         self._checked_secondary = set(secondary_y_columns) & available
-        skip_x = x_column or (columns[0] if columns else "")
+        sorted_columns = self._sort_columns(columns)
+        skip_x = x_column or (sorted_columns[0] if sorted_columns else "")
         self.x_combo.blockSignals(True)
         self.x_combo.clear()
-        self.x_combo.addItems(columns)
+        self.x_combo.addItems(sorted_columns)
         if skip_x in columns:
             self.x_combo.setCurrentText(skip_x)
         self.x_combo.blockSignals(False)
@@ -333,6 +334,10 @@ class AxisSelectionPanel(QFrame):
             return self._sort_columns(
                 [column for column in available if self._channel_groups.get(column) == group]
             )
+        return self._ordered_y_columns(skip)
+
+    def _ordered_y_columns(self, skip: str) -> list[str]:
+        available = [column for column in self._columns if column != skip]
         ordered: list[str] = []
         for group_name in channel_group_options()[1:]:
             ordered.extend(
@@ -416,11 +421,11 @@ class AxisSelectionPanel(QFrame):
 
     def selected_y(self) -> list[str]:
         x_column = self.x_column()
-        return [column for column in self._columns if column in self._checked_primary and column != x_column]
+        return [column for column in self._ordered_y_columns(x_column) if column in self._checked_primary]
 
     def selected_secondary_y(self) -> list[str]:
         x_column = self.x_column()
-        return [column for column in self._columns if column in self._checked_secondary and column != x_column]
+        return [column for column in self._ordered_y_columns(x_column) if column in self._checked_secondary]
 
     def all_selected_y(self) -> list[str]:
         """Return primary + secondary Y channels (secondary appended, de-duplicated)."""

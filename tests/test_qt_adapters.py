@@ -23,6 +23,7 @@ try:
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import (
         QApplication,
+        QDialog,
         QFrame,
         QGroupBox,
         QLabel,
@@ -219,6 +220,29 @@ class MathsChannelsPanelTests(unittest.TestCase):
         self.panel._insert_column()
         self.assertIn("`A`", self.panel.formula_edit.toPlainText())
 
+    def test_existing_column_combo_is_grouped_and_naturally_sorted(self) -> None:
+        self.state.df = pd.DataFrame(
+            {
+                "TC10": [1.0],
+                "Outlet Pressure": [2.0],
+                "Power": [3.0],
+                "Time": [0.0],
+                "TC2": [4.0],
+            }
+        )
+        self.state.calculated_channels["Power"] = {
+            "name": "Power",
+            "formula": "TC2 + TC10",
+            "description": "",
+            "enabled": True,
+            "created_from_columns": ["TC2", "TC10"],
+        }
+
+        self.panel.refresh()
+
+        items = [self.panel.column_combo.itemText(index) for index in range(self.panel.column_combo.count())]
+        self.assertEqual(items, ["Time", "TC2", "TC10", "Outlet Pressure", "Power"])
+
     def test_clear_form_resets_state(self) -> None:
         self.panel.name_edit.setText("X")
         self.panel.formula_edit.setPlainText("A + B")
@@ -300,7 +324,24 @@ class LimitsPanelTests(unittest.TestCase):
         self.panel.vm.add_point("0", "10")
         self.panel.vm.add_point("2", "10")
         self.panel.refresh_margins()
-        self.assertIn("PASS", self.panel.summary_text.toPlainText())
+        status_index = self.panel.summary_model.index(0, 2)
+        self.assertEqual(self.panel.summary_model.data(status_index, Qt.ItemDataRole.DisplayRole), "PASS")
+        self.assertIsNotNone(self.panel.summary_table.itemDelegateForColumn(2))
+
+    def test_refresh_margins_colours_near_pass_status_amber(self) -> None:
+        self.panel._add_line()
+        self.panel.vm.update_active_metadata(
+            name="Max", limit_type="Upper Limit", applies_to="All selected Y channels", colour="#005A8C"
+        )
+        self.panel.vm.add_point("0", "3.1")
+        self.panel.vm.add_point("2", "3.1")
+        self.panel.refresh_margins()
+        status_index = self.panel.summary_model.index(0, 2)
+        brush = self.panel.summary_model.data(status_index, Qt.ItemDataRole.BackgroundRole)
+
+        self.assertEqual(self.panel.summary_model.data(status_index, Qt.ItemDataRole.DisplayRole), "PASS")
+        self.assertEqual(self.panel.summary_model.data(status_index, Qt.ItemDataRole.UserRole), "WARN")
+        self.assertEqual(brush.color().name().upper(), "#F9C74F")
 
     def test_dense_content_is_scroll_wrapped(self) -> None:
         self.assertIsInstance(self.panel.content_scroll, QScrollArea)
@@ -309,7 +350,7 @@ class LimitsPanelTests(unittest.TestCase):
 
     def test_margin_summary_is_separate_panel(self) -> None:
         self.assertIsNot(self.panel.summary_panel.parentWidget(), self.panel)
-        self.assertEqual(self.panel.summary_text.parentWidget(), self.panel.summary_panel)
+        self.assertEqual(self.panel.summary_table.parentWidget(), self.panel.summary_panel)
 
     def test_limits_changed_emitted_on_add(self) -> None:
         emitted = []
@@ -450,6 +491,22 @@ class AxisSelectionPanelTests(unittest.TestCase):
         expected = ["A2", "A10", "alpha", "Beta", "Zeta"]
         self.assertEqual(self._checkable_texts(self.panel.y_list), expected)
         self.assertEqual(self._checkable_texts(self.panel.secondary_y_list), expected)
+
+    def test_x_axis_combo_is_alphabetical(self) -> None:
+        self.panel.set_columns(["Time", "Zeta", "alpha", "Beta", "A10", "A2"], "Time")
+
+        items = [self.panel.x_combo.itemText(index) for index in range(self.panel.x_combo.count())]
+
+        self.assertEqual(items, ["A2", "A10", "alpha", "Beta", "Time", "Zeta"])
+
+    def test_selected_y_accessors_return_display_order(self) -> None:
+        self.panel.set_columns(["Time", "TC10", "Outlet Pressure", "TC2"], "Time")
+        for row in range(self.panel.y_list.count()):
+            item = self.panel.y_list.item(row)
+            if item.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                item.setCheckState(Qt.CheckState.Checked)
+
+        self.assertEqual(self.panel.selected_y(), ["TC2", "TC10", "Outlet Pressure"])
 
     def test_primary_and_secondary_lists_have_equal_sizing(self) -> None:
         self.assertEqual(self.panel.y_list.minimumHeight(), self.panel.secondary_y_list.minimumHeight())
@@ -679,6 +736,60 @@ class PlotWorkspaceParityTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertTrue(self.panel.canvas.axes.collections)
 
+    def test_channel_style_override_changes_label_colour_and_plot_kind(self) -> None:
+        from matplotlib.colors import to_hex
+
+        result = self.panel.generate_plot(
+            "Time",
+            ["A", "B"],
+            plot_kind="Line",
+            channel_styles={"A": {"channel": "A", "label": "Pump Pressure", "colour": "#123456", "plot_kind": "Scatter"}},
+        )
+
+        self.assertTrue(result.ok, result.message)
+        collections = {collection.get_label(): collection for collection in self.panel.canvas.axes.collections}
+        self.assertIn("Pump Pressure", collections)
+        self.assertEqual(to_hex(collections["Pump Pressure"].get_facecolors()[0]).lower(), "#123456")
+        self.assertEqual([line.get_label() for line in self.panel.canvas.axes.get_lines()], ["B"])
+        table_labels = [self.panel.legend_table.item(row, 1).text() for row in range(self.panel.legend_table.rowCount())]
+        self.assertIn("Pump Pressure", table_labels)
+
+    def test_channel_style_override_applies_curve_options(self) -> None:
+        from matplotlib.colors import to_hex
+
+        result = self.panel.generate_plot(
+            "Time",
+            ["A"],
+            plot_kind="Line",
+            channel_styles={
+                "A": {
+                    "channel": "A",
+                    "label": "Styled A",
+                    "colour": "#123456",
+                    "plot_kind": "Line + Markers",
+                    "line_style": "--",
+                    "draw_style": "steps-post",
+                    "line_width": "4",
+                    "marker_style": "s",
+                    "marker_size": "8",
+                    "marker_face_colour": "#ABCDEF",
+                    "marker_edge_colour": "#654321",
+                }
+            },
+        )
+
+        self.assertTrue(result.ok, result.message)
+        line = self.panel.canvas.axes.get_lines()[0]
+        self.assertEqual(line.get_label(), "Styled A")
+        self.assertEqual(line.get_linestyle(), "--")
+        self.assertEqual(line.get_drawstyle(), "steps-post")
+        self.assertEqual(line.get_linewidth(), 4.0)
+        self.assertEqual(line.get_marker(), "s")
+        self.assertEqual(line.get_markersize(), 8.0)
+        self.assertEqual(to_hex(line.get_color()).lower(), "#123456")
+        self.assertEqual(to_hex(line.get_markerfacecolor()).lower(), "#abcdef")
+        self.assertEqual(to_hex(line.get_markeredgecolor()).lower(), "#654321")
+
     def test_low_pass_filter(self) -> None:
         result = self.panel.generate_plot("Time", ["A"], use_filter=True, cutoff=10.0, order=4)
         self.assertTrue(result.ok, result.message)
@@ -777,6 +888,34 @@ class PlotWorkspaceParityTests(unittest.TestCase):
         self.assertIsNotNone(swatch)
         assert swatch is not None
         self.assertIn("background-color:", swatch.styleSheet())
+
+    def test_clicking_legend_row_emits_channel_style_payload(self) -> None:
+        from test_data_analyser.qt_app.widgets import plot_workspace as plot_workspace_module
+
+        result = self.panel.generate_plot("Time", ["A"])
+        self.assertTrue(result.ok, result.message)
+        emitted: list[tuple[str, dict]] = []
+        self.panel.legendChannelStyleChanged.connect(lambda channel, style: emitted.append((channel, style)))
+
+        class _FakeLegendDialog:
+            def __init__(self, channel: str, style: dict, parent=None) -> None:
+                self.channel = channel
+                self.style = style
+
+            def exec(self):
+                return QDialog.DialogCode.Accepted
+
+            def values(self) -> dict:
+                return {"channel": self.channel, "colour": "#654321", "plot_kind": "Scatter"}
+
+        original_dialog = plot_workspace_module.LegendChannelStyleDialog
+        try:
+            plot_workspace_module.LegendChannelStyleDialog = _FakeLegendDialog
+            self.panel._on_legend_cell_clicked(0, 1)
+        finally:
+            plot_workspace_module.LegendChannelStyleDialog = original_dialog
+
+        self.assertEqual(emitted, [("A", {"channel": "A", "colour": "#654321", "plot_kind": "Scatter"})])
 
     def test_legend_entries_are_sorted_alphabetically(self) -> None:
         result = self.panel.generate_plot("Time", ["B", "A"])
@@ -910,6 +1049,58 @@ class PlotWorkspaceParityTests(unittest.TestCase):
                 "y2_major_tick": "50",
                 "align_secondary_y_axis_grid": True,
             },
+        )
+
+    def test_figure_options_hides_curves_tab_and_restores_curve_data_for_apply(self) -> None:
+        captured: dict[str, object] = {}
+        original_figure_edit = matplotlib_qt_adapter.figureoptions.figure_edit
+        original_fedit = matplotlib_qt_adapter._formlayout.fedit
+
+        curve_fields = [
+            ("Label", "A"),
+            (None, "<b>Line</b>"),
+            ("Line style", ["-", ("-", "Solid"), ("--", "Dashed")]),
+            ("Draw style", ["default", ("default", "Default"), ("steps-post", "Steps (Post)")]),
+            ("Width", 1.5),
+            ("Color (RGBA)", "#123456"),
+            (None, "<b>Marker</b>"),
+            ("Style", ["none", ("none", "None"), ("o", "circle")]),
+            ("Size", 3.0),
+            ("Face color (RGBA)", "#abcdef"),
+            ("Edge color (RGBA)", "#654321"),
+        ]
+
+        def fake_figure_edit(axes, parent):
+            def apply(data):
+                captured["matplotlib_data"] = data
+
+            matplotlib_qt_adapter._formlayout.fedit(
+                [
+                    ([('Title', ''), ('(Re-)Generate automatic legend', False)], "Axes", ""),
+                    ([[curve_fields, "A", ""]], "Curves", ""),
+                ],
+                title="Figure options",
+                parent=parent,
+                apply=apply,
+            )
+
+        def fake_fedit(data, title="", comment="", icon=None, parent=None, apply=None):
+            captured["tabs"] = [section[1] for section in data]
+            if apply is not None:
+                apply([["updated title"], ["", "", "", False], ["panel"]])
+
+        matplotlib_qt_adapter.figureoptions.figure_edit = fake_figure_edit
+        matplotlib_qt_adapter._formlayout.fedit = fake_fedit
+        try:
+            self.panel.canvas.toolbar._figure_edit_with_legend(self.panel.canvas.axes)
+        finally:
+            matplotlib_qt_adapter.figureoptions.figure_edit = original_figure_edit
+            matplotlib_qt_adapter._formlayout.fedit = original_fedit
+
+        self.assertEqual(captured["tabs"], ["Axis", "Axis Ticks", "Legend"])
+        self.assertEqual(
+            captured["matplotlib_data"],
+            [["updated title", False], [["A", "-", "default", 1.5, "#123456", "none", 3.0, "#abcdef", "#654321"]]],
         )
 
     def test_figure_options_axis_ticks_tab_updates_workspace_settings(self) -> None:
@@ -1403,7 +1594,7 @@ class MainWindowLayoutTests(unittest.TestCase):
         subtitle = window.findChild(QLabel, "EatonHeaderSubtitle")
         self.assertIsNotNone(subtitle)
         assert subtitle is not None
-        self.assertEqual(subtitle.text(), "Eaton Engineering - Analysis Workspace (V1.00.01)")
+        self.assertEqual(subtitle.text(), "Eaton Engineering - Analysis Workspace (V1.01.00)")
 
     def test_application_icon_asset_exists(self) -> None:
         self.assertTrue(_app_icon_path().exists())
@@ -2131,6 +2322,101 @@ class MainWindowSessionRestoreTests(unittest.TestCase):
             self.assertAlmostEqual(tax.get_xlim()[1], 2.5, places=2)
             self.assertAlmostEqual(tax.get_ylim()[0], -1.0, places=2)
             self.assertAlmostEqual(tax.get_ylim()[1], 9.0, places=2)
+
+    def test_generate_plot_preserves_appearance_for_plot_kind_only_change(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data_path = os.path.join(directory, "data.csv")
+            pd.DataFrame({"Time": [0.0, 1.0, 2.0, 3.0], "A": [1.0, 2.0, 3.0, 4.0]}).to_csv(data_path, index=False)
+
+            window = self._make_window(directory)
+            window.vm.data_loading.load_file(data_path, None)
+            window._on_file_loaded(window.vm.state.column_names())
+            window.axis_panel.apply_selection(window.vm.state.column_names(), "Time", ["A"], [])
+            window._on_generate_plot()
+            axes = window.plot_workspace.canvas.axes
+            axes.set_title("Manual Title")
+            axes.set_xlabel("Manual X")
+            axes.set_ylabel("Manual Y")
+            axes.set_xlim(0.5, 2.5)
+            axes.set_ylim(-1.0, 9.0)
+            window.plot_workspace.set_axis_tick_settings({"x_major_tick": "0.5", "y_major_tick": "2", "y2_major_tick": "", "align_secondary_y_axis_grid": False})
+            window.axis_panel.plot_kind_combo.setCurrentText("Scatter")
+
+            window._on_generate_plot()
+            current_axes = window.plot_workspace.canvas.axes
+
+            self.assertEqual(current_axes.get_title(), "Manual Title")
+            self.assertEqual(current_axes.get_xlabel(), "Manual X")
+            self.assertEqual(current_axes.get_ylabel(), "Manual Y")
+            self.assertAlmostEqual(current_axes.get_xlim()[0], 0.5, places=2)
+            self.assertAlmostEqual(current_axes.get_xlim()[1], 2.5, places=2)
+            self.assertEqual(window.plot_workspace.axis_tick_setting_texts()["x_major_tick"], "0.5")
+            self.assertTrue(window.plot_workspace.canvas.axes.collections)
+
+    def test_generate_plot_resets_appearance_for_different_channel_range(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data_path = os.path.join(directory, "data.csv")
+            pd.DataFrame(
+                {
+                    "Time": [0.0, 1.0, 2.0, 3.0],
+                    "A": [1.0, 2.0, 3.0, 4.0],
+                    "High Pressure": [1000.0, 1200.0, 1400.0, 1600.0],
+                }
+            ).to_csv(data_path, index=False)
+
+            window = self._make_window(directory)
+            window.vm.data_loading.load_file(data_path, None)
+            window._on_file_loaded(window.vm.state.column_names())
+            window.axis_panel.apply_selection(window.vm.state.column_names(), "Time", ["A"], [])
+            window._on_generate_plot()
+            axes = window.plot_workspace.canvas.axes
+            axes.set_title("Manual Title")
+            axes.set_xlabel("Manual X")
+            axes.set_ylabel("Manual Y")
+            axes.set_xlim(0.5, 2.5)
+            axes.set_ylim(-1.0, 9.0)
+            window.plot_workspace.set_axis_tick_settings({"x_major_tick": "0.5", "y_major_tick": "2", "y2_major_tick": "", "align_secondary_y_axis_grid": False})
+            window.axis_panel.apply_selection(window.vm.state.column_names(), "Time", ["High Pressure"], [])
+
+            window._on_generate_plot()
+
+            self.assertEqual(window.plot_workspace.canvas.axes.get_title(), "Engineering Test Data")
+            self.assertEqual(window.plot_workspace.canvas.axes.get_xlabel(), "Time")
+            self.assertEqual(window.plot_workspace.canvas.axes.get_ylabel(), "Selected Signals")
+            self.assertNotAlmostEqual(window.plot_workspace.canvas.axes.get_xlim()[0], 0.5, places=2)
+            self.assertEqual(window.plot_workspace.axis_tick_setting_texts()["x_major_tick"], "")
+
+    def test_generate_plot_preserves_appearance_for_similar_added_channel(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data_path = os.path.join(directory, "data.csv")
+            pd.DataFrame(
+                {
+                    "Time": [0.0, 1.0, 2.0, 3.0],
+                    "Motor Pressure 1": [10.0, 20.0, 30.0, 40.0],
+                    "Motor Pressure 2": [11.0, 21.0, 31.0, 41.0],
+                }
+            ).to_csv(data_path, index=False)
+
+            window = self._make_window(directory)
+            window.vm.data_loading.load_file(data_path, None)
+            window._on_file_loaded(window.vm.state.column_names())
+            window.axis_panel.apply_selection(window.vm.state.column_names(), "Time", ["Motor Pressure 1"], [])
+            window._on_generate_plot()
+            window.plot_workspace.canvas.axes.set_title("Manual Title")
+            window.plot_workspace.canvas.axes.set_ylim(0.0, 50.0)
+            window.plot_workspace.set_axis_tick_settings({"x_major_tick": "1", "y_major_tick": "10", "y2_major_tick": "", "align_secondary_y_axis_grid": False})
+            window.axis_panel.apply_selection(
+                window.vm.state.column_names(),
+                "Time",
+                ["Motor Pressure 1", "Motor Pressure 2"],
+                [],
+            )
+
+            window._on_generate_plot()
+
+            self.assertEqual(window.plot_workspace.canvas.axes.get_title(), "Manual Title")
+            self.assertEqual(window.plot_workspace.canvas.axes.get_ylim(), (0.0, 50.0))
+            self.assertEqual(window.plot_workspace.axis_tick_setting_texts()["y_major_tick"], "10")
 
 
 class LastDataDirectoryHelperTests(unittest.TestCase):

@@ -40,6 +40,17 @@ class StatisticsServiceTests(unittest.TestCase):
         self.assertEqual(row["Mean"], 2.5)
         self.assertEqual(row["Peak-to-Peak"], 3.0)
 
+    def test_compute_statistics_rows_are_naturally_sorted(self) -> None:
+        columns = {
+            "TC10": pd.Series([1.0]),
+            "B": pd.Series([1.0]),
+            "TC2": pd.Series([1.0]),
+        }
+
+        stats = statistics_service.compute_statistics(columns)
+
+        self.assertEqual(list(stats.index), ["B", "TC2", "TC10"])
+
 
 class CursorServiceTests(unittest.TestCase):
     def _xy(self):
@@ -73,6 +84,15 @@ class CursorServiceTests(unittest.TestCase):
         self.assertEqual(delta_row["Type"], "\u0394 vs P1")
         self.assertEqual(delta_row["A"], "20.00")
         self.assertEqual(delta_row["X / \u0394X"], "2.00")
+
+    def test_comparison_frame_channel_columns_are_naturally_sorted(self) -> None:
+        points = [
+            {"point_no": 1, "index": 0, "x": 0.0, "values": {"TC10": 10.0, "TC2": 2.0, "A": 1.0}},
+        ]
+
+        frame = cursor_service.cursor_comparison_frame(points)
+
+        self.assertEqual(list(frame.columns[4:]), ["A", "TC2", "TC10"])
 
     def test_empty_series_skipped(self) -> None:
         columns = {"A": pd.Series([np.nan, np.nan])}
@@ -124,6 +144,73 @@ class LimitsServiceTests(unittest.TestCase):
             [{"name": "Max", "type": "Upper Limit", "points": [{"x": 0, "y": 1.5}, {"x": 2, "y": 1.5}]}]
         )
         self.assertEqual(limits_service.compute_limit_margins(data, failing).rows[0].status, "FAIL")
+
+    def test_limit_margin_reports_first_interpolated_failure(self) -> None:
+        data = PlotData(
+            x=pd.Series([0.0, 20.0, 26.0, 30.0]),
+            y_map={"Sig": pd.Series([5.0, 18.0, 27.0, 35.0])},
+            x_map=None,
+        )
+        lines = limits_service.normalise_limit_lines(
+            [
+                {
+                    "name": "Max",
+                    "type": "Upper Limit",
+                    "points": [{"x": 0, "y": 10}, {"x": 20, "y": 20}, {"x": 30, "y": 30}],
+                }
+            ]
+        )
+
+        row = limits_service.compute_limit_margins(data, lines).rows[0]
+
+        self.assertEqual(row.status, "FAIL")
+        self.assertIn("minimum margin below upper limit = -5 at X = 30", row.message)
+        self.assertIn("first failure at X = 26", row.message)
+        self.assertIn("data = 27, limit = 26", row.message)
+
+    def test_limit_margin_uses_channel_specific_x_map(self) -> None:
+        data = PlotData(
+            x=pd.Series([100.0, 101.0, 102.0]),
+            y_map={"Sig": pd.Series([5.0, 12.0, 9.0])},
+            x_map={"Sig": pd.Series([0.0, 1.0, 2.0])},
+        )
+        lines = limits_service.normalise_limit_lines(
+            [{"name": "Max", "type": "Upper Limit", "points": [{"x": 0, "y": 10}, {"x": 2, "y": 10}]}]
+        )
+
+        row = limits_service.compute_limit_margins(data, lines).rows[0]
+
+        self.assertEqual(row.status, "FAIL")
+        self.assertIn("first failure at X = 1", row.message)
+
+    def test_limit_margin_warns_when_pass_margin_is_within_five_percent(self) -> None:
+        data = PlotData(x=pd.Series([0.0, 1.0]), y_map={"Sig": pd.Series([96.0, 96.0])}, x_map=None)
+        lines = limits_service.normalise_limit_lines(
+            [{"name": "Max", "type": "Upper Limit", "points": [{"x": 0, "y": 100}, {"x": 1, "y": 100}]}]
+        )
+
+        summary = limits_service.compute_limit_margins(data, lines)
+        row = summary.rows[0]
+        table_row = summary.to_table_rows()[0]
+
+        self.assertEqual(row.status, "PASS")
+        self.assertEqual(row.severity, "WARN")
+        self.assertEqual(table_row["Status"], "PASS")
+        self.assertEqual(table_row["Severity"], "WARN")
+        self.assertAlmostEqual(table_row["Margin %"], 4.166666666666666)
+
+    def test_margin_table_rows_are_naturally_sorted_by_limit_and_channel(self) -> None:
+        summary = limits_service.LimitMarginSummary(
+            rows=[
+                limits_service.LimitMarginRow("Limit B", "TC10", "PASS", "ok"),
+                limits_service.LimitMarginRow("Limit A", "TC10", "PASS", "ok"),
+                limits_service.LimitMarginRow("Limit A", "TC2", "PASS", "ok"),
+            ]
+        )
+
+        labels = [(row["Limit"], row["Channel"]) for row in summary.to_table_rows()]
+
+        self.assertEqual(labels, [("Limit A", "TC2"), ("Limit A", "TC10"), ("Limit B", "TC10")])
 
     def test_summary_text_header_and_skip(self) -> None:
         data = PlotData(x=pd.Series([0.0, 1.0]), y_map={"Sig": pd.Series([1.0, 2.0])}, x_map=None)

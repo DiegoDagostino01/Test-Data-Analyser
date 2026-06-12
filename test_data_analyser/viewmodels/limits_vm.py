@@ -18,6 +18,7 @@ from typing import Any, Optional, Tuple
 import pandas as pd
 
 from ..core.config import EATON_DARK_BLUE, LIMIT_COLOR_PRESETS
+from ..core.utils import natural_sort_key
 from ..domain import PlotData
 from ..services import limits_service
 from ..services.limits_service import LimitMarginSummary
@@ -52,6 +53,9 @@ class LimitsViewModel:
     def margin_text(self, data: PlotData, limit_lines: list[dict[str, Any]]) -> str:
         return limits_service.calculate_limit_margins_text(data, self.normalise(limit_lines))
 
+    def margin_table_rows(self, data: PlotData, limit_lines: list[dict[str, Any]]) -> list[dict[str, object]]:
+        return self.margin_summary(data, limit_lines).to_table_rows()
+
     # ------------------------------------------------------------------
     # Static metadata helpers (for the UI controls)
     # ------------------------------------------------------------------
@@ -76,7 +80,7 @@ class LimitsViewModel:
         return LIMIT_COLOR_PRESETS.get(preset)
 
     def applies_options(self, selected_y: list[str]) -> list[str]:
-        return ["All selected Y channels"] + list(selected_y)
+        return ["All selected Y channels"] + sorted(selected_y, key=natural_sort_key)
 
     # ------------------------------------------------------------------
     # Stateful access

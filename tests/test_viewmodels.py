@@ -251,8 +251,8 @@ class LimitsViewModelCrudTests(unittest.TestCase):
 
     def test_applies_options(self) -> None:
         self.assertEqual(
-            self.vm.applies_options(["A", "B"]),
-            ["All selected Y channels", "A", "B"],
+            self.vm.applies_options(["B", "A10", "A2"]),
+            ["All selected Y channels", "A2", "A10", "B"],
         )
 
 
@@ -272,6 +272,16 @@ class RawDataViewModelTests(unittest.TestCase):
         )
         self.assertEqual(list(frame["Time"]), [1.0, 2.0])
         self.assertEqual(removed, 0)
+
+    def test_select_frame_sorts_selected_y_columns_naturally(self) -> None:
+        self.state.df["TC10"] = [10.0, 20.0, 30.0, 40.0]
+        self.state.df["TC2"] = [2.0, 3.0, 4.0, 5.0]
+
+        frame, _removed = self.vm.select_frame(
+            "Time", ["TC10", "B", "TC2"], apply_window=False, xmin=None, xmax=None, drop_blank=False
+        )
+
+        self.assertEqual(list(frame.columns), ["Time", "B", "TC2", "TC10"])
 
     def test_coerce_edit_value(self) -> None:
         self.assertEqual(self.vm.coerce_edit_value("A", "99").payload, 99.0)
@@ -339,6 +349,13 @@ class MathsChannelsViewModelTests(unittest.TestCase):
         self.assertIn("Sum", self.state.df.columns)
         self.assertIn("Sum", self.state.calculated_channels)
         self.assertCountEqual(result.payload["created_from_columns"], ["A", "B"])
+
+    def test_channel_names_are_naturally_sorted(self) -> None:
+        self.vm.apply_channel("TC10", "A + B")
+        self.vm.apply_channel("TC2", "A + B")
+        self.vm.apply_channel("Calc", "A + B")
+
+        self.assertEqual(self.vm.channel_names(), ["Calc", "TC2", "TC10"])
 
     def test_apply_channel_rename_removes_old(self) -> None:
         self.vm.apply_channel("Old", "A + B")
@@ -409,6 +426,14 @@ class RunsComparisonViewModelTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["run"], "Run 1")
         self.assertEqual(rows[0]["Count"], 2)
+
+    def test_comparison_statistics_sort_channels_naturally(self) -> None:
+        run = self.state.runs[0]
+        run["df"] = pd.DataFrame({"Time": [0.0, 1.0], "TC10": [10.0, 11.0], "TC2": [2.0, 3.0]})
+
+        rows = self.vm.comparison_statistics(["TC10", "TC2"])
+
+        self.assertEqual([row["channel"] for row in rows], ["TC2", "TC10"])
 
     def test_serialise_runs_drops_dataframe(self) -> None:
         serialised = self.vm.serialise_runs()
@@ -603,6 +628,70 @@ class MainWindowViewModelTests(unittest.TestCase):
         self.assertNotIn(plot_render_service.normalise_channel_name("Motor Current"), mapping)
         self.assertNotIn(plot_render_service.normalise_channel_name("Stale Channel"), mapping)
         self.assertNotIn(plot_render_service.normalise_channel_name("Flow Rate"), mapping)
+
+    def test_legend_colour_override_carries_across_matching_plot_profiles(self) -> None:
+        vm = MainWindowViewModel()
+        vm.state.plot_profiles = [
+            {"name": "Plot 1", "x_column": "Time", "y_columns": ["Motor Voltage"], "generated": True},
+            {"name": "Plot 2", "x_column": "Time", "y_columns": [" motor voltage "], "generated": True},
+        ]
+        vm.state.active_plot_profile_index = 0
+
+        result = vm.update_active_legend_channel_override(
+            "Motor Voltage",
+            {"label": "Voltage", "colour": "#123456", "plot_kind": "Scatter"},
+        )
+
+        self.assertTrue(result.ok, result.message)
+        key = plot_render_service.normalise_channel_name("Motor Voltage")
+        self.assertEqual(vm.state.plot_profiles[0]["legend"]["channel_overrides"][key]["label"], "Voltage")
+        self.assertEqual(vm.state.plot_profiles[0]["legend"]["channel_overrides"][key]["plot_kind"], "Scatter")
+        self.assertEqual(vm.state.plot_profiles[1]["legend"]["channel_overrides"][key]["colour"], "#123456")
+
+        vm.state.active_plot_profile_index = 1
+        mapping = vm.persistent_plot_channel_colours(["Motor Voltage"], [])
+        self.assertEqual(mapping[key], "#123456")
+
+    def test_capture_working_state_preserves_legend_channel_overrides(self) -> None:
+        vm = MainWindowViewModel()
+        key = plot_render_service.normalise_channel_name("A")
+        vm.state.plot_profiles = [
+            {
+                "name": "Plot 1",
+                "legend": {"display_mode": "panel", "channel_overrides": {key: {"channel": "A", "colour": "#123456"}}},
+            }
+        ]
+
+        vm.capture_working_state(x_column="Time", y_columns=["A"], legend_settings={"display_mode": "graph"})
+
+        self.assertEqual(vm.state.plot_profiles[0]["legend"]["display_mode"], "graph")
+        self.assertEqual(vm.state.plot_profiles[0]["legend"]["channel_overrides"][key]["colour"], "#123456")
+
+    def test_plot_selection_preserves_appearance_for_similar_channels_only(self) -> None:
+        vm = MainWindowViewModel()
+        vm.state.df = pd.DataFrame(
+            {
+                "Time": [0.0, 1.0, 2.0, 3.0],
+                "Motor Pressure 1": [10.0, 20.0, 30.0, 40.0],
+                "Motor Pressure 2": [11.0, 21.0, 31.0, 41.0],
+                "High Pressure": [1000.0, 1200.0, 1400.0, 1600.0],
+            }
+        )
+        previous = {
+            "x_column": "Time",
+            "primary_y": ["Motor Pressure 1"],
+            "secondary_y": [],
+            "xmin": None,
+            "xmax": None,
+            "use_filter": False,
+            "cutoff": None,
+            "order": 4,
+        }
+        similar = {**previous, "primary_y": ["Motor Pressure 1", "Motor Pressure 2"]}
+        different = {**previous, "primary_y": ["High Pressure"]}
+
+        self.assertTrue(vm.plot_selection_preserves_appearance(previous, similar))
+        self.assertFalse(vm.plot_selection_preserves_appearance(previous, different))
 
     def test_plot_profile_crud_keeps_valid_active_profile(self) -> None:
         vm = MainWindowViewModel()

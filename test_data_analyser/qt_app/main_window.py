@@ -67,6 +67,7 @@ class MainWindow(QMainWindow):
         self.vm = MainWindowViewModel(self.settings_manager)
         self.vm.ensure_plot_profiles()
         self._plot_generated = False
+        self._last_plot_selection: dict[str, Any] | None = None
         self._syncing_plot_tabs = False
         self._active_plot_tab_index = self.vm.state.active_plot_profile_index
         self._current_session_path: str | None = None
@@ -129,6 +130,7 @@ class MainWindow(QMainWindow):
         self.runs_panel = RunsComparisonPanel(self.vm.runs_comparison)
         self.runs_panel.set_selection_provider(self._current_axis_selection)
         self.plot_workspace.set_cursor_viewmodel(self.vm.cursor_compare)
+        self.plot_workspace.legendChannelStyleChanged.connect(self._on_legend_channel_style_changed)
         self.cursor_panel = CursorComparePanel(self.vm.cursor_compare, self.plot_workspace)
         self.cursor_panel.analysisWindowRequested.connect(self._on_cursor_window)
 
@@ -584,7 +586,7 @@ class MainWindow(QMainWindow):
             y_columns=self.axis_panel.selected_y(),
             secondary_y_columns=self.axis_panel.selected_secondary_y(),
             plot_kind=self.axis_panel.plot_kind(),
-            legend_settings={"display_mode": self.plot_workspace.legend_display()},
+            legend_settings=self._current_legend_settings(profile),
             analysis_window=self.axis_panel.analysis_window_texts(),
             axis_ticks=self.plot_workspace.axis_tick_setting_texts(),
             filter_settings=self.axis_panel.filter_setting_texts(),
@@ -607,6 +609,12 @@ class MainWindow(QMainWindow):
             "axis_limits": profile.get("axis_limits", {}),
             "auto_fit_axes": profile.get("auto_fit_axes", True),
         }
+
+    def _current_legend_settings(self, profile: dict) -> dict[str, Any]:
+        legend_settings = profile.get("legend", {}) if isinstance(profile, dict) else {}
+        legend = dict(legend_settings) if isinstance(legend_settings, dict) else {}
+        legend["display_mode"] = self.plot_workspace.legend_display()
+        return legend
 
     def _apply_active_plot_profile(self, *, clear_global_forms: bool = False) -> None:
         self.vm.ensure_plot_profiles()
@@ -851,10 +859,29 @@ class MainWindow(QMainWindow):
         self.limits_panel.refresh_margins()
         self.runs_panel.update_statistics()
 
+    def _on_legend_channel_style_changed(self, channel: str, style: dict) -> None:
+        result = self.vm.update_active_legend_channel_override(channel, style)
+        if not result.ok:
+            qt_message_service.warning(self, "Legend Channel", result.message)
+            self.statusBar().showMessage(result.message)
+            return
+        appearance = self.plot_workspace.current_axis_appearance() if self._plot_generated else {}
+        plot_result = self._generate_plot(appearance)
+        if plot_result is None:
+            self.statusBar().showMessage(result.message)
+            return
+        if not plot_result.ok:
+            qt_message_service.warning(self, "Legend Channel", plot_result.message)
+            self.statusBar().showMessage(plot_result.message)
+            return
+        self._plot_generated = True
+        self.statusBar().showMessage(result.message)
+
     def _on_file_loaded(self, columns: list[str]) -> None:
         suggested_x = self.vm.data_loading.suggested_x_column(columns)
         self._current_session_path = None
         self._plot_generated = False
+        self._last_plot_selection = None
         self.vm.reset_plot_profiles()
         self._sync_plot_tabs()
         self.plot_workspace.clear_plot()
@@ -870,7 +897,16 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Loaded {len(columns)} columns. Select channels and generate a plot.")
 
     def _on_generate_plot(self) -> None:
-        result = self._generate_plot()
+        appearance = None
+        axis_tick_settings = None
+        current_selection = self._current_plot_selection_signature()
+        if self._plot_generated and self._last_plot_selection and current_selection:
+            if self.vm.plot_selection_preserves_appearance(self._last_plot_selection, current_selection):
+                appearance = self.plot_workspace.current_axis_appearance()
+                axis_tick_settings = self.plot_workspace.axis_tick_setting_texts()
+            else:
+                axis_tick_settings = {}
+        result = self._generate_plot(appearance, axis_tick_settings=axis_tick_settings)
         if result is None:
             return
         if not result.ok:
@@ -910,6 +946,7 @@ class MainWindow(QMainWindow):
             qt_message_service.warning(self, "Comparison Plot", result.message)
             self.statusBar().showMessage(result.message)
             return
+        self._last_plot_selection = None
         self.runs_panel.update_statistics()
         message = result.message
         if skipped:
@@ -917,22 +954,35 @@ class MainWindow(QMainWindow):
         self.runs_panel.set_status(message)
         self.statusBar().showMessage(message)
 
-    def _generate_plot(self, appearance: dict | None = None):
+    def _generate_plot(
+        self,
+        appearance: dict | None = None,
+        *,
+        axis_tick_settings: dict[str, object] | None = None,
+    ):
         """Render the current axis selection onto the canvas (shared by plot/limit refresh).
 
         Returns the ``OperationResult`` or ``None`` when there is nothing selected.
         ``appearance`` supplies saved Figure Options title/labels/limits on restore.
         """
-        x_col = self.axis_panel.x_column()
-        primary_y = self.axis_panel.selected_y()
-        secondary_y = self.axis_panel.selected_secondary_y()
+        selection = self._current_plot_selection_signature()
+        if selection is None:
+            return None
+        x_col = str(selection["x_column"])
+        primary_y = list(selection["primary_y"])
+        secondary_y = list(selection["secondary_y"])
         y_cols = primary_y + [column for column in secondary_y if column not in primary_y]
         if not x_col or not y_cols:
             return None
-        xmin, xmax = self.axis_panel.analysis_window()
-        use_filter, cutoff, order = self.axis_panel.filter_settings()
+        xmin = selection["xmin"]
+        xmax = selection["xmax"]
+        use_filter = bool(selection["use_filter"])
+        cutoff = selection["cutoff"]
+        order = int(selection["order"])
         channel_colours = self.vm.persistent_plot_channel_colours(primary_y, secondary_y)
-        return self.plot_workspace.generate_plot(
+        channel_styles = self.vm.active_legend_channel_overrides()
+        tick_settings = self.plot_workspace.axis_tick_setting_texts() if axis_tick_settings is None else axis_tick_settings
+        result = self.plot_workspace.generate_plot(
             x_col,
             y_cols,
             xmin,
@@ -944,9 +994,33 @@ class MainWindow(QMainWindow):
             cutoff=cutoff,
             order=order,
             channel_colours=channel_colours,
-            axis_tick_settings=self.plot_workspace.axis_tick_setting_texts(),
+            channel_styles=channel_styles,
+            axis_tick_settings=tick_settings,
             **self._appearance_kwargs(appearance),
         )
+        if result.ok:
+            self._last_plot_selection = dict(selection)
+        return result
+
+    def _current_plot_selection_signature(self) -> dict[str, Any] | None:
+        x_col = self.axis_panel.x_column()
+        primary_y = self.axis_panel.selected_y()
+        secondary_y = self.axis_panel.selected_secondary_y()
+        y_cols = primary_y + [column for column in secondary_y if column not in primary_y]
+        if not x_col or not y_cols:
+            return None
+        xmin, xmax = self.axis_panel.analysis_window()
+        use_filter, cutoff, order = self.axis_panel.filter_settings()
+        return {
+            "x_column": x_col,
+            "primary_y": list(primary_y),
+            "secondary_y": list(secondary_y),
+            "xmin": xmin,
+            "xmax": xmax,
+            "use_filter": bool(use_filter),
+            "cutoff": cutoff,
+            "order": order,
+        }
 
     @staticmethod
     def _appearance_kwargs(appearance: dict | None) -> dict:

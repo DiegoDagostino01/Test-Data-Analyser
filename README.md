@@ -117,7 +117,10 @@ clip(`Pressure`, 0, 500)
 ```
 
 Calculated channel definitions are saved in analysis sessions and recalculated
-when a session is loaded.
+when a session is loaded. Channel lists are sorted naturally throughout the app,
+so numbered names such as `TC2` and `TC10` appear in engineering-friendly order;
+where channel groups are shown, the group order is preserved and each group is
+sorted internally.
 
 ## Plot options
 
@@ -131,18 +134,31 @@ Matplotlib `twinx` with an offset colour cycle and a merged legend). Choose the
 order) to apply a zero-phase Butterworth filter per channel. Channels that recur
 across plots keep a stable colour.
 
+The right-side **Legend** panel also edits plotted channel styling directly:
+click a legend row to change the display name, colour, plot type, line style,
+draw style, line width, marker style, marker size, marker face colour, and
+marker edge colour. These per-channel overrides are saved with plot profiles and
+analysis sessions, and channel colour overrides carry across matching channels
+on other plots.
+
 Use the toolbar's **Figure Options** to fine-tune the plot: edit axis titles and
 limits with **auto-label** / **auto-fit** helpers, set per-axis major-tick
 spacing (and optionally align the secondary-Y grid to the primary), and switch
 the legend between the right-side **Legend** panel and an in-graph Matplotlib
-legend. Configurable axis padding (Settings ▸ Axis Padding) keeps a
-margin around auto-fitted data, and saved figure exports include the legend.
+legend. Curve styling is handled by the Legend panel channel editor rather than
+the Figure Options dialog. Configurable axis padding (Settings > Axis Padding)
+keeps a margin around auto-fitted data, and saved figure exports include the
+legend.
 
 Use the **+** tab beside the plot tabs above the canvas to create additional
 plots. Each plot tab keeps its own X-axis selection, Y-axis selections, plot
-title, axis labels, limits, ticks, legend mode, notes, and requirement overlays.
+title, axis labels, limits, ticks, legend mode, legend channel overrides, notes,
+and requirement overlays.
 Right-click a plot tab to duplicate, rename, or delete it; all plot tabs are
-saved and restored with analysis sessions.
+saved and restored with analysis sessions. Re-generating a plot preserves manual
+axis labels, limits, and tick spacing for plot-kind changes or similar channel
+additions, and resets that appearance when the selected data changes
+materially.
 
 ## Requirements / Limits
 
@@ -150,8 +166,11 @@ The **Requirements / Limits** tab manages requirement limit lines. Add lines
 (Upper Limit, Lower Limit, or Reference Line), give each a colour (preset, hex,
 or colour-picker), set which channels it applies to, and add X/Y points (two or
 more per line). Limit lines are drawn as dashed/dotted overlays on the plot, and
-the **margin-to-limit summary** reports each channel's worst-case margin and
-PASS/FAIL status against the active selection.
+the **margin-to-limit summary** table reports each channel's PASS/WARN/FAIL
+status, margin, margin percentage, worst point, first failure point, and detail
+message against the active selection. Limit margins are evaluated by
+interpolating the limit line over the channel's X data, and a PASS within 5%
+margin is highlighted as WARN.
 
 ## Engineering Notes
 
@@ -173,10 +192,10 @@ into the analysis-window fields.
 
 The **File** ribbon's **Save Session** command writes the current file
 reference, axis selection, plot profiles, calculated-channel definitions, limit
-lines, engineering notes, and run/comparison settings to a JSON file. **Load
-Session** restores them — reloading the source file and comparison runs from
-their saved paths, recalculating maths channels, and re-applying the selection
-across every panel.
+lines, engineering notes, legend channel overrides, and run/comparison settings
+to a JSON file. **Load Session** restores them — reloading the source file and
+comparison runs from their saved paths, recalculating maths channels, and
+re-applying the selection across every panel.
 Saved sessions remain compatible with the original on-disk format.
 
 ## Architecture

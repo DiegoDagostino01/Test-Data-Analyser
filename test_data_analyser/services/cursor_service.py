@@ -10,6 +10,8 @@ from typing import Any, Optional
 
 import pandas as pd
 
+from ..core.utils import natural_sort_key
+
 
 def nearest_point(
     x_values: pd.Series,
@@ -51,7 +53,7 @@ def cursor_comparison_frame(points: list[dict[str, Any]], decimals: int = 4) -> 
     if not points:
         return pd.DataFrame(columns=base_columns)
 
-    channels = list(points[0]["values"].keys())
+    channels = sorted(points[0]["values"].keys(), key=natural_sort_key)
     columns = base_columns + channels
     rows: list[dict[str, str]] = []
 

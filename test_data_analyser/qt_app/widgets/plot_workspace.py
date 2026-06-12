@@ -11,18 +11,27 @@ import os
 import math
 from collections.abc import Iterable
 from contextlib import contextmanager
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from cycler import cycler
+from matplotlib.backends.qt_editor import figureoptions
 from matplotlib.colors import to_hex
 from matplotlib.ticker import MultipleLocator
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QColorDialog,
+    QDialog,
+    QDialogButtonBox,
+    QDoubleSpinBox,
+    QFormLayout,
     QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
+    QPushButton,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -38,10 +47,195 @@ from ...viewmodels.cursor_compare_vm import CursorCompareViewModel
 from ...viewmodels.plot_workspace_vm import PlotWorkspaceViewModel
 from ...viewmodels.settings_vm import SettingsViewModel
 from ..adapters.matplotlib_qt_adapter import LEGEND_DISPLAY_GRAPH, LEGEND_DISPLAY_PANEL, MatplotlibCanvas
+from .axis_selection_panel import PLOT_KINDS
+from .no_wheel_combo_box import NoWheelComboBox
+
+CURVE_STYLE_KEYS = {
+    "line_style",
+    "draw_style",
+    "line_width",
+    "marker_style",
+    "marker_size",
+    "marker_face_colour",
+    "marker_edge_colour",
+}
+
+LINE_STYLE_CHOICES = tuple(figureoptions.LINESTYLES.items())
+DRAW_STYLE_CHOICES = tuple(figureoptions.DRAWSTYLES.items())
+MARKER_STYLE_CHOICES = (("none", "None"), *tuple(figureoptions.MARKERS.items()))
+
+
+class LegendChannelStyleDialog(QDialog):
+    def __init__(self, channel: str, style: dict[str, Any], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._channel = channel.strip()
+        self._original_label = str(style.get("label", self._channel)).strip() or self._channel
+        self._label_overridden = bool(style.get("label_overridden", False))
+        self._original_plot_kind = PlotWorkspace._normalise_plot_kind(style.get("plot_kind")) or "Line"
+        self._plot_kind_overridden = bool(style.get("plot_kind_overridden", False))
+        self._current_colours = {
+            "colour": self._normalise_colour(style.get("colour")) or EATON_DARK_BLUE,
+            "marker_face_colour": self._normalise_colour(style.get("marker_face_colour"))
+            or self._normalise_colour(style.get("colour"))
+            or EATON_DARK_BLUE,
+            "marker_edge_colour": self._normalise_colour(style.get("marker_edge_colour"))
+            or self._normalise_colour(style.get("colour"))
+            or EATON_DARK_BLUE,
+        }
+        self._colour_edits: dict[str, QLineEdit] = {}
+        self._colour_swatches: dict[str, QFrame] = {}
+        self.setWindowTitle("Edit Legend Channel")
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.name_edit = QLineEdit(self._original_label)
+        form.addRow("Name:", self.name_edit)
+
+        form.addRow("Colour:", self._build_colour_row("colour"))
+
+        self.plot_kind_combo = NoWheelComboBox()
+        self.plot_kind_combo.addItems(PLOT_KINDS)
+        self.plot_kind_combo.setCurrentText(self._original_plot_kind)
+        form.addRow("Plot Type:", self.plot_kind_combo)
+
+        self.line_style_combo = self._style_combo(LINE_STYLE_CHOICES, str(style.get("line_style", "-")))
+        form.addRow("Line style:", self.line_style_combo)
+        self.draw_style_combo = self._style_combo(DRAW_STYLE_CHOICES, str(style.get("draw_style", "default")))
+        form.addRow("Draw style:", self.draw_style_combo)
+        self.line_width_spin = self._number_spin(style.get("line_width", 1.5), default=1.5)
+        form.addRow("Line width:", self.line_width_spin)
+
+        marker_default = self._default_marker_for_plot_kind(self._original_plot_kind)
+        self.marker_style_combo = self._style_combo(MARKER_STYLE_CHOICES, str(style.get("marker_style", marker_default)))
+        form.addRow("Marker style:", self.marker_style_combo)
+        self.marker_size_spin = self._number_spin(style.get("marker_size", 3.0), default=3.0)
+        form.addRow("Marker size:", self.marker_size_spin)
+        form.addRow("Marker face:", self._build_colour_row("marker_face_colour"))
+        form.addRow("Marker edge:", self._build_colour_row("marker_edge_colour"))
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def values(self) -> dict[str, str]:
+        label = self.name_edit.text().strip() or self._channel
+        plot_kind = self.plot_kind_combo.currentText()
+        values = {
+            "channel": self._channel,
+            "colour": self._current_colours["colour"],
+            "line_style": self._combo_value(self.line_style_combo),
+            "draw_style": self._combo_value(self.draw_style_combo),
+            "line_width": f"{self.line_width_spin.value():g}",
+            "marker_style": self._combo_value(self.marker_style_combo),
+            "marker_size": f"{self.marker_size_spin.value():g}",
+            "marker_face_colour": self._current_colours["marker_face_colour"],
+            "marker_edge_colour": self._current_colours["marker_edge_colour"],
+        }
+        if self._label_overridden or label != self._original_label:
+            values["label"] = label
+        if self._plot_kind_overridden or plot_kind != self._original_plot_kind:
+            values["plot_kind"] = plot_kind
+        return values
+
+    def accept(self) -> None:
+        for key in self._current_colours:
+            self._sync_colour_from_text(key)
+        if not self.name_edit.text().strip():
+            self.name_edit.setText(self._channel)
+        super().accept()
+
+    def _build_colour_row(self, key: str) -> QWidget:
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        edit = QLineEdit(self._current_colours[key])
+        edit.setFixedWidth(92)
+        edit.editingFinished.connect(lambda key=key: self._sync_colour_from_text(key))
+        swatch = QFrame()
+        swatch.setFrameShape(QFrame.Shape.Box)
+        swatch.setFixedWidth(28)
+        pick_button = QPushButton("Choose...")
+        pick_button.clicked.connect(lambda _checked=False, key=key: self._pick_colour(key))
+        layout.addWidget(edit)
+        layout.addWidget(swatch)
+        layout.addWidget(pick_button)
+        layout.addStretch(1)
+        self._colour_edits[key] = edit
+        self._colour_swatches[key] = swatch
+        if key == "colour":
+            self.colour_edit = edit
+            self.colour_swatch = swatch
+        self._update_swatch(key)
+        return row
+
+    def _pick_colour(self, key: str) -> None:
+        chosen = QColorDialog.getColor(QColor(self._current_colours[key]), self, "Select Channel Colour")
+        if chosen.isValid():
+            self._set_colour(key, chosen.name())
+
+    def _sync_colour_from_text(self, key: str) -> None:
+        self._set_colour(key, self._colour_edits[key].text())
+
+    def _set_colour(self, key: str, colour: str) -> None:
+        normalised = self._normalise_colour(colour)
+        if normalised:
+            self._current_colours[key] = normalised
+        self._colour_edits[key].setText(self._current_colours[key])
+        self._update_swatch(key)
+
+    def _update_swatch(self, key: str) -> None:
+        self._colour_swatches[key].setStyleSheet(
+            f"background-color: {self._current_colours[key]}; border: 1px solid #888888; border-radius: 2px;"
+        )
+
+    @staticmethod
+    def _style_combo(choices: Iterable[tuple[object, object]], current: str) -> NoWheelComboBox:
+        combo = NoWheelComboBox()
+        seen: set[str] = set()
+        for value, label in choices:
+            value_text = str(value)
+            if value_text in seen:
+                continue
+            seen.add(value_text)
+            combo.addItem(str(label), value_text)
+        index = combo.findData(current)
+        if index < 0 and current in {"None", "none", ""}:
+            index = combo.findData("none")
+        combo.setCurrentIndex(max(0, index))
+        return combo
+
+    @staticmethod
+    def _combo_value(combo: NoWheelComboBox) -> str:
+        data = combo.currentData()
+        return str(data if data is not None else combo.currentText())
+
+    @staticmethod
+    def _number_spin(value: object, *, default: float) -> QDoubleSpinBox:
+        spin = QDoubleSpinBox()
+        spin.setDecimals(3)
+        spin.setRange(0.0, 1000.0)
+        spin.setSingleStep(0.5)
+        try:
+            spin.setValue(float(str(value)))
+        except (TypeError, ValueError):
+            spin.setValue(default)
+        return spin
+
+    @staticmethod
+    def _default_marker_for_plot_kind(plot_kind: str) -> str:
+        return "o" if plot_kind in {"Scatter", "Line + Markers"} else "none"
+
+    @staticmethod
+    def _normalise_colour(colour: object) -> str:
+        qt_colour = QColor(str(colour or "").strip())
+        return qt_colour.name() if qt_colour.isValid() else ""
 
 
 class PlotWorkspace(QWidget):
     cursorPointsChanged = Signal()
+    legendChannelStyleChanged = Signal(str, dict)
     LEGEND_DEFAULT_WIDTH = 230
     LEGEND_MAXIMUM_WIDTH = 320
 
@@ -115,6 +309,7 @@ class PlotWorkspace(QWidget):
         self.legend_table.verticalHeader().setVisible(False)
         self.legend_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.legend_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.legend_table.cellClicked.connect(self._on_legend_cell_clicked)
         self.legend_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         self.legend_table.horizontalHeader().resizeSection(0, 28)
         self.legend_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
@@ -365,6 +560,7 @@ class PlotWorkspace(QWidget):
         cutoff: Optional[float] = None,
         order: int = 4,
         channel_colours: Optional[dict[str, str]] = None,
+        channel_styles: Optional[dict[str, dict[str, str]]] = None,
         axis_tick_settings: Optional[dict[str, object]] = None,
     ) -> OperationResult:
         try:
@@ -388,6 +584,7 @@ class PlotWorkspace(QWidget):
         if not series_result.ok:
             return series_result
         series_items = series_result.payload if isinstance(series_result.payload, list) else []
+        series_items = self._apply_channel_style_overrides(series_items, channel_styles, plot_kind)
         secondary_axes = None
         if any(bool(item.get("secondary")) for item in series_items):
             secondary_axes = axes.twinx()
@@ -397,15 +594,18 @@ class PlotWorkspace(QWidget):
         plotted = 0
         for index, item in enumerate(series_items):
             target = secondary_axes if item.get("secondary") and secondary_axes is not None else axes
-            self._plot_series(
+            item_plot_kind = str(item.get("plot_kind", plot_kind))
+            artist = self._plot_series(
                 target,
                 item["x"],
                 item["y"],
                 str(item.get("label", "")),
-                plot_kind,
+                item_plot_kind,
                 line_width,
                 series_colours[index],
+                item,
             )
+            self._set_legend_artist_metadata(artist, str(item.get("channel", "")), item_plot_kind, item)
             plotted += 1
         if plotted == 0:
             return OperationResult.failure("No numeric data was available for the selected columns.")
@@ -430,16 +630,135 @@ class PlotWorkspace(QWidget):
         return OperationResult.success(f"Plotted {plotted} channel(s).")
 
     @staticmethod
-    def _plot_series(axes, x, y, label: str, plot_kind: str, line_width: float, colour: str | None = None) -> None:
-        kwargs = {"label": label}
+    def _plot_series(
+        axes,
+        x,
+        y,
+        label: str,
+        plot_kind: str,
+        line_width: float,
+        colour: str | None = None,
+        style: dict[str, Any] | None = None,
+    ):
+        style = style or {}
+        colour = str(style.get("colour") or colour or "").strip()
+        line_width = PlotWorkspace._style_float(style.get("line_width"), line_width)
+        line_style = str(style.get("line_style", "-")).strip() or "-"
+        draw_style = str(style.get("draw_style", "default")).strip() or "default"
+        marker_style = PlotWorkspace._normalise_marker_style(style.get("marker_style"))
+        marker_size = PlotWorkspace._style_float(style.get("marker_size"), 3.0)
+        marker_face_colour = str(style.get("marker_face_colour", "")).strip()
+        marker_edge_colour = str(style.get("marker_edge_colour", "")).strip()
+        kwargs: dict[str, Any] = {"label": label}
+        if plot_kind == "Scatter":
+            marker = marker_style if marker_style not in {"", "none", "None"} else "o"
+            if marker_face_colour:
+                kwargs["facecolors"] = marker_face_colour
+            elif colour:
+                kwargs["color"] = colour
+            if marker_edge_colour:
+                kwargs["edgecolors"] = marker_edge_colour
+            artist = axes.scatter(x, y, s=marker_size ** 2, marker=marker, **kwargs)
+            setattr(artist, "_tda_marker_style", marker)
+            return artist
         if colour:
             kwargs["color"] = colour
-        if plot_kind == "Scatter":
-            axes.scatter(x, y, s=14, **kwargs)
+        kwargs["linestyle"] = line_style
+        kwargs["drawstyle"] = draw_style
+        if marker_style and marker_style not in {"none", "None"}:
+            kwargs["marker"] = marker_style
+            kwargs["markersize"] = marker_size
+            if marker_face_colour:
+                kwargs["markerfacecolor"] = marker_face_colour
+            if marker_edge_colour:
+                kwargs["markeredgecolor"] = marker_edge_colour
         elif plot_kind == "Line + Markers":
-            axes.plot(x, y, marker="o", markersize=3, linewidth=line_width, **kwargs)
-        else:
-            axes.plot(x, y, linewidth=line_width, **kwargs)
+            kwargs["marker"] = "o"
+            kwargs["markersize"] = marker_size
+        artist = axes.plot(x, y, linewidth=line_width, **kwargs)[0]
+        return artist
+
+    @classmethod
+    def _apply_channel_style_overrides(
+        cls,
+        series_items: list[dict[str, Any]],
+        channel_styles: Optional[dict[str, dict[str, str]]],
+        default_plot_kind: str,
+    ) -> list[dict[str, Any]]:
+        styles = cls._normalised_channel_styles(channel_styles or {})
+        fallback_plot_kind = cls._normalise_plot_kind(default_plot_kind) or "Line"
+        styled_items: list[dict[str, Any]] = []
+        for item in series_items:
+            styled = dict(item)
+            style = styles.get(cls._series_channel_key(item), {})
+            label = cls._series_label_with_override(item, style)
+            if label:
+                styled["label"] = label
+            plot_kind = cls._normalise_plot_kind(style.get("plot_kind")) or fallback_plot_kind
+            styled["plot_kind"] = plot_kind
+            colour = str(style.get("colour", "")).strip()
+            if colour:
+                styled["colour"] = colour
+            for key in CURVE_STYLE_KEYS:
+                value = str(style.get(key, "")).strip()
+                if value:
+                    styled[key] = value
+            styled["label_overridden"] = bool(style.get("label"))
+            styled["plot_kind_overridden"] = bool(style.get("plot_kind"))
+            styled_items.append(styled)
+        return styled_items
+
+    @classmethod
+    def _normalised_channel_styles(cls, channel_styles: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
+        normalised: dict[str, dict[str, str]] = {}
+        for raw_key, raw_style in channel_styles.items():
+            if not isinstance(raw_style, dict):
+                continue
+            style: dict[str, str] = {}
+            for raw_name, raw_value in raw_style.items():
+                value = str(raw_value).strip()
+                if not value:
+                    continue
+                name = "label" if raw_name == "name" else "colour" if raw_name == "color" else str(raw_name)
+                if name == "plot_kind":
+                    value = cls._normalise_plot_kind(value)
+                    if not value:
+                        continue
+                if name in {"channel", "label", "colour", "plot_kind", *CURVE_STYLE_KEYS}:
+                    style[name] = value
+            channel_key = plot_render_service.normalise_channel_name(style.get("channel") or raw_key)
+            if channel_key and style:
+                normalised[channel_key] = style
+        return normalised
+
+    @staticmethod
+    def _series_label_with_override(item: dict[str, Any], style: dict[str, str]) -> str:
+        custom_label = str(style.get("label", "")).strip()
+        if not custom_label:
+            return str(item.get("label", ""))
+        label = PlotWorkspace._without_right_y_suffix(custom_label)
+        return f"{label} [Right Y]" if item.get("secondary") else label
+
+    @staticmethod
+    def _normalise_plot_kind(plot_kind: object) -> str:
+        text = str(plot_kind or "").strip()
+        if text == "Line + Marker":
+            text = "Line + Markers"
+        return text if text in PLOT_KINDS else ""
+
+    @staticmethod
+    def _style_float(value: object, default: float) -> float:
+        try:
+            return float(str(value))
+        except (TypeError, ValueError):
+            return float(default)
+
+    @staticmethod
+    def _normalise_marker_style(value: object) -> str:
+        text = str(value or "").strip()
+        if text in {"", "None", "none"}:
+            return "none"
+        return text
 
     def _series_colours(
         self,
@@ -534,8 +853,12 @@ class PlotWorkspace(QWidget):
 
     @staticmethod
     def _legend_label_sort_key(label: str) -> list[object]:
-        text = str(label).replace(" [Right Y]", "")
+        text = PlotWorkspace._without_right_y_suffix(label)
         return natural_sort_key(" ".join(text.split()))
+
+    @staticmethod
+    def _without_right_y_suffix(label: str) -> str:
+        return str(label).replace(" [Right Y]", "").strip()
 
     def _update_legend_table(self, handles, labels) -> None:
         self.legend_table.setRowCount(0)
@@ -544,13 +867,97 @@ class PlotWorkspace(QWidget):
                 continue
             row = self.legend_table.rowCount()
             self.legend_table.insertRow(row)
+            metadata = self._legend_channel_metadata(handle, label)
             swatch_item = QTableWidgetItem("")
             swatch_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
             text = QTableWidgetItem(label)
             text.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            if metadata:
+                swatch_item.setData(Qt.ItemDataRole.UserRole, metadata)
+                text.setData(Qt.ItemDataRole.UserRole, metadata)
+                text.setToolTip("Click to edit this plotted channel.")
             self.legend_table.setItem(row, 0, swatch_item)
             self.legend_table.setCellWidget(row, 0, self._legend_swatch(self._legend_colour(handle)))
             self.legend_table.setItem(row, 1, text)
+
+    @staticmethod
+    def _set_legend_artist_metadata(artist, channel: str, plot_kind: str, style: dict[str, object]) -> None:
+        setattr(artist, "_tda_channel", channel)
+        setattr(artist, "_tda_plot_kind", plot_kind)
+        setattr(artist, "_tda_label_overridden", bool(style.get("label_overridden", False)))
+        setattr(artist, "_tda_plot_kind_overridden", bool(style.get("plot_kind_overridden", False)))
+        for key in CURVE_STYLE_KEYS:
+            if key in style:
+                setattr(artist, f"_tda_{key}", style[key])
+        try:
+            artist.set_gid(channel)
+        except AttributeError:
+            pass
+
+    def _legend_channel_metadata(self, handle, label: str) -> dict[str, object]:
+        channel = str(getattr(handle, "_tda_channel", "")).strip()
+        if not channel:
+            return {}
+        return {
+            "channel": channel,
+            "label": self._without_right_y_suffix(label),
+            "colour": self._legend_colour(handle),
+            "plot_kind": str(getattr(handle, "_tda_plot_kind", "Line")),
+            "label_overridden": bool(getattr(handle, "_tda_label_overridden", False)),
+            "plot_kind_overridden": bool(getattr(handle, "_tda_plot_kind_overridden", False)),
+            **self._legend_curve_metadata(handle),
+        }
+
+    def _legend_curve_metadata(self, handle) -> dict[str, str]:
+        metadata = {key: str(getattr(handle, f"_tda_{key}", "")).strip() for key in CURVE_STYLE_KEYS}
+        try:
+            metadata["line_style"] = metadata["line_style"] or str(handle.get_linestyle())
+            metadata["draw_style"] = metadata["draw_style"] or str(handle.get_drawstyle())
+            metadata["line_width"] = metadata["line_width"] or f"{float(handle.get_linewidth()):g}"
+            metadata["marker_style"] = metadata["marker_style"] or self._normalise_marker_style(handle.get_marker())
+            metadata["marker_size"] = metadata["marker_size"] or f"{float(handle.get_markersize()):g}"
+            metadata["marker_face_colour"] = metadata["marker_face_colour"] or self._colour_to_hex(handle.get_markerfacecolor())
+            metadata["marker_edge_colour"] = metadata["marker_edge_colour"] or self._colour_to_hex(handle.get_markeredgecolor())
+        except AttributeError:
+            sizes = getattr(handle, "get_sizes", lambda: [])()
+            face_colours = getattr(handle, "get_facecolors", lambda: [])()
+            edge_colours = getattr(handle, "get_edgecolors", lambda: [])()
+            metadata["line_style"] = metadata["line_style"] or "None"
+            metadata["draw_style"] = metadata["draw_style"] or "default"
+            metadata["line_width"] = metadata["line_width"] or "0"
+            metadata["marker_style"] = metadata["marker_style"] or str(getattr(handle, "_tda_marker_style", "o"))
+            if len(sizes):
+                metadata["marker_size"] = metadata["marker_size"] or f"{math.sqrt(float(sizes[0])):g}"
+            metadata["marker_face_colour"] = metadata["marker_face_colour"] or self._first_colour_to_hex(face_colours)
+            metadata["marker_edge_colour"] = metadata["marker_edge_colour"] or self._first_colour_to_hex(edge_colours)
+        return metadata
+
+    @staticmethod
+    def _colour_to_hex(colour: object) -> str:
+        try:
+            return to_hex(cast(Any, colour))
+        except Exception:
+            return ""
+
+    @classmethod
+    def _first_colour_to_hex(cls, colours: object) -> str:
+        try:
+            colour_values = list(cast(Any, colours))
+            if colour_values:
+                return cls._colour_to_hex(colour_values[0])
+        except Exception:
+            pass
+        return ""
+
+    def _on_legend_cell_clicked(self, row: int, _column: int) -> None:
+        item = self.legend_table.item(row, 1)
+        metadata = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        if not isinstance(metadata, dict) or not metadata.get("channel"):
+            return
+        channel = str(metadata.get("channel", ""))
+        dialog = LegendChannelStyleDialog(channel, metadata, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.legendChannelStyleChanged.emit(channel, dialog.values())
 
     @staticmethod
     def _legend_swatch(colour: str) -> QWidget:

@@ -17,7 +17,7 @@ from ..core.config import EATON_PLOT_COLORS
 from ..core.data_io import get_excel_sheets, load_data
 from ..services import run_comparison_service
 from ..services.results import OperationResult
-from ..core.utils import _matching_x_column_for_y
+from ..core.utils import _matching_x_column_for_y, natural_sort_key
 from .app_state import AppState
 
 RUN_TABLE_COLUMNS = ["Name", "Enabled", "Active", "File", "Sheet", "Rows", "Columns"]
@@ -195,7 +195,7 @@ class RunsComparisonViewModel:
             if not isinstance(df, pd.DataFrame):
                 skipped.append(f"{name}: no dataframe")
                 continue
-            for channel in y_columns:
+            for channel in sorted(y_columns, key=natural_sort_key):
                 if channel not in df.columns:
                     skipped.append(f"{name}: missing '{channel}'")
                     continue
@@ -231,7 +231,7 @@ class RunsComparisonViewModel:
             df = run.get("df")
             if not isinstance(df, pd.DataFrame):
                 continue
-            for channel in y_columns:
+            for channel in sorted(y_columns, key=natural_sort_key):
                 stats = run_comparison_service.run_channel_statistics(df, channel)
                 if stats is None:
                     continue

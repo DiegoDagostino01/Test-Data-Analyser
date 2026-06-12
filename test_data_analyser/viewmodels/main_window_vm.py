@@ -9,9 +9,12 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Optional
+import re
+from difflib import SequenceMatcher
+from typing import Any, Optional, cast
 
 from ..core.config import __version__
+from ..core.utils import classify_channel_name
 from ..domain import normalise_plot_profile
 from ..services import plot_render_service, session_service
 from ..services.results import OperationResult
@@ -160,7 +163,273 @@ class MainWindowViewModel:
             )
             if profile_channels:
                 channel_sets.append(profile_channels)
-        return plot_render_service.persistent_channel_colour_map(channel_sets, self.settings.plot_colours())
+        colours = plot_render_service.persistent_channel_colour_map(channel_sets, self.settings.plot_colours())
+        colours.update(self._legend_channel_colour_overrides())
+        return colours
+
+    def active_legend_channel_overrides(self) -> dict[str, dict[str, str]]:
+        """Return the active profile's per-channel legend style overrides."""
+        self.ensure_plot_profiles()
+        return self._profile_legend_channel_overrides(self.state.active_plot_profile() or {})
+
+    def update_active_legend_channel_override(self, channel: str, style: dict[str, Any]) -> OperationResult:
+        """Store a legend-row style override for the active profile."""
+        self.ensure_plot_profiles()
+        channel_name = str(channel).strip()
+        channel_key = plot_render_service.normalise_channel_name(channel_name)
+        if not channel_key:
+            return OperationResult.failure("Select a plotted channel to edit.")
+
+        index = self._clamped_profile_index(self.state.active_plot_profile_index)
+        profile = self.state.plot_profiles[index]
+        overrides = self._profile_legend_channel_overrides(profile)
+        current = dict(overrides.get(channel_key, {}))
+        updated = self._normalise_legend_channel_style(style)
+        updated.setdefault("channel", channel_name or current.get("channel", ""))
+        overrides[channel_key] = {**current, **updated}
+        self._set_profile_legend_channel_overrides(profile, overrides)
+
+        colour = overrides[channel_key].get("colour", "")
+        if colour:
+            self._propagate_channel_colour_override(channel_key, overrides[channel_key].get("channel", channel_name), colour)
+        label = overrides[channel_key].get("label") or channel_name
+        return OperationResult.success(f"Updated legend style for '{label}'.")
+
+    def _legend_channel_colour_overrides(self) -> dict[str, str]:
+        self.ensure_plot_profiles()
+        colours: dict[str, str] = {}
+        for profile in self.state.plot_profiles:
+            for channel_key, style in self._profile_legend_channel_overrides(profile).items():
+                colour = str(style.get("colour", "")).strip()
+                if colour:
+                    colours[channel_key] = colour
+        return colours
+
+    def _propagate_channel_colour_override(self, channel_key: str, channel: str, colour: str) -> None:
+        colour_text = str(colour).strip()
+        if not colour_text:
+            return
+        for profile in self.state.plot_profiles:
+            overrides = self._profile_legend_channel_overrides(profile)
+            if channel_key not in overrides and not self._profile_references_channel(profile, channel_key):
+                continue
+            style = dict(overrides.get(channel_key, {}))
+            style.setdefault("channel", str(channel).strip())
+            style["colour"] = colour_text
+            overrides[channel_key] = style
+            self._set_profile_legend_channel_overrides(profile, overrides)
+
+    @staticmethod
+    def _profile_references_channel(profile: dict[str, Any], channel_key: str) -> bool:
+        channels = [*profile.get("y_columns", []), *profile.get("secondary_y_columns", [])]
+        return any(plot_render_service.normalise_channel_name(channel) == channel_key for channel in channels)
+
+    @classmethod
+    def _profile_legend_channel_overrides(cls, profile: dict[str, Any]) -> dict[str, dict[str, str]]:
+        legend = profile.get("legend", {}) if isinstance(profile, dict) else {}
+        raw_overrides = legend.get("channel_overrides", {}) if isinstance(legend, dict) else {}
+        if not isinstance(raw_overrides, dict):
+            return {}
+        overrides: dict[str, dict[str, str]] = {}
+        for raw_key, raw_style in raw_overrides.items():
+            if not isinstance(raw_style, dict):
+                continue
+            style = cls._normalise_legend_channel_style(raw_style)
+            channel_key = plot_render_service.normalise_channel_name(style.get("channel") or raw_key)
+            if channel_key and style:
+                overrides[channel_key] = style
+        return overrides
+
+    @staticmethod
+    def _set_profile_legend_channel_overrides(profile: dict[str, Any], overrides: dict[str, dict[str, str]]) -> None:
+        legend = profile.get("legend", {}) if isinstance(profile.get("legend", {}), dict) else {}
+        profile["legend"] = {**legend, "channel_overrides": dict(overrides)}
+
+    @staticmethod
+    def _normalise_legend_channel_style(style: dict[str, Any]) -> dict[str, str]:
+        if not isinstance(style, dict):
+            return {}
+        normalised: dict[str, str] = {}
+        for key in (
+            "channel",
+            "label",
+            "colour",
+            "plot_kind",
+            "line_style",
+            "draw_style",
+            "line_width",
+            "marker_style",
+            "marker_size",
+            "marker_face_colour",
+            "marker_edge_colour",
+        ):
+            value = str(style.get(key, "")).strip()
+            if not value:
+                continue
+            normalised[key] = "Line + Markers" if key == "plot_kind" and value == "Line + Marker" else value
+        if not normalised.get("label"):
+            label = str(style.get("name", "")).strip()
+            if label:
+                normalised["label"] = label
+        if not normalised.get("colour"):
+            colour = str(style.get("color", "")).strip()
+            if colour:
+                normalised["colour"] = colour
+        for source, target in (("marker_face_color", "marker_face_colour"), ("marker_edge_color", "marker_edge_colour")):
+            if not normalised.get(target):
+                value = str(style.get(source, "")).strip()
+                if value:
+                    normalised[target] = value
+        return normalised
+
+    def plot_selection_preserves_appearance(self, previous: dict[str, Any], current: dict[str, Any]) -> bool:
+        """Return whether a new Generate Plot request can keep live axis appearance.
+
+        Plot-kind-only changes should preserve Figure Options edits. Added or
+        swapped channels can also preserve appearance when their names and data
+        ranges are close to channels already on the plot. A changed X column,
+        analysis window, or materially different Y channel asks the UI to reset
+        axis labels, axis limits, and tick settings.
+        """
+        previous_x = str(previous.get("x_column", "")).strip()
+        current_x = str(current.get("x_column", "")).strip()
+        if not previous_x or plot_render_service.normalise_channel_name(previous_x) != plot_render_service.normalise_channel_name(current_x):
+            return False
+        if previous.get("xmin") != current.get("xmin") or previous.get("xmax") != current.get("xmax"):
+            return False
+        for key in ("use_filter", "cutoff", "order"):
+            if previous.get(key) != current.get(key):
+                return False
+
+        previous_channels = plot_render_service.y_axis_channel_set(
+            previous.get("primary_y", []),
+            previous.get("secondary_y", []),
+        )
+        current_channels = plot_render_service.y_axis_channel_set(
+            current.get("primary_y", []),
+            current.get("secondary_y", []),
+        )
+        if not previous_channels or not current_channels:
+            return False
+        if self._selection_moves_channel_between_axes(previous, current):
+            return False
+
+        previous_ranges = self._selection_channel_ranges(previous_x, previous_channels, previous.get("xmin"), previous.get("xmax"))
+        current_ranges = self._selection_channel_ranges(current_x, current_channels, current.get("xmin"), current.get("xmax"))
+        if not previous_ranges or not current_ranges:
+            return False
+
+        for channel in current_channels:
+            current_key = plot_render_service.normalise_channel_name(channel)
+            if current_key in previous_ranges:
+                continue
+            current_item = current_ranges.get(current_key)
+            if current_item is None:
+                return False
+            _current_channel, current_range = current_item
+            if not any(
+                self._channels_preserve_appearance(channel, current_range, previous_channel, previous_range)
+                for previous_channel, previous_range in previous_ranges.values()
+            ):
+                return False
+        return True
+
+    @staticmethod
+    def _selection_moves_channel_between_axes(previous: dict[str, Any], current: dict[str, Any]) -> bool:
+        previous_primary = {
+            plot_render_service.normalise_channel_name(channel) for channel in previous.get("primary_y", [])
+        }
+        previous_secondary = {
+            plot_render_service.normalise_channel_name(channel) for channel in previous.get("secondary_y", [])
+        }
+        current_primary = {
+            plot_render_service.normalise_channel_name(channel) for channel in current.get("primary_y", [])
+        }
+        current_secondary = {
+            plot_render_service.normalise_channel_name(channel) for channel in current.get("secondary_y", [])
+        }
+        return bool((current_primary & previous_secondary) or (current_secondary & previous_primary))
+
+    def _selection_channel_ranges(
+        self,
+        x_column: str,
+        channels: list[str],
+        xmin: object,
+        xmax: object,
+    ) -> dict[str, tuple[str, tuple[float, float]]]:
+        try:
+            data = self.plot_workspace.prepare_plot_data(
+                x_column,
+                channels,
+                self._optional_float(xmin),
+                self._optional_float(xmax),
+            )
+        except ValueError:
+            return {}
+        ranges: dict[str, tuple[str, tuple[float, float]]] = {}
+        for channel, series in data.y_map.items():
+            values = series.dropna()
+            if values.empty:
+                continue
+            key = plot_render_service.normalise_channel_name(channel)
+            if key:
+                ranges[key] = (str(channel), (float(values.min()), float(values.max())))
+        return ranges
+
+    @classmethod
+    def _channels_preserve_appearance(
+        cls,
+        current_channel: str,
+        current_range: tuple[float, float],
+        previous_channel: str,
+        previous_range: tuple[float, float],
+    ) -> bool:
+        return cls._channel_names_similar(current_channel, previous_channel) and cls._channel_ranges_similar(
+            current_range,
+            previous_range,
+        )
+
+    @staticmethod
+    def _channel_names_similar(left: str, right: str) -> bool:
+        left_key = plot_render_service.normalise_channel_name(left)
+        right_key = plot_render_service.normalise_channel_name(right)
+        if not left_key or not right_key:
+            return False
+        if left_key == right_key:
+            return True
+        if SequenceMatcher(None, left_key, right_key).ratio() >= 0.72:
+            return True
+        left_tokens = set(re.findall(r"[a-z]+", left_key))
+        right_tokens = set(re.findall(r"[a-z]+", right_key))
+        if not left_tokens.intersection(right_tokens):
+            return False
+        left_group = classify_channel_name(left)
+        right_group = classify_channel_name(right)
+        return left_group == right_group or left_group == "Other Numeric" or right_group == "Other Numeric"
+
+    @staticmethod
+    def _channel_ranges_similar(
+        left: tuple[float, float],
+        right: tuple[float, float],
+        tolerance: float = 0.25,
+    ) -> bool:
+        left_min, left_max = min(left), max(left)
+        right_min, right_max = min(right), max(right)
+        left_span = max(left_max - left_min, 1e-9)
+        right_span = max(right_max - right_min, 1e-9)
+        scale = max(abs(left_min), abs(left_max), abs(right_min), abs(right_max), left_span, right_span, 1.0)
+        center_delta = abs(((left_min + left_max) / 2.0) - ((right_min + right_max) / 2.0))
+        span_delta = abs(left_span - right_span)
+        return center_delta <= tolerance * scale and span_delta <= tolerance * max(left_span, right_span, 1.0)
+
+    @staticmethod
+    def _optional_float(value: object) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            return float(cast(Any, value))
+        except (TypeError, ValueError):
+            return None
 
     # ------------------------------------------------------------------
     # Session persistence
@@ -246,6 +515,8 @@ class MainWindowViewModel:
         self.ensure_plot_profiles()
         index = self._clamped_profile_index(self.state.active_plot_profile_index)
         existing = dict(self.state.plot_profiles[index])
+        existing_legend = existing.get("legend", {}) if isinstance(existing.get("legend", {}), dict) else {}
+        merged_legend = {**existing_legend, **dict(legend_settings or {})}
         profile = normalise_plot_profile(
             {
                 **existing,
@@ -261,7 +532,7 @@ class MainWindowViewModel:
                 "auto_fit_axes": auto_fit_axes,
                 "axis_limits": dict(axis_limits or {}),
                 "axis_ticks": dict(axis_ticks or {}),
-                "legend": dict(legend_settings or {}),
+                "legend": merged_legend,
                 "analysis_window": dict(analysis_window or {}),
                 "filter": dict(filter_settings or {}),
                 "generated": bool(generated),

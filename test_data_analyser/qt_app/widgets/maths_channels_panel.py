@@ -31,6 +31,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ...core.config import MATHS_CHANNEL_GROUP
+from ...core.utils import channel_group_options, classify_channel_name, natural_sort_key
 from ...viewmodels.maths_channels_vm import MathsChannelsViewModel
 from ..adapters import qt_message_service
 from ..adapters.pandas_table_model import PandasTableModel
@@ -162,13 +164,24 @@ class MathsChannelsPanel(QWidget):
         current = self.column_combo.currentText()
         self.column_combo.blockSignals(True)
         self.column_combo.clear()
-        self.column_combo.addItems(columns)
+        self.column_combo.addItems(self._ordered_existing_columns(columns))
         if current in columns:
             self.column_combo.setCurrentText(current)
         self.column_combo.blockSignals(False)
 
         self._channel_order = self.vm.channel_names()
         self.model.set_dataframe(self.vm.channel_table())
+
+    def _ordered_existing_columns(self, columns: list[str]) -> list[str]:
+        calculated = set(self.vm.channel_names())
+        group_order = {group: index for index, group in enumerate(channel_group_options()[1:])}
+        return sorted(
+            columns,
+            key=lambda column: (
+                group_order.get(MATHS_CHANNEL_GROUP if column in calculated else classify_channel_name(column), len(group_order)),
+                natural_sort_key(column),
+            ),
+        )
 
     def clear_form(self) -> None:
         self._selected_name = None

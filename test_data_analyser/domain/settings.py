@@ -7,7 +7,7 @@ session compatibility is preserved.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 from .conversions import _mapping, _string
 
@@ -99,6 +99,7 @@ class LegendSettings:
     max_inline_entries: object = 10
     location: str = "best"
     display_mode: str = "panel"
+    channel_overrides: dict[str, dict[str, str]] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, value: object) -> "LegendSettings":
@@ -107,10 +108,51 @@ class LegendSettings:
             max_inline_entries=data.get("max_inline_entries", 10),
             location=_string(data.get("location", "best"), "best"),
             display_mode=_string(data.get("display_mode", "panel"), "panel"),
+            channel_overrides=_legend_channel_overrides(data.get("channel_overrides")),
         )
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
+
+
+def _legend_channel_overrides(value: object) -> dict[str, dict[str, str]]:
+    data = _mapping(value)
+    overrides: dict[str, dict[str, str]] = {}
+    for raw_key, raw_style in data.items():
+        key = _string(raw_key).strip()
+        style_data = _mapping(raw_style)
+        if not key or not style_data:
+            continue
+        style: dict[str, str] = {}
+        for field_name in (
+            "channel",
+            "label",
+            "name",
+            "colour",
+            "color",
+            "plot_kind",
+            "line_style",
+            "draw_style",
+            "line_width",
+            "marker_style",
+            "marker_size",
+            "marker_face_colour",
+            "marker_edge_colour",
+            "marker_face_color",
+            "marker_edge_color",
+        ):
+            value_text = _string(style_data.get(field_name)).strip()
+            if not value_text:
+                continue
+            target_name = "label" if field_name == "name" else "colour" if field_name == "color" else field_name
+            if target_name == "marker_face_color":
+                target_name = "marker_face_colour"
+            elif target_name == "marker_edge_color":
+                target_name = "marker_edge_colour"
+            style[target_name] = value_text
+        if style:
+            overrides[key] = style
+    return overrides
 
 
 @dataclass

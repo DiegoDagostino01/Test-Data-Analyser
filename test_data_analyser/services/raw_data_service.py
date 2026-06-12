@@ -12,7 +12,7 @@ from typing import Any, Callable, Optional
 import numpy as np
 import pandas as pd
 
-from ..core.utils import _matching_x_column_for_y
+from ..core.utils import _matching_x_column_for_y, natural_sort_key
 
 
 def parse_row_limit(raw: str) -> Optional[int]:
@@ -49,7 +49,7 @@ def select_raw_data_frame(
     cols: list[str] = []
     if x_col and x_col in df.columns:
         cols.append(x_col)
-    for col in selected_y:
+    for col in sorted(selected_y, key=natural_sort_key):
         if x_col:
             paired_x_col = _matching_x_column_for_y(x_col, col, df.columns)
             if paired_x_col in df.columns and paired_x_col not in cols:

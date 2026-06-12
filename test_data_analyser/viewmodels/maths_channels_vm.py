@@ -11,6 +11,7 @@ from typing import Any
 
 import pandas as pd
 
+from ..core.utils import natural_sort_key
 from ..services import maths_channel_service
 from ..services.maths_channel_service import MathsChannelEvaluator
 from ..services.results import OperationResult
@@ -30,7 +31,7 @@ class MathsChannelsViewModel:
         return maths_channel_service.normalise_calculated_channel_definitions(raw)
 
     def channel_names(self) -> list[str]:
-        return list(self.state.calculated_channels.keys())
+        return sorted(self.state.calculated_channels.keys(), key=natural_sort_key)
 
     def channel_table(self) -> pd.DataFrame:
         rows = []

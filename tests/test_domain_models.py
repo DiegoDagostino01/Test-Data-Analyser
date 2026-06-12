@@ -75,7 +75,30 @@ class AxisTickSettingsTests(unittest.TestCase):
 class LegendSettingsTests(unittest.TestCase):
     def test_display_mode_round_trip(self) -> None:
         data = {"max_inline_entries": 8, "location": "upper right", "display_mode": "graph"}
-        self.assertEqual(LegendSettings.from_dict(data).to_dict(), data)
+        expected = {**data, "channel_overrides": {}}
+        self.assertEqual(LegendSettings.from_dict(data).to_dict(), expected)
+
+    def test_channel_overrides_round_trip(self) -> None:
+        data = {
+            "display_mode": "panel",
+            "channel_overrides": {
+                "motor voltage": {
+                    "channel": "Motor Voltage",
+                    "label": "Voltage",
+                    "colour": "#123456",
+                    "plot_kind": "Scatter",
+                    "line_style": "--",
+                    "draw_style": "steps-post",
+                    "line_width": "2.5",
+                    "marker_style": "s",
+                    "marker_size": "7",
+                    "marker_face_colour": "#ABCDEF",
+                    "marker_edge_colour": "#654321",
+                }
+            },
+        }
+        result = LegendSettings.from_dict(data).to_dict()
+        self.assertEqual(result["channel_overrides"], data["channel_overrides"])
 
     def test_missing_display_mode_defaults_to_panel(self) -> None:
         self.assertEqual(LegendSettings.from_dict({}).display_mode, "panel")
