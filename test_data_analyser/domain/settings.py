@@ -140,6 +140,7 @@ def _legend_channel_overrides(value: object) -> dict[str, dict[str, str]]:
             "marker_edge_colour",
             "marker_face_color",
             "marker_edge_color",
+            "hidden",
         ):
             value_text = _string(style_data.get(field_name)).strip()
             if not value_text:

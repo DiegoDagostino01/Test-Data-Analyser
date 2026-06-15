@@ -39,6 +39,7 @@ from ..viewmodels import MainWindowViewModel
 from . import theme
 from .adapters import qt_file_dialogs, qt_message_service, qt_widget_helpers
 from .widgets.axis_selection_panel import AxisSelectionPanel
+from .widgets.best_fit_formulas_panel import BestFitFormulasPanel
 from .widgets.cursor_compare_panel import CursorComparePanel
 from .widgets.data_file_panel import DataFilePanel
 from .widgets.engineering_notes_panel import EngineeringNotesPanel
@@ -67,6 +68,8 @@ class MainWindow(QMainWindow):
         self.vm = MainWindowViewModel(self.settings_manager)
         self.vm.ensure_plot_profiles()
         self._plot_generated = False
+        self._plot_display_frozen = False
+        self._plot_profile_snapshots: dict[int, dict[str, Any]] = {}
         self._last_plot_selection: dict[str, Any] | None = None
         self._syncing_plot_tabs = False
         self._active_plot_tab_index = self.vm.state.active_plot_profile_index
@@ -123,6 +126,7 @@ class MainWindow(QMainWindow):
         self.raw_data_panel = RawDataPanel(self.vm.raw_data)
         self.raw_data_panel.set_selection_provider(self._current_axis_selection)
         self.maths_panel = MathsChannelsPanel(self.vm.maths_channels)
+        self.best_fit_formulas_panel = BestFitFormulasPanel()
         self.limits_panel = LimitsPanel(self.vm.limits, self.vm.plot_workspace)
         self.limits_panel.set_selection_provider(self._current_axis_selection)
         self.notes_panel = EngineeringNotesPanel(self.vm.engineering_notes)
@@ -131,10 +135,13 @@ class MainWindow(QMainWindow):
         self.runs_panel.set_selection_provider(self._current_axis_selection)
         self.plot_workspace.set_cursor_viewmodel(self.vm.cursor_compare)
         self.plot_workspace.legendChannelStyleChanged.connect(self._on_legend_channel_style_changed)
+        self.plot_workspace.legendChannelVisibilityChanged.connect(self._on_legend_channel_visibility_changed)
+        self.plot_workspace.bestFitFormulasChanged.connect(self._refresh_best_fit_formulas)
         self.cursor_panel = CursorComparePanel(self.vm.cursor_compare, self.plot_workspace)
         self.cursor_panel.analysisWindowRequested.connect(self._on_cursor_window)
 
         self.data_panel.fileLoaded.connect(self._on_file_loaded)
+        self.data_panel.sheetChanged.connect(self._on_sheet_changed)
         self.data_panel.statusMessage.connect(self.statusBar().showMessage)
         self.maths_panel.channelsChanged.connect(self._on_channels_changed)
         self.maths_panel.statusMessage.connect(self.statusBar().showMessage)
@@ -299,6 +306,7 @@ class MainWindow(QMainWindow):
                     ("Statistics", lambda: self._show_analysis_page(0)),
                     ("Raw Data", lambda: self._show_analysis_page(1)),
                     ("Maths Channels", lambda: self._show_analysis_page(2)),
+                    ("Best Fit Formulas", lambda: self._show_analysis_page(3)),
                     ("Cursor", lambda: self._show_plot_page(1)),
                 ],
             ),
@@ -387,6 +395,7 @@ class MainWindow(QMainWindow):
                 self.statistics_panel,
                 self.raw_data_panel,
                 self.maths_panel,
+                self.best_fit_formulas_panel,
             ]
         )
         self.requirements_stack = self._build_panel_stack(
@@ -506,11 +515,14 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(result.message)
 
     def _duplicate_plot_profile(self, index: int | None = None) -> None:
+        source_index = self.vm.state.active_plot_profile_index if index is None else index
         self._capture_current_plot_profile()
         result = self.vm.duplicate_plot_profile(index)
         if not result.ok:
             qt_message_service.warning(self, "Duplicate Plot", result.message)
             return
+        if isinstance(result.payload, int):
+            self._insert_plot_snapshot(result.payload, self._plot_profile_snapshots.get(source_index))
         self._sync_plot_tabs()
         self._apply_active_plot_profile()
         self.statusBar().showMessage(result.message)
@@ -552,6 +564,7 @@ class MainWindow(QMainWindow):
         if not result.ok:
             qt_message_service.warning(self, "Delete Plot", result.message)
             return
+        self._delete_plot_snapshot(index)
         self._sync_plot_tabs()
         self._apply_active_plot_profile()
         self.statusBar().showMessage(result.message)
@@ -578,6 +591,9 @@ class MainWindow(QMainWindow):
     def _capture_current_plot_profile(self) -> None:
         self.vm.ensure_plot_profiles()
         profile = self.vm.state.active_plot_profile() or {}
+        if self._plot_display_frozen:
+            self._capture_preserved_plot_profile(profile)
+            return
         appearance = self.plot_workspace.current_axis_appearance() if self._plot_generated else {}
         if not appearance:
             appearance = self._stored_profile_appearance(profile)
@@ -587,6 +603,7 @@ class MainWindow(QMainWindow):
             secondary_y_columns=self.axis_panel.selected_secondary_y(),
             plot_kind=self.axis_panel.plot_kind(),
             legend_settings=self._current_legend_settings(profile),
+            best_fit_lines=self.plot_workspace.best_fit_settings(),
             analysis_window=self.axis_panel.analysis_window_texts(),
             axis_ticks=self.plot_workspace.axis_tick_setting_texts(),
             filter_settings=self.axis_panel.filter_setting_texts(),
@@ -597,6 +614,27 @@ class MainWindow(QMainWindow):
             axis_limits=appearance.get("axis_limits", {}),
             auto_fit_axes=appearance.get("auto_fit_axes", True),
             generated=self._plot_generated,
+        )
+
+    def _capture_preserved_plot_profile(self, profile: dict) -> None:
+        appearance = self._stored_profile_appearance(profile)
+        self.vm.capture_working_state(
+            x_column=str(profile.get("x_column", "")),
+            y_columns=list(profile.get("y_columns", [])),
+            secondary_y_columns=list(profile.get("secondary_y_columns", [])),
+            plot_kind=str(profile.get("plot_kind", "Line")),
+            legend_settings=self._current_legend_settings(profile),
+            best_fit_lines=list(profile.get("best_fit_lines", [])) if isinstance(profile.get("best_fit_lines"), list) else [],
+            analysis_window=dict(profile.get("analysis_window", {})) if isinstance(profile.get("analysis_window"), dict) else {},
+            axis_ticks=dict(profile.get("axis_ticks", {})) if isinstance(profile.get("axis_ticks"), dict) else {},
+            filter_settings=dict(profile.get("filter", {})) if isinstance(profile.get("filter"), dict) else {},
+            title=appearance.get("title", ""),
+            x_label=appearance.get("x_label", ""),
+            y_label=appearance.get("y_label", ""),
+            secondary_y_label=appearance.get("secondary_y_label", ""),
+            axis_limits=appearance.get("axis_limits", {}),
+            auto_fit_axes=appearance.get("auto_fit_axes", True),
+            generated=bool(profile.get("generated", False)),
         )
 
     @staticmethod
@@ -616,7 +654,31 @@ class MainWindow(QMainWindow):
         legend["display_mode"] = self.plot_workspace.legend_display()
         return legend
 
+    def _cache_active_plot_snapshot(self, result) -> None:
+        payload = result.payload if isinstance(result.payload, dict) else {}
+        plot_data = payload.get("plot_data")
+        if plot_data is None:
+            return
+        self._plot_profile_snapshots[self.vm.state.active_plot_profile_index] = {"plot_data": plot_data}
+
+    def _insert_plot_snapshot(self, index: int, snapshot: dict[str, Any] | None = None) -> None:
+        self._plot_profile_snapshots = {
+            (profile_index + 1 if profile_index >= index else profile_index): value
+            for profile_index, value in self._plot_profile_snapshots.items()
+        }
+        if snapshot is not None:
+            self._plot_profile_snapshots[index] = dict(snapshot)
+
+    def _delete_plot_snapshot(self, index: int) -> None:
+        updated: dict[int, dict[str, Any]] = {}
+        for profile_index, snapshot in self._plot_profile_snapshots.items():
+            if profile_index == index:
+                continue
+            updated[profile_index - 1 if profile_index > index else profile_index] = snapshot
+        self._plot_profile_snapshots = updated
+
     def _apply_active_plot_profile(self, *, clear_global_forms: bool = False) -> None:
+        self._plot_display_frozen = False
         self.vm.ensure_plot_profiles()
         profile = self.vm.state.active_plot_profile() or {}
         self.vm.state.limit_lines = [dict(line) for line in profile.get("limit_lines", [])]
@@ -637,6 +699,8 @@ class MainWindow(QMainWindow):
         legend_settings = profile.get("legend", {}) if isinstance(profile, dict) else {}
         display_mode = legend_settings.get("display_mode", "panel") if isinstance(legend_settings, dict) else "panel"
         self.plot_workspace.set_legend_display(str(display_mode))
+        best_fit_lines = profile.get("best_fit_lines", []) if isinstance(profile, dict) else []
+        self.plot_workspace.set_best_fit_settings(best_fit_lines if isinstance(best_fit_lines, list) else [])
         self.statistics_panel.set_statistics(self.vm.plot_workspace.statistics([]))
         self.raw_data_panel.clear()
         if clear_global_forms:
@@ -648,6 +712,7 @@ class MainWindow(QMainWindow):
         self.plot_workspace.clear_cursor_markers()
         self.cursor_panel.refresh()
         self._restore_generated_plot(profile)
+        self._refresh_best_fit_formulas()
 
     def _open_via_panel(self) -> None:
         self.data_panel.open_file()
@@ -705,7 +770,10 @@ class MainWindow(QMainWindow):
     def _clear_plot(self) -> None:
         result = self.plot_workspace.clear_plot()
         self._plot_generated = False
+        self._plot_display_frozen = False
+        self._plot_profile_snapshots.pop(self.vm.state.active_plot_profile_index, None)
         self.cursor_panel.refresh()
+        self._refresh_best_fit_formulas()
         self.statusBar().showMessage(result.message)
 
     def open_settings(self) -> None:
@@ -762,6 +830,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(result.message)
 
     def _apply_loaded_session(self, selection: dict) -> None:
+        self._plot_profile_snapshots.clear()
         self.data_panel.refresh_from_state()
         self._sync_plot_tabs()
         self._apply_active_plot_profile(clear_global_forms=True)
@@ -848,7 +917,9 @@ class MainWindow(QMainWindow):
             "axis_limits": profile.get("axis_limits", {}),
             "auto_fit_axes": profile.get("auto_fit_axes", True),
         }
-        result = self._generate_plot(appearance)
+        result = self._restore_plot_from_snapshot(profile, appearance)
+        if result is None:
+            result = self._generate_plot(appearance)
         if result is None or not result.ok:
             self.plot_workspace.clear_plot()
             self.cursor_panel.refresh()
@@ -858,6 +929,30 @@ class MainWindow(QMainWindow):
         self.raw_data_panel.refresh()
         self.limits_panel.refresh_margins()
         self.runs_panel.update_statistics()
+
+    def _restore_plot_from_snapshot(self, profile: dict, appearance: dict) -> Any:
+        snapshot = self._plot_profile_snapshots.get(self.vm.state.active_plot_profile_index, {})
+        plot_data = snapshot.get("plot_data")
+        if plot_data is None:
+            return None
+        primary_y = list(profile.get("y_columns", []))
+        secondary_y = list(profile.get("secondary_y_columns", []))
+        result = self.plot_workspace.render_plot_data(
+            plot_data,
+            str(profile.get("x_column", "")),
+            limit_lines=self._overlay_limit_lines(),
+            secondary_y=secondary_y,
+            plot_kind=str(profile.get("plot_kind", "Line")),
+            channel_colours=self.vm.persistent_plot_channel_colours(primary_y, secondary_y),
+            channel_styles=self.vm.active_legend_channel_overrides(),
+            axis_tick_settings=profile.get("axis_ticks", {}) if isinstance(profile.get("axis_ticks"), dict) else {},
+            **self._appearance_kwargs(appearance),
+        )
+        if result.ok:
+            self._last_plot_selection = None
+            self._cache_active_plot_snapshot(result)
+            self._plot_display_frozen = True
+        return result
 
     def _on_legend_channel_style_changed(self, channel: str, style: dict) -> None:
         result = self.vm.update_active_legend_channel_override(channel, style)
@@ -877,12 +972,33 @@ class MainWindow(QMainWindow):
         self._plot_generated = True
         self.statusBar().showMessage(result.message)
 
+    def _on_legend_channel_visibility_changed(self, channel: str, hidden: bool) -> None:
+        result = self.vm.update_active_legend_channel_override(channel, {"channel": channel, "hidden": hidden})
+        if not result.ok:
+            qt_message_service.warning(self, "Legend Channel", result.message)
+            self.statusBar().showMessage(result.message)
+            return
+        appearance = self.plot_workspace.current_axis_appearance() if self._plot_generated else {}
+        plot_result = self._generate_plot(appearance)
+        if plot_result is None:
+            self.statusBar().showMessage(result.message)
+            return
+        if not plot_result.ok:
+            qt_message_service.warning(self, "Legend Channel", plot_result.message)
+            self.statusBar().showMessage(plot_result.message)
+            return
+        self._plot_generated = True
+        action = "Hidden" if hidden else "Shown"
+        self.statusBar().showMessage(f"{action} '{channel}'.")
+
     def _on_file_loaded(self, columns: list[str]) -> None:
         suggested_x = self.vm.data_loading.suggested_x_column(columns)
         self._current_session_path = None
         self._plot_generated = False
+        self._plot_display_frozen = False
         self._last_plot_selection = None
         self.vm.reset_plot_profiles()
+        self._plot_profile_snapshots.clear()
         self._sync_plot_tabs()
         self.plot_workspace.clear_plot()
         self.cursor_panel.refresh()
@@ -895,6 +1011,24 @@ class MainWindow(QMainWindow):
         self.notes_panel.load_from_state()
         self.runs_panel.refresh()
         self.statusBar().showMessage(f"Loaded {len(columns)} columns. Select channels and generate a plot.")
+
+    def _on_sheet_changed(self, columns: list[str]) -> None:
+        self._capture_current_plot_profile()
+        self._plot_display_frozen = self._plot_generated
+        self._last_plot_selection = None
+        self.axis_panel.update_columns(columns, maths_channel_names=self._maths_channel_names())
+        self.statistics_panel.set_statistics(self.vm.plot_workspace.statistics([]))
+        self.raw_data_panel.clear()
+        self.maths_panel.refresh()
+        self.limits_panel.refresh()
+        self.notes_panel.load_from_state()
+        self.runs_panel.refresh()
+        self.cursor_panel.refresh()
+        self._refresh_best_fit_formulas()
+        sheet_name = self.vm.state.sheet_name or "selected sheet"
+        self.statusBar().showMessage(
+            f"Loaded sheet '{sheet_name}' with {len(columns)} columns. Existing plots were left unchanged."
+        )
 
     def _on_generate_plot(self) -> None:
         appearance = None
@@ -918,6 +1052,7 @@ class MainWindow(QMainWindow):
         self.raw_data_panel.refresh()
         self.limits_panel.refresh_margins()
         self.runs_panel.update_statistics()
+        self._refresh_best_fit_formulas()
         self.statusBar().showMessage(result.message)
 
     def _notes_context(self) -> tuple[str, str, str]:
@@ -1000,6 +1135,8 @@ class MainWindow(QMainWindow):
         )
         if result.ok:
             self._last_plot_selection = dict(selection)
+            self._plot_display_frozen = False
+            self._cache_active_plot_snapshot(result)
         return result
 
     def _current_plot_selection_signature(self) -> dict[str, Any] | None:
@@ -1091,3 +1228,6 @@ class MainWindow(QMainWindow):
         decimals = int(self.vm.settings.get("axis_scaling", "decimal_places_statistics", 4) or 4)
         stats = self.vm.plot_workspace.statistics(y_cols, decimals)
         self.statistics_panel.set_statistics(stats)
+
+    def _refresh_best_fit_formulas(self) -> None:
+        self.best_fit_formulas_panel.set_rows(self.plot_workspace.best_fit_formula_rows())

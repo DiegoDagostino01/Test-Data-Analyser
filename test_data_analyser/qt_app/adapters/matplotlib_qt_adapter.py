@@ -17,10 +17,18 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.backends.qt_editor import _formlayout, figureoptions
 from matplotlib.figure import Figure
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QHBoxLayout, QInputDialog, QMessageBox, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QInputDialog,
+    QMessageBox,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ...core.config import theme_palette
 from ...core.utils import classify_channel_name
+from ...services import plot_render_service
 
 LEGEND_DISPLAY_PANEL = "panel"
 LEGEND_DISPLAY_GRAPH = "graph"
@@ -49,6 +57,10 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
         self._axis_tick_settings_getter: Callable[[], dict[str, object]] | None = None
         self._axis_tick_settings_setter: Callable[[dict[str, object]], None] | None = None
         self._axis_tick_settings_applier: Callable[[], None] | None = None
+        self._best_fit_channels_getter: Callable[[], list[str]] | None = None
+        self._best_fit_settings_getter: Callable[[], list[dict[str, object]]] | None = None
+        self._best_fit_settings_setter: Callable[[list[dict[str, object]]], None] | None = None
+        self._best_fit_settings_applier: Callable[[], None] | None = None
         self.addSeparator()
         self.edit_axis_button = QPushButton("Edit Axis")
         self.edit_axis_button.setObjectName("PrimaryButton")
@@ -87,6 +99,18 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
         self._axis_tick_settings_getter = getter
         self._axis_tick_settings_setter = setter
         self._axis_tick_settings_applier = applier
+
+    def set_best_fit_controller(
+        self,
+        channels_getter: Callable[[], list[str]],
+        settings_getter: Callable[[], list[dict[str, object]]],
+        settings_setter: Callable[[list[dict[str, object]]], None],
+        applier: Callable[[], None],
+    ) -> None:
+        self._best_fit_channels_getter = channels_getter
+        self._best_fit_settings_getter = settings_getter
+        self._best_fit_settings_setter = settings_setter
+        self._best_fit_settings_applier = applier
 
     def save_figure(self, *args):
         preparer = self._export_preparer
@@ -157,10 +181,12 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
             form_data, secondary_axes = self._with_secondary_y_axis_fields(form_data, axes)
             form_data = self._with_axis_tab_title(form_data)
             include_axis_ticks = self._axis_tick_settings_getter is not None and self._axis_tick_settings_setter is not None
+            include_best_fits = self._has_best_fit_controller()
 
             def apply_with_legend(form_data: list[Any]) -> None:
                 form_sections = list(form_data)
                 legend_data = form_sections.pop() if include_legend and form_sections else []
+                best_fit_data = form_sections.pop() if include_best_fits and form_sections else []
                 axis_tick_data = form_sections.pop() if include_axis_ticks and form_sections else []
                 secondary_data = self._pop_secondary_y_axis_data(form_sections, secondary_axes is not None)
                 if apply is not None:
@@ -171,12 +197,16 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
                     self._apply_secondary_y_axis_data(secondary_axes, secondary_data)
                 if include_axis_ticks:
                     self._apply_axis_tick_form_data(axis_tick_data)
+                if include_best_fits:
+                    self._apply_best_fit_form_data(best_fit_data)
                 if include_legend:
                     self._apply_legend_form_data(legend_data)
 
             extra_sections = []
             if include_axis_ticks:
                 extra_sections.append((self._axis_tick_form_data(), "Axis Ticks", ""))
+            if include_best_fits:
+                extra_sections.append((self._best_fit_form_data(), "Best Fits", ""))
             if include_legend:
                 extra_sections.append((self._legend_form_data(), "Legend", ""))
             result = original_fedit(
@@ -392,6 +422,14 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
         axes_form.formlayout.addRow("Helpers", helper_row)
         axes_form._tda_axis_helpers_installed = True
 
+    def _has_best_fit_controller(self) -> bool:
+        return (
+            self._best_fit_channels_getter is not None
+            and self._best_fit_settings_getter is not None
+            and self._best_fit_settings_setter is not None
+            and self._best_fit_settings_applier is not None
+        )
+
     @staticmethod
     def _axes_form_fields(axes_form) -> dict[str, Any]:
         fields: dict[str, Any] = {"axes": {}}
@@ -463,6 +501,8 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
         labels: list[str] = []
         artists = [*axes.get_lines(), *axes.collections]
         for artist in artists:
+            if bool(getattr(artist, "_tda_best_fit", False)):
+                continue
             label_getter = getattr(artist, "get_label", None)
             label = str(label_getter() if callable(label_getter) else "").strip()
             clean = LegendAwareNavigationToolbar._clean_series_label(label)
@@ -584,6 +624,27 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
             ("Align secondary Y-axis grid with primary axis", bool(settings.get("align_secondary_y_axis_grid", False))),
         ]
 
+    def _best_fit_form_data(self) -> list[tuple[str | None, object]]:
+        channels_getter = self._best_fit_channels_getter
+        settings_getter = self._best_fit_settings_getter
+        channels = channels_getter() if channels_getter is not None else []
+        settings = plot_render_service.normalise_best_fit_settings(
+            settings_getter() if settings_getter is not None else []
+        )
+        fields: list[tuple[str | None, object]] = []
+        for index in range(plot_render_service.MAX_BEST_FIT_CHANNELS):
+            setting = settings[index] if index < len(settings) else {}
+            fit_type = str(setting.get("fit_type", "Linear"))
+            fields.extend(
+                [
+                    (None, f"<b>Best Fit {index + 1}</b>"),
+                    (f"Channel {index + 1}", [str(setting.get("channel", "")), "", *channels]),
+                    (f"Fit {index + 1}", [fit_type, *plot_render_service.BEST_FIT_TYPES]),
+                    (f"Order {index + 1}", int(setting.get("order", 1) or 1)),
+                ]
+            )
+        return fields
+
     def _apply_axis_tick_form_data(self, axis_tick_data: list[object]) -> None:
         if self._axis_tick_settings_setter is None:
             return
@@ -597,6 +658,28 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
         self._axis_tick_settings_setter(settings)
         if self._axis_tick_settings_applier is not None:
             self._axis_tick_settings_applier()
+
+    def _apply_best_fit_form_data(self, best_fit_data: list[object]) -> None:
+        if self._best_fit_settings_setter is None or self._best_fit_settings_applier is None:
+            return
+        values = list(best_fit_data or [])
+        settings = []
+        for row in range(plot_render_service.MAX_BEST_FIT_CHANNELS):
+            offset = row * 3
+            if len(values) <= offset:
+                break
+            channel = str(values[offset] or "").strip()
+            if not channel:
+                continue
+            settings.append(
+                {
+                    "channel": channel,
+                    "fit_type": str(values[offset + 1]) if len(values) > offset + 1 else "Linear",
+                    "order": values[offset + 2] if len(values) > offset + 2 else 1,
+                }
+            )
+        self._best_fit_settings_setter(plot_render_service.normalise_best_fit_settings(settings))
+        self._best_fit_settings_applier()
 
     def _apply_legend_form_data(self, legend_data: list[object]) -> None:
         if not legend_data or self._legend_display_setter is None:

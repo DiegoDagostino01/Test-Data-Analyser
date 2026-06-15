@@ -94,6 +94,7 @@ class LegendSettingsTests(unittest.TestCase):
                     "marker_size": "7",
                     "marker_face_colour": "#ABCDEF",
                     "marker_edge_colour": "#654321",
+                    "hidden": "true",
                 }
             },
         }
@@ -181,10 +182,30 @@ class PlotProfileTests(unittest.TestCase):
                 "y_columns": ["A", "B"],
                 "title": "Test",
                 "limit_lines": [{"name": "Upper", "points": [{"x": 0.0, "y": 1.0}]}],
+                "best_fit_lines": [
+                    {"channel": "A", "fit_type": "Polynomial", "order": 4}
+                ],
             }
         )
         # Normalisation is idempotent.
         self.assertEqual(PlotProfile.from_dict(data).to_dict(), data)
+        self.assertEqual(data["best_fit_lines"][0]["channel"], "A")
+        self.assertEqual(data["best_fit_lines"][0]["order"], 4)
+
+    def test_best_fit_lines_are_limited_and_normalised(self) -> None:
+        profile = PlotProfile.from_dict(
+            {
+                "best_fit_lines": [
+                    {"channel": "A", "fit_type": "Polynomial", "order": 99},
+                    {"channel": " a ", "fit_type": "Squared", "order": 2},
+                    *[{"channel": f"C{index}", "fit_type": "Linear", "order": 1} for index in range(6)],
+                ]
+            }
+        )
+
+        self.assertEqual(len(profile.best_fit_lines), 5)
+        self.assertEqual(profile.best_fit_lines[0]["order"], 6)
+        self.assertEqual(profile.best_fit_lines[1]["channel"], "C0")
 
     def test_defaults_for_empty_input(self) -> None:
         profile = PlotProfile.from_dict({})

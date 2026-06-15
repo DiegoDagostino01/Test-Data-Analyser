@@ -84,6 +84,22 @@ class RunsComparisonViewModel:
             self.state.active_run_index = index
         return OperationResult.success(f"Added {run['name']}.", payload=index)
 
+    def add_loaded_run(self, path: str | Path, sheet_name: Optional[str], df: pd.DataFrame) -> OperationResult:
+        """Append an already loaded dataframe as a run. Payload is the new index."""
+        file_path = Path(path)
+        run = self.make_run_entry(
+            name=f"Run {len(self.state.runs) + 1}",
+            filepath=file_path,
+            sheet_name=sheet_name or "",
+            df=df.copy(deep=False),
+            enabled=True,
+        )
+        self.state.runs.append(run)
+        index = len(self.state.runs) - 1
+        if self.state.active_run_index < 0:
+            self.state.active_run_index = index
+        return OperationResult.success(f"Added {run['name']}.", payload=index)
+
     def remove_run(self, index: int) -> OperationResult:
         if not (0 <= index < len(self.state.runs)):
             return OperationResult.failure("Select a run to remove.")

@@ -19,6 +19,33 @@ current release format.
 When releasing an update, change `__version__` and add a new entry at the top of
 this file.
 
+## 1.01.01 - 2026-06-15
+
+Startup, workbook navigation, plot preservation, and best-fit update.
+
+- Improved source startup by lazy-loading SciPy filtering and Matplotlib colour
+  cycle imports until those features are actually needed.
+- Made Excel sheet-name discovery lighter by reading workbook metadata directly
+  instead of creating a pandas `ExcelFile` for the sheet list.
+- Preserved plot profiles, generated plot snapshots, Requirements / Limits, and
+  Engineering Notes when switching sheets in a multi-sheet Excel workbook.
+- Kept generated plots available across sheet changes and plot-tab switches even
+  when the active sheet does not contain the original plotted columns.
+- Added right-side Legend panel Hide / Show checkboxes for plotted Y-axis
+  channels without changing each channel's colour, line style, marker style, or
+  display-name settings.
+- Added an `Edit Axis` Best Fits tab for up to five plotted Y-axis channels,
+  supporting linear, squared, and polynomial fits with selectable polynomial
+  order.
+- Added the Analysis ribbon's Best Fit Formulas panel so generated fit equations
+  can be reviewed without drawing the formulas on top of the plot.
+- Persisted best-fit line settings and per-channel legend visibility in plot
+  profiles and sessions.
+- Reused already loaded dataframes during session restore when saved runs point
+  at the same workbook and sheet as the main session data.
+- Updated Help, architecture notes, and regression coverage for the new workbook
+  navigation, legend visibility, best-fit, session-restore, and startup paths.
+
 ## 1.01.00 - 2026-06-12
 
 Plot styling, limits review, and channel-ordering update.

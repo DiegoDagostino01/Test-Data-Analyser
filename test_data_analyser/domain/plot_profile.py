@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .conversions import _mapping, _string, _string_list
+from .conversions import _int, _mapping, _string, _string_list
 from .engineering_notes import EngineeringNotes
 from .limits import LimitLine
 from .settings import (
@@ -22,6 +22,46 @@ from .settings import (
     ManualLabelFlags,
     RawDataViewSettings,
 )
+
+
+BEST_FIT_TYPES = {"Linear", "Squared", "Polynomial"}
+MAX_BEST_FIT_CHANNELS = 5
+MAX_BEST_FIT_ORDER = 6
+
+
+def _best_fit_order(fit_type: str, value: object) -> int:
+    if fit_type == "Linear":
+        return 1
+    if fit_type == "Squared":
+        return 2
+    return max(1, min(_int(value, 1), MAX_BEST_FIT_ORDER))
+
+
+def _best_fit_lines(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    lines: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for item in value:
+        data = _mapping(item)
+        channel = _string(data.get("channel")).strip()
+        channel_key = " ".join(channel.split()).casefold()
+        if not channel_key or channel_key in seen:
+            continue
+        fit_type = _string(data.get("fit_type", "Linear"), "Linear")
+        if fit_type not in BEST_FIT_TYPES:
+            fit_type = "Linear"
+        lines.append(
+            {
+                "channel": channel,
+                "fit_type": fit_type,
+                "order": _best_fit_order(fit_type, data.get("order", 1)),
+            }
+        )
+        seen.add(channel_key)
+        if len(lines) >= MAX_BEST_FIT_CHANNELS:
+            break
+    return lines
 
 
 @dataclass
@@ -45,6 +85,7 @@ class PlotProfile:
     raw_data: RawDataViewSettings = field(default_factory=RawDataViewSettings)
     engineering_notes: EngineeringNotes = field(default_factory=EngineeringNotes)
     limit_lines: list[LimitLine] = field(default_factory=list)
+    best_fit_lines: list[dict[str, object]] = field(default_factory=list)
     manual_labels: ManualLabelFlags = field(default_factory=ManualLabelFlags)
     generated: bool = False
 
@@ -72,6 +113,7 @@ class PlotProfile:
             raw_data=RawDataViewSettings.from_dict(data.get("raw_data")),
             engineering_notes=EngineeringNotes.from_dict(data.get("engineering_notes")),
             limit_lines=[LimitLine.from_dict(line) for line in limit_lines] if isinstance(limit_lines, list) else [],
+            best_fit_lines=_best_fit_lines(data.get("best_fit_lines")),
             manual_labels=ManualLabelFlags.from_dict(data.get("manual_labels")),
             generated=bool(data.get("generated", False)),
         )
@@ -97,6 +139,7 @@ class PlotProfile:
             "raw_data": self.raw_data.to_dict(),
             "engineering_notes": self.engineering_notes.to_dict(),
             "limit_lines": [line.to_dict() for line in self.limit_lines],
+            "best_fit_lines": [dict(line) for line in self.best_fit_lines],
             "manual_labels": self.manual_labels.to_dict(),
             "generated": self.generated,
         }

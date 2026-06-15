@@ -23,14 +23,17 @@ try:
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import (
         QApplication,
+        QCheckBox,
         QDialog,
         QFrame,
         QGroupBox,
+        QHeaderView,
         QLabel,
         QPushButton,
         QScrollArea,
         QSizePolicy,
         QSplitter,
+        QSpinBox,
         QStackedWidget,
         QTabBar,
         QTabWidget,
@@ -731,6 +734,21 @@ class PlotWorkspaceParityTests(unittest.TestCase):
         handle_by_label = dict(zip(labels, handles))
         self.assertEqual(str(handle_by_label["B [Right Y]"].get_color()).lower(), secondary_colour)
 
+    def test_best_fit_line_renders_with_formula_label(self) -> None:
+        self.panel.set_best_fit_settings(
+            [{"channel": "A", "fit_type": "Polynomial", "order": 3}]
+        )
+        result = self.panel.generate_plot("Time", ["A"])
+
+        self.assertTrue(result.ok, result.message)
+        best_fit_lines = [line for line in self.panel.canvas.axes.get_lines() if bool(getattr(line, "_tda_best_fit", False))]
+        self.assertEqual(len(best_fit_lines), 1)
+        self.assertEqual(best_fit_lines[0].get_linestyle(), "--")
+        self.assertEqual(best_fit_lines[0].get_label(), "A polynomial fit")
+        self.assertEqual(len(self.panel.best_fit_formula_rows()), 1)
+        self.assertIn("y =", self.panel.best_fit_formula_rows()[0]["Formula"])
+        self.assertEqual(self.panel.best_fit_settings()[0]["order"], 3)
+
     def test_scatter_plot_kind(self) -> None:
         result = self.panel.generate_plot("Time", ["A"], plot_kind="Scatter")
         self.assertTrue(result.ok)
@@ -888,6 +906,46 @@ class PlotWorkspaceParityTests(unittest.TestCase):
         self.assertIsNotNone(swatch)
         assert swatch is not None
         self.assertIn("background-color:", swatch.styleSheet())
+        visibility_cell = self.panel.legend_table.cellWidget(0, 2)
+        self.assertIsNotNone(visibility_cell)
+        assert visibility_cell is not None
+        self.assertIsInstance(visibility_cell.findChild(QCheckBox, "LegendVisibilityCheckBox"), QCheckBox)
+
+    def test_legend_visibility_button_emits_hide_request(self) -> None:
+        result = self.panel.generate_plot("Time", ["A"])
+        self.assertTrue(result.ok, result.message)
+        emitted: list[tuple[str, bool]] = []
+        self.panel.legendChannelVisibilityChanged.connect(lambda channel, hidden: emitted.append((channel, hidden)))
+
+        visibility_cell = self.panel.legend_table.cellWidget(0, 2)
+        self.assertIsNotNone(visibility_cell)
+        assert visibility_cell is not None
+        checkbox = visibility_cell.findChild(QCheckBox, "LegendVisibilityCheckBox")
+        self.assertIsInstance(checkbox, QCheckBox)
+        assert isinstance(checkbox, QCheckBox)
+        self.assertTrue(checkbox.isChecked())
+        checkbox.setChecked(False)
+
+        self.assertEqual(emitted, [("A", True)])
+
+    def test_hidden_legend_channel_stays_listed_and_not_visible(self) -> None:
+        channel_styles = {plot_render_service.normalise_channel_name("A"): {"channel": "A", "hidden": "true"}}
+        result = self.panel.generate_plot("Time", ["A", "B"], channel_styles=channel_styles)
+        self.assertTrue(result.ok, result.message)
+
+        lines = {line.get_label(): line for line in self.panel.canvas.axes.get_lines()}
+        self.assertFalse(lines["A"].get_visible())
+        self.assertTrue(lines["B"].get_visible())
+        table_labels = [self.panel.legend_table.item(row, 1).text() for row in range(self.panel.legend_table.rowCount())]
+        self.assertIn("A", table_labels)
+        row = table_labels.index("A")
+        visibility_cell = self.panel.legend_table.cellWidget(row, 2)
+        self.assertIsNotNone(visibility_cell)
+        assert visibility_cell is not None
+        checkbox = visibility_cell.findChild(QCheckBox, "LegendVisibilityCheckBox")
+        self.assertIsInstance(checkbox, QCheckBox)
+        assert isinstance(checkbox, QCheckBox)
+        self.assertFalse(checkbox.isChecked())
 
     def test_clicking_legend_row_emits_channel_style_payload(self) -> None:
         from test_data_analyser.qt_app.widgets import plot_workspace as plot_workspace_module
@@ -950,6 +1008,13 @@ class PlotWorkspaceParityTests(unittest.TestCase):
         self.assertFalse(splitter.isCollapsible(0))
         self.assertTrue(splitter.isCollapsible(1))
         self.assertEqual(self.panel.legend_panel.maximumWidth(), self.panel.LEGEND_MAXIMUM_WIDTH)
+        header = self.panel.legend_table.horizontalHeader()
+        self.assertEqual(header.sectionResizeMode(0), QHeaderView.ResizeMode.Fixed)
+        self.assertEqual(header.sectionResizeMode(1), QHeaderView.ResizeMode.Stretch)
+        self.assertEqual(header.sectionResizeMode(2), QHeaderView.ResizeMode.Fixed)
+        self.assertLessEqual(header.sectionSize(0), 34)
+        self.assertGreaterEqual(header.sectionSize(2), 80)
+        self.assertLessEqual(header.sectionSize(2), 90)
 
         self.panel.resize(900, 420)
         self.panel.show()
@@ -1015,8 +1080,10 @@ class PlotWorkspaceParityTests(unittest.TestCase):
             captured["tabs"] = [section[1] for section in data]
             captured["axes_fields"] = [field[0] for field in data[0][0]]
             captured["axis_tick_fields"] = [field[0] for field in data[1][0]]
+            captured["best_fit_fields"] = [field[0] for field in data[2][0]]
             if apply is not None:
-                apply([["updated title"], ["0.25", "0.5", "50", True], ["graph"]])
+                best_fit_data = ["A", "Linear", "1"] + ["", "Linear", "1"] * 4
+                apply([["updated title"], ["0.25", "0.5", "50", True], best_fit_data, ["graph"]])
 
         matplotlib_qt_adapter.figureoptions.figure_edit = fake_figure_edit
         matplotlib_qt_adapter._formlayout.fedit = fake_fedit
@@ -1026,7 +1093,7 @@ class PlotWorkspaceParityTests(unittest.TestCase):
             matplotlib_qt_adapter.figureoptions.figure_edit = original_figure_edit
             matplotlib_qt_adapter._formlayout.fedit = original_fedit
 
-        self.assertEqual(captured["tabs"], ["Axis", "Axis Ticks", "Legend"])
+        self.assertEqual(captured["tabs"], ["Axis", "Axis Ticks", "Best Fits", "Legend"])
         axes_fields = captured["axes_fields"]
         self.assertIsInstance(axes_fields, list)
         self.assertNotIn("(Re-)Generate automatic legend", axes_fields)
@@ -1039,8 +1106,11 @@ class PlotWorkspaceParityTests(unittest.TestCase):
                 "Align secondary Y-axis grid with primary axis",
             ],
         )
+        self.assertIn("Channel 1", captured["best_fit_fields"])
+        self.assertNotIn("Show formula 1", captured["best_fit_fields"])
         self.assertEqual(captured["matplotlib_data"], [["updated title", False]])
         self.assertEqual(self.panel.legend_display(), "graph")
+        self.assertEqual(self.panel.best_fit_settings()[0]["channel"], "A")
         self.assertEqual(
             self.panel.axis_tick_setting_texts(),
             {
@@ -1087,7 +1157,7 @@ class PlotWorkspaceParityTests(unittest.TestCase):
         def fake_fedit(data, title="", comment="", icon=None, parent=None, apply=None):
             captured["tabs"] = [section[1] for section in data]
             if apply is not None:
-                apply([["updated title"], ["", "", "", False], ["panel"]])
+                apply([["updated title"], ["", "", "", False], ["", "Linear", "1"] * 5, ["panel"]])
 
         matplotlib_qt_adapter.figureoptions.figure_edit = fake_figure_edit
         matplotlib_qt_adapter._formlayout.fedit = fake_fedit
@@ -1097,7 +1167,7 @@ class PlotWorkspaceParityTests(unittest.TestCase):
             matplotlib_qt_adapter.figureoptions.figure_edit = original_figure_edit
             matplotlib_qt_adapter._formlayout.fedit = original_fedit
 
-        self.assertEqual(captured["tabs"], ["Axis", "Axis Ticks", "Legend"])
+        self.assertEqual(captured["tabs"], ["Axis", "Axis Ticks", "Best Fits", "Legend"])
         self.assertEqual(
             captured["matplotlib_data"],
             [["updated title", False], [["A", "-", "default", 1.5, "#123456", "none", 3.0, "#abcdef", "#654321"]]],
@@ -1149,6 +1219,35 @@ class PlotWorkspaceParityTests(unittest.TestCase):
             self.assertEqual(fields["title"].text(), "A vs Time")
             self.assertEqual(fields["axes"]["x"]["label"].text(), "Time")
             self.assertEqual(fields["axes"]["y"]["label"].text(), "A")
+        finally:
+            dialog.close()
+
+    def test_figure_options_best_fits_tab_updates_settings(self) -> None:
+        self.panel.generate_plot("Time", ["A"])
+        toolbar = self.panel.canvas.toolbar
+        toolbar._figure_edit_with_legend(self.panel.canvas.axes)
+        dialog = toolbar._fedit_dialog
+        try:
+            best_fits_form = next(
+                widget
+                for widget in dialog.formwidget.widgetlist
+                if any(label == "Channel 1" for label, _value in getattr(widget, "data", []))
+            )
+            fields = {label: widget for (label, _value), widget in zip(best_fits_form.data, best_fits_form.widgets)}
+
+            self.assertIsInstance(fields["Order 1"], QSpinBox)
+            fields["Channel 1"].setCurrentText("A")
+            fields["Fit 1"].setCurrentText("Linear")
+            fields["Order 1"].setValue(1)
+            dialog.apply()
+
+            self.assertEqual(
+                self.panel.best_fit_settings(),
+                [{"channel": "A", "fit_type": "Linear", "order": 1}],
+            )
+            self.assertTrue(
+                any(bool(getattr(line, "_tda_best_fit", False)) for line in self.panel.canvas.axes.get_lines())
+            )
         finally:
             dialog.close()
 
@@ -1404,6 +1503,12 @@ class HelpDialogTests(unittest.TestCase):
         self.assertEqual(self.dialog.topic_list.currentItem().text(), "Troubleshooting")
         self.assertIn("Legend is unclear", self.dialog.content_browser.toPlainText())
 
+    def test_search_finds_best_fit_help(self) -> None:
+        self.dialog.search_box.setText("best fits")
+
+        self.assertIn("Plot Interaction", self._visible_topics())
+        self.assertIn("Best Fits", self.dialog.content_browser.toPlainText())
+
     def test_search_no_match_shows_empty_state(self) -> None:
         self.dialog.search_box.setText("not a real topic")
 
@@ -1594,7 +1699,7 @@ class MainWindowLayoutTests(unittest.TestCase):
         subtitle = window.findChild(QLabel, "EatonHeaderSubtitle")
         self.assertIsNotNone(subtitle)
         assert subtitle is not None
-        self.assertEqual(subtitle.text(), "Eaton Engineering - Analysis Workspace (V1.01.00)")
+        self.assertEqual(subtitle.text(), f"Eaton Engineering - Analysis Workspace (V{__version__})")
 
     def test_application_icon_asset_exists(self) -> None:
         self.assertTrue(_app_icon_path().exists())
@@ -1750,6 +1855,7 @@ class MainWindowLayoutTests(unittest.TestCase):
             "ANALYSIS:Statistics",
             "ANALYSIS:Raw Data",
             "ANALYSIS:Maths Channels",
+            "ANALYSIS:Best Fit Formulas",
             "ANALYSIS:Cursor",
             "REQUIREMENTS:Limits",
             "REQUIREMENTS:Margins",
@@ -1854,6 +1960,54 @@ class MainWindowLayoutTests(unittest.TestCase):
         window.plot_tab_bar.setCurrentIndex(1)
         self.assertEqual(window.axis_panel.selected_y(), ["B"])
 
+    def test_sheet_change_preserves_profiles_limits_notes_and_plot(self) -> None:
+        window = self._window()
+        first_sheet = pd.DataFrame({"Time": [0.0, 1.0, 2.0], "A": [1.0, 2.0, 3.0], "B": [3.0, 2.0, 1.0]})
+        window.vm.state.df = first_sheet
+        window.vm.state.sheet_name = "First"
+        window._on_file_loaded(window.vm.state.column_names())
+
+        window._new_plot_profile()
+        window.axis_panel.apply_selection(window.vm.state.column_names(), "Time", ["B"], [])
+        window.vm.state.limit_lines = [
+            {
+                "name": "Max",
+                "type": "Upper Limit",
+                "applies_to": "All selected Y channels",
+                "points": [{"x": 0.0, "y": 10.0}, {"x": 2.0, "y": 10.0}],
+            }
+        ]
+        window.vm.engineering_notes.update_field("objective", "Keep these notes")
+        window.notes_panel.load_from_state()
+        window._on_generate_plot()
+        self.assertTrue(window._plot_generated)
+        self.assertTrue(window.plot_workspace.canvas.axes.get_lines())
+        original_labels = [line.get_label() for line in window.plot_workspace.canvas.axes.get_lines()]
+        original_y_data = [list(line.get_ydata()) for line in window.plot_workspace.canvas.axes.get_lines()]
+
+        second_sheet = pd.DataFrame({"Elapsed": [0.0, 1.0, 2.0], "Voltage": [12.0, 12.5, 12.2]})
+        window.vm.state.df = second_sheet
+        window.vm.state.sheet_name = "Second"
+        window._on_sheet_changed(window.vm.state.column_names())
+
+        self.assertEqual(len(window.vm.state.plot_profiles), 2)
+        self.assertEqual(window.plot_tab_bar.tabText(1), "Plot 2")
+        self.assertEqual(window.axis_panel.selected_y(), [])
+        self.assertEqual(len(window.vm.state.limit_lines), 1)
+        self.assertEqual(window.vm.state.limit_lines[0]["name"], "Max")
+        self.assertEqual(window.vm.engineering_notes.get_notes()["objective"], "Keep these notes")
+        self.assertEqual(window.notes_panel._editors["objective"].toPlainText(), "Keep these notes")
+        self.assertTrue(window._plot_generated)
+        self.assertTrue(window.plot_workspace.canvas.axes.get_lines())
+        self.assertEqual([line.get_label() for line in window.plot_workspace.canvas.axes.get_lines()], original_labels)
+        self.assertEqual([list(line.get_ydata()) for line in window.plot_workspace.canvas.axes.get_lines()], original_y_data)
+
+        window.plot_tab_bar.setCurrentIndex(0)
+        window.plot_tab_bar.setCurrentIndex(1)
+        self.assertTrue(window.plot_workspace.canvas.axes.get_lines())
+        self.assertEqual([line.get_label() for line in window.plot_workspace.canvas.axes.get_lines()], original_labels)
+        self.assertEqual([list(line.get_ydata()) for line in window.plot_workspace.canvas.axes.get_lines()], original_y_data)
+
     def test_plot_tab_duplicate_rename_delete_handlers(self) -> None:
         window = self._window()
         window._duplicate_plot_profile(0)
@@ -1903,6 +2057,67 @@ class MainWindowLayoutTests(unittest.TestCase):
         window.ribbon_buttons["ANALYSIS:Maths Channels"].click()
         self.assertIs(window.lower_stack.currentWidget(), window.analysis_stack)
         self.assertIs(window.analysis_stack.currentWidget(), window.maths_panel)
+
+    def test_analysis_group_reaches_best_fit_formulas_panel(self) -> None:
+        window = self._window()
+        window.ribbon_buttons["ANALYSIS:Best Fit Formulas"].click()
+        self.assertIs(window.lower_stack.currentWidget(), window.analysis_stack)
+        self.assertIs(window.analysis_stack.currentWidget(), window.best_fit_formulas_panel)
+
+    def test_best_fit_formulas_panel_updates_after_plot_generation(self) -> None:
+        window = self._window()
+        window.vm.state.df = pd.DataFrame({"Time": [0.0, 1.0, 2.0], "A": [1.0, 3.0, 5.0]})
+        window._on_file_loaded(window.vm.state.column_names())
+        window.axis_panel.apply_selection(window.vm.state.column_names(), "Time", ["A"], [])
+        window.plot_workspace.set_best_fit_settings(
+            [{"channel": "A", "fit_type": "Linear", "order": 1}]
+        )
+
+        window._on_generate_plot()
+
+        window.ribbon_buttons["ANALYSIS:Best Fit Formulas"].click()
+        self.assertEqual(window.best_fit_formulas_panel.table.rowCount(), 1)
+        self.assertEqual(window.best_fit_formulas_panel.table.item(0, 0).text(), "A")
+        self.assertIn("y =", window.best_fit_formulas_panel.table.item(0, 3).text())
+
+    def test_legend_hide_button_updates_profile_and_plot(self) -> None:
+        window = self._window()
+        window.vm.state.df = pd.DataFrame({"Time": [0.0, 1.0, 2.0], "A": [1.0, 2.0, 3.0], "B": [3.0, 2.0, 1.0]})
+        window._on_file_loaded(window.vm.state.column_names())
+        window.axis_panel.apply_selection(window.vm.state.column_names(), "Time", ["A", "B"], [])
+        window._on_generate_plot()
+
+        table_labels = [
+            window.plot_workspace.legend_table.item(row, 1).text()
+            for row in range(window.plot_workspace.legend_table.rowCount())
+        ]
+        row = table_labels.index("A")
+        visibility_cell = window.plot_workspace.legend_table.cellWidget(row, 2)
+        self.assertIsNotNone(visibility_cell)
+        assert visibility_cell is not None
+        checkbox = visibility_cell.findChild(QCheckBox, "LegendVisibilityCheckBox")
+        self.assertIsInstance(checkbox, QCheckBox)
+        assert isinstance(checkbox, QCheckBox)
+        checkbox.setChecked(False)
+
+        key = plot_render_service.normalise_channel_name("A")
+        style = window.vm.state.active_plot_profile()["legend"]["channel_overrides"][key]
+        self.assertEqual(style["hidden"], "true")
+        lines = {line.get_label(): line for line in window.plot_workspace.canvas.axes.get_lines()}
+        self.assertFalse(lines["A"].get_visible())
+        self.assertTrue(lines["B"].get_visible())
+        refreshed_labels = [
+            window.plot_workspace.legend_table.item(row, 1).text()
+            for row in range(window.plot_workspace.legend_table.rowCount())
+        ]
+        refreshed_row = refreshed_labels.index("A")
+        show_cell = window.plot_workspace.legend_table.cellWidget(refreshed_row, 2)
+        self.assertIsNotNone(show_cell)
+        assert show_cell is not None
+        show_checkbox = show_cell.findChild(QCheckBox, "LegendVisibilityCheckBox")
+        self.assertIsInstance(show_checkbox, QCheckBox)
+        assert isinstance(show_checkbox, QCheckBox)
+        self.assertFalse(show_checkbox.isChecked())
 
     def test_ribbon_reaches_raw_data_and_cursor_panels(self) -> None:
         window = self._window()

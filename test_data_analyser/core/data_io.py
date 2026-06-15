@@ -1,22 +1,52 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Literal, Optional, cast
 import numpy as np
 import pandas as pd
 
 from .config import NUMERIC_EXTRACT_RE
 
+
+XLRD_MISSING_MESSAGE = "xlrd is required to open .xls files. Install it with: pip install xlrd==1.2.0."
+ExcelEngine = Literal["openpyxl", "xlrd"]
+
+
+def _xlrd_module():
+    try:
+        import xlrd
+    except ImportError as exc:
+        raise ImportError(XLRD_MISSING_MESSAGE) from exc
+    return xlrd
+
+
 def get_excel_sheets(filepath: str | Path) -> list[str]:
     path = Path(filepath)
-    if path.suffix.lower() not in {".xlsx", ".xls"}:
+    suffix = path.suffix.lower()
+    if suffix == ".xlsx":
+        from openpyxl import load_workbook
+
+        workbook = load_workbook(path, read_only=True)
+        try:
+            return [str(sheet) for sheet in workbook.sheetnames]
+        finally:
+            workbook.close()
+    if suffix == ".xls":
+        xlrd = _xlrd_module()
+        workbook = xlrd.open_workbook(str(path), on_demand=True)
+        try:
+            return [str(sheet) for sheet in workbook.sheet_names()]
+        finally:
+            release_resources = getattr(workbook, "release_resources", None)
+            if callable(release_resources):
+                release_resources()
+    if suffix not in {".xlsx", ".xls"}:
         return []
-    engine = "openpyxl" if path.suffix.lower() == ".xlsx" else "xlrd"
-    return [str(sheet) for sheet in pd.ExcelFile(path, engine=engine).sheet_names]
+    return []
 
 def _is_blank_cell(value: object) -> bool:
     """Return True when an Excel cell should be treated as blank."""
-    if pd.isna(value):
+    if pd.isna(cast(Any, value)):
         return True
     return str(value).strip() == ""
 
@@ -49,7 +79,12 @@ def _settings_value(settings_manager: Any, section: str, key: str, default: Any)
     except Exception:
         return default
 
-def _read_excel_with_smart_headers(path: Path, sheet_name: Optional[str], engine: str, settings_manager: Any = None) -> pd.DataFrame:
+def _read_excel_with_smart_headers(
+    path: Path,
+    sheet_name: Optional[str],
+    engine: ExcelEngine,
+    settings_manager: Any = None,
+) -> pd.DataFrame:
     """
     Read Excel files with normal single-row headers or grouped/multi-row headers.
     This prevents Pandas-generated "Unnamed" columns from appearing in the GUI.
@@ -138,6 +173,7 @@ def load_data(filepath: str | Path, sheet_name: Optional[str] = None, settings_m
     if ext == ".xlsx":
         return _read_excel_with_smart_headers(path, sheet_name, engine="openpyxl", settings_manager=settings_manager)
     if ext == ".xls":
+        _xlrd_module()
         return _read_excel_with_smart_headers(path, sheet_name, engine="xlrd", settings_manager=settings_manager)
 
     raise ValueError("Unsupported file format. Please use CSV, XLSX, or XLS.")

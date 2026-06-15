@@ -21,6 +21,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QColorDialog,
     QDialog,
     QDialogButtonBox,
@@ -236,8 +237,10 @@ class LegendChannelStyleDialog(QDialog):
 class PlotWorkspace(QWidget):
     cursorPointsChanged = Signal()
     legendChannelStyleChanged = Signal(str, dict)
+    legendChannelVisibilityChanged = Signal(str, bool)
+    bestFitFormulasChanged = Signal()
     LEGEND_DEFAULT_WIDTH = 230
-    LEGEND_MAXIMUM_WIDTH = 320
+    LEGEND_MAXIMUM_WIDTH = 400
 
     def __init__(
         self,
@@ -256,6 +259,8 @@ class PlotWorkspace(QWidget):
         self._cursor_artists: list = []
         self._legend_display = LEGEND_DISPLAY_PANEL
         self._axis_tick_settings = self._normalise_axis_tick_settings({})
+        self._best_fit_settings: list[dict[str, object]] = []
+        self._best_fit_formula_rows: list[dict[str, object]] = []
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -268,6 +273,12 @@ class PlotWorkspace(QWidget):
             self.axis_tick_setting_texts,
             self.set_axis_tick_settings,
             self.apply_axis_tick_settings_to_current_plot,
+        )
+        self.canvas.toolbar.set_best_fit_controller(
+            self.available_best_fit_channels,
+            self.best_fit_settings,
+            self.set_best_fit_settings,
+            self.apply_best_fit_settings_to_current_plot,
         )
         self.legend_panel = self._build_legend_panel()
         self.plot_legend_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -304,15 +315,18 @@ class PlotWorkspace(QWidget):
         heading.setObjectName("PanelHeading")
         layout.addWidget(heading)
 
-        self.legend_table = QTableWidget(0, 2)
-        self.legend_table.setHorizontalHeaderLabels(["", "Series"])
+        self.legend_table = QTableWidget(0, 3)
+        self.legend_table.setHorizontalHeaderLabels(["", "Series", "Hide/Show"])
         self.legend_table.verticalHeader().setVisible(False)
         self.legend_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.legend_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.legend_table.cellClicked.connect(self._on_legend_cell_clicked)
-        self.legend_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        self.legend_table.horizontalHeader().resizeSection(0, 28)
-        self.legend_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header = self.legend_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        header.resizeSection(0, 30)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        header.resizeSection(2, 82)
         layout.addWidget(self.legend_table, stretch=1)
         return panel
 
@@ -328,6 +342,30 @@ class PlotWorkspace(QWidget):
 
     def set_axis_tick_settings(self, settings: dict[str, object]) -> None:
         self._axis_tick_settings = self._normalise_axis_tick_settings(settings)
+
+    def best_fit_settings(self) -> list[dict[str, object]]:
+        return [dict(setting) for setting in self._best_fit_settings]
+
+    def best_fit_formula_rows(self) -> list[dict[str, object]]:
+        return [dict(row) for row in self._best_fit_formula_rows]
+
+    def set_best_fit_settings(self, settings: object) -> None:
+        self._best_fit_settings = plot_render_service.normalise_best_fit_settings(settings)
+
+    def available_best_fit_channels(self) -> list[str]:
+        channels: list[str] = []
+        for source in self._best_fit_source_series():
+            channel = str(source.get("channel", "")).strip()
+            if channel and channel not in channels:
+                channels.append(channel)
+        return sorted(channels, key=natural_sort_key)
+
+    def apply_best_fit_settings_to_current_plot(self) -> None:
+        self._remove_best_fit_artists()
+        self._best_fit_formula_rows = []
+        self._draw_best_fit_lines(self._best_fit_source_series())
+        self._refresh_current_legend()
+        self.bestFitFormulasChanged.emit()
 
     def apply_axis_tick_settings_to_current_plot(self) -> None:
         axes = self.canvas.axes
@@ -409,12 +447,14 @@ class PlotWorkspace(QWidget):
     def clear_plot(self) -> OperationResult:
         self._last_plot_data = None
         self._last_x_col = ""
+        self._best_fit_formula_rows = []
         self._remove_cursor_artists()
         self._set_cursor_data(None)
         self.canvas.clear()
         self._update_legend_table([], [])
         self.legend_panel.setVisible(self._legend_display == LEGEND_DISPLAY_PANEL)
         self.canvas.draw()
+        self.bestFitFormulasChanged.emit()
         return OperationResult.success("Plot cleared.")
 
     @contextmanager
@@ -568,8 +608,50 @@ class PlotWorkspace(QWidget):
         except ValueError as exc:
             return OperationResult.failure(str(exc))
 
+        return self.render_plot_data(
+            data,
+            x_col,
+            title=title,
+            x_label=x_label,
+            y_label=y_label,
+            secondary_y_label=secondary_y_label,
+            axis_limits=axis_limits,
+            auto_fit_axes=auto_fit_axes,
+            limit_lines=limit_lines,
+            secondary_y=secondary_y,
+            plot_kind=plot_kind,
+            use_filter=use_filter,
+            cutoff=cutoff,
+            order=order,
+            channel_colours=channel_colours,
+            channel_styles=channel_styles,
+            axis_tick_settings=axis_tick_settings,
+        )
+
+    def render_plot_data(
+        self,
+        data,
+        x_col: str,
+        title: str = "Engineering Test Data",
+        x_label: str = "",
+        y_label: str = "",
+        secondary_y_label: str = "",
+        axis_limits: Optional[dict[str, Optional[float]]] = None,
+        auto_fit_axes: bool = True,
+        limit_lines: Optional[list[dict]] = None,
+        secondary_y: Optional[list[str]] = None,
+        plot_kind: str = "Line",
+        use_filter: bool = False,
+        cutoff: Optional[float] = None,
+        order: int = 4,
+        channel_colours: Optional[dict[str, str]] = None,
+        channel_styles: Optional[dict[str, dict[str, str]]] = None,
+        axis_tick_settings: Optional[dict[str, object]] = None,
+    ) -> OperationResult:
+
         secondary_set = set(secondary_y or [])
         self.canvas.clear()
+        self._best_fit_formula_rows = []
         axes = self.canvas.axes
         colours = self._colours()
         secondary_colours = self._secondary_colours(colours)
@@ -592,9 +674,11 @@ class PlotWorkspace(QWidget):
         line_width = self._line_width()
         series_colours = self._series_colours(series_items, channel_colours, colours, secondary_colours)
         plotted = 0
+        source_series: list[dict[str, Any]] = []
         for index, item in enumerate(series_items):
             target = secondary_axes if item.get("secondary") and secondary_axes is not None else axes
             item_plot_kind = str(item.get("plot_kind", plot_kind))
+            series_colour = series_colours[index]
             artist = self._plot_series(
                 target,
                 item["x"],
@@ -602,14 +686,28 @@ class PlotWorkspace(QWidget):
                 str(item.get("label", "")),
                 item_plot_kind,
                 line_width,
-                series_colours[index],
+                series_colour,
                 item,
             )
+            hidden = bool(item.get("hidden", False))
+            artist.set_visible(not hidden)
             self._set_legend_artist_metadata(artist, str(item.get("channel", "")), item_plot_kind, item)
+            if not hidden:
+                source_series.append(
+                    {
+                        "axes": target,
+                        "channel": str(item.get("channel", "")),
+                        "label": str(item.get("label", "")),
+                        "x": item["x"],
+                        "y": item["y"],
+                        "colour": series_colour or self._legend_colour(artist),
+                    }
+                )
             plotted += 1
         if plotted == 0:
             return OperationResult.failure("No numeric data was available for the selected columns.")
 
+        self._draw_best_fit_lines(source_series)
         self._draw_limit_lines(axes, limit_lines)
         axes.set_title(title.strip() or "Engineering Test Data")
         axes.set_xlabel(x_label.strip() or x_col)
@@ -627,7 +725,8 @@ class PlotWorkspace(QWidget):
         self._last_plot_data = data
         self._last_x_col = x_col
         self._set_cursor_data(data)
-        return OperationResult.success(f"Plotted {plotted} channel(s).")
+        self.bestFitFormulasChanged.emit()
+        return OperationResult.success(f"Plotted {plotted} channel(s).", payload={"plot_data": data})
 
     @staticmethod
     def _plot_series(
@@ -703,6 +802,8 @@ class PlotWorkspace(QWidget):
                 value = str(style.get(key, "")).strip()
                 if value:
                     styled[key] = value
+            if "hidden" in style:
+                styled["hidden"] = cls._style_bool(style.get("hidden"))
             styled["label_overridden"] = bool(style.get("label"))
             styled["plot_kind_overridden"] = bool(style.get("plot_kind"))
             styled_items.append(styled)
@@ -726,10 +827,18 @@ class PlotWorkspace(QWidget):
                         continue
                 if name in {"channel", "label", "colour", "plot_kind", *CURVE_STYLE_KEYS}:
                     style[name] = value
+            if "hidden" in raw_style:
+                style["hidden"] = "true" if cls._style_bool(raw_style.get("hidden")) else "false"
             channel_key = plot_render_service.normalise_channel_name(style.get("channel") or raw_key)
             if channel_key and style:
                 normalised[channel_key] = style
         return normalised
+
+    @staticmethod
+    def _style_bool(value: object) -> bool:
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().casefold() in {"1", "true", "yes", "on"}
 
     @staticmethod
     def _series_label_with_override(item: dict[str, Any], style: dict[str, str]) -> str:
@@ -814,6 +923,115 @@ class PlotWorkspace(QWidget):
     def _series_channel_key(item: dict[str, Any]) -> str:
         return plot_render_service.normalise_channel_name(item.get("channel", item.get("label", "")))
 
+    def _draw_best_fit_lines(self, source_series: list[dict[str, Any]]) -> None:
+        settings = plot_render_service.normalise_best_fit_settings(self._best_fit_settings)
+        if not settings:
+            return
+        source_by_channel = {
+            plot_render_service.normalise_channel_name(source.get("channel")): source
+            for source in source_series
+            if plot_render_service.normalise_channel_name(source.get("channel"))
+        }
+        for setting in settings:
+            channel = str(setting.get("channel", ""))
+            source = source_by_channel.get(plot_render_service.normalise_channel_name(channel))
+            if source is None:
+                continue
+            try:
+                order = int(cast(Any, setting.get("order", 1)))
+            except (TypeError, ValueError):
+                order = 1
+            fit = plot_render_service.polynomial_best_fit(source.get("x"), source.get("y"), order)
+            if fit is None:
+                continue
+            fit_type = str(setting.get("fit_type", "Linear"))
+            source_label = str(source.get("label") or channel)
+            label = self._best_fit_label(source_label, fit_type)
+            axes = source.get("axes") or self.canvas.axes
+            line = axes.plot(
+                fit["x"],
+                fit["y"],
+                linestyle="--",
+                linewidth=max(1.0, self._line_width() * 1.15),
+                color=source.get("colour") or EATON_DARK_BLUE,
+                label=label,
+            )[0]
+            setattr(line, "_tda_best_fit", True)
+            try:
+                line.set_gid(f"best-fit:{channel}")
+            except AttributeError:
+                pass
+            self._best_fit_formula_rows.append(
+                {
+                    "Channel": self._without_right_y_suffix(source_label),
+                    "Fit": fit_type,
+                    "Order": order,
+                    "Formula": fit.get("formula", ""),
+                }
+            )
+
+    @staticmethod
+    def _best_fit_label(source_label: str, fit_type: str) -> str:
+        label = PlotWorkspace._without_right_y_suffix(source_label)
+        return f"{label} {fit_type.lower()} fit"
+
+    def _remove_best_fit_artists(self) -> None:
+        for axes in list(self.canvas.figure.axes):
+            for line in list(axes.get_lines()):
+                if bool(getattr(line, "_tda_best_fit", False)):
+                    line.remove()
+
+    def _best_fit_source_series(self) -> list[dict[str, Any]]:
+        sources: list[dict[str, Any]] = []
+        for axes in list(self.canvas.figure.axes):
+            for line in axes.get_lines():
+                if bool(getattr(line, "_tda_best_fit", False)):
+                    continue
+                if bool(getattr(line, "_tda_hidden", False)):
+                    continue
+                channel = str(getattr(line, "_tda_channel", "")).strip()
+                if not channel:
+                    continue
+                sources.append(
+                    {
+                        "axes": axes,
+                        "channel": channel,
+                        "label": line.get_label(),
+                        "x": line.get_xdata(orig=False),
+                        "y": line.get_ydata(orig=False),
+                        "colour": self._legend_colour(line),
+                    }
+                )
+            for collection in axes.collections:
+                if bool(getattr(collection, "_tda_hidden", False)):
+                    continue
+                channel = str(getattr(collection, "_tda_channel", "")).strip()
+                if not channel:
+                    continue
+                offsets_getter = getattr(collection, "get_offsets", None)
+                if not callable(offsets_getter):
+                    continue
+                offsets = offsets_getter()
+                try:
+                    offset_values = list(cast(Any, offsets))
+                    if len(offset_values) == 0:
+                        continue
+                    x_values = [float(point[0]) for point in offset_values]
+                    y_values = [float(point[1]) for point in offset_values]
+                except (TypeError, ValueError, IndexError):
+                    continue
+                sources.append(
+                    {
+                        "axes": axes,
+                        "channel": channel,
+                        "label": collection.get_label(),
+                        "x": x_values,
+                        "y": y_values,
+                        "colour": self._legend_colour(collection),
+                    }
+                )
+        return sources
+
     @staticmethod
     def _manual_series_colour(item: dict[str, Any]) -> str:
         colour = item.get("colour", item.get("color"))
@@ -837,13 +1055,28 @@ class PlotWorkspace(QWidget):
             return str(colour).strip().lower()
 
     @classmethod
-    def _legend_handles_and_labels(cls, axes, secondary_axes):
-        handles, labels = axes.get_legend_handles_labels()
+    def _legend_handles_and_labels(cls, axes, secondary_axes, *, include_hidden: bool = True):
+        handles, labels = cls._artist_handles_and_labels(axes, include_hidden=include_hidden)
         if secondary_axes is not None:
-            extra_handles, extra_labels = secondary_axes.get_legend_handles_labels()
+            extra_handles, extra_labels = cls._artist_handles_and_labels(secondary_axes, include_hidden=include_hidden)
             handles += extra_handles
             labels += extra_labels
         return cls._sort_legend_handles_and_labels(handles, labels)
+
+    @staticmethod
+    def _artist_handles_and_labels(axes, *, include_hidden: bool) -> tuple[list, list[str]]:
+        handles = []
+        labels = []
+        for artist in [*axes.get_lines(), *axes.collections]:
+            if bool(getattr(artist, "_tda_hidden", False)) and not include_hidden:
+                continue
+            label_getter = getattr(artist, "get_label", None)
+            label = str(label_getter() if callable(label_getter) else "")
+            if not label or label.startswith("_"):
+                continue
+            handles.append(artist)
+            labels.append(label)
+        return handles, labels
 
     @staticmethod
     def _sort_legend_handles_and_labels(handles, labels):
@@ -879,6 +1112,8 @@ class PlotWorkspace(QWidget):
             self.legend_table.setItem(row, 0, swatch_item)
             self.legend_table.setCellWidget(row, 0, self._legend_swatch(self._legend_colour(handle)))
             self.legend_table.setItem(row, 1, text)
+            if metadata:
+                self.legend_table.setCellWidget(row, 2, self._legend_visibility_cell(metadata))
 
     @staticmethod
     def _set_legend_artist_metadata(artist, channel: str, plot_kind: str, style: dict[str, object]) -> None:
@@ -886,6 +1121,7 @@ class PlotWorkspace(QWidget):
         setattr(artist, "_tda_plot_kind", plot_kind)
         setattr(artist, "_tda_label_overridden", bool(style.get("label_overridden", False)))
         setattr(artist, "_tda_plot_kind_overridden", bool(style.get("plot_kind_overridden", False)))
+        setattr(artist, "_tda_hidden", bool(style.get("hidden", False)))
         for key in CURVE_STYLE_KEYS:
             if key in style:
                 setattr(artist, f"_tda_{key}", style[key])
@@ -905,6 +1141,7 @@ class PlotWorkspace(QWidget):
             "plot_kind": str(getattr(handle, "_tda_plot_kind", "Line")),
             "label_overridden": bool(getattr(handle, "_tda_label_overridden", False)),
             "plot_kind_overridden": bool(getattr(handle, "_tda_plot_kind_overridden", False)),
+            "hidden": bool(getattr(handle, "_tda_hidden", False)) or not bool(getattr(handle, "get_visible", lambda: True)()),
             **self._legend_curve_metadata(handle),
         }
 
@@ -932,6 +1169,24 @@ class PlotWorkspace(QWidget):
             metadata["marker_edge_colour"] = metadata["marker_edge_colour"] or self._first_colour_to_hex(edge_colours)
         return metadata
 
+    def _legend_visibility_cell(self, metadata: dict[str, object]) -> QWidget:
+        channel = str(metadata.get("channel", ""))
+        hidden = bool(metadata.get("hidden", False))
+        checkbox = QCheckBox()
+        checkbox.setObjectName("LegendVisibilityCheckBox")
+        checkbox.setChecked(not hidden)
+        checkbox.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        checkbox.setToolTip(("Show" if hidden else "Hide") + f" '{metadata.get('label', channel)}' on the plot.")
+        checkbox.toggled.connect(lambda checked, channel=channel: self.legendChannelVisibilityChanged.emit(channel, not checked))
+        cell = QWidget()
+        cell.setObjectName("LegendVisibilityCell")
+        layout = QHBoxLayout(cell)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addStretch(1)
+        layout.addWidget(checkbox, 0, Qt.AlignmentFlag.AlignCenter)
+        layout.addStretch(1)
+        return cell
+
     @staticmethod
     def _colour_to_hex(colour: object) -> str:
         try:
@@ -950,6 +1205,8 @@ class PlotWorkspace(QWidget):
         return ""
 
     def _on_legend_cell_clicked(self, row: int, _column: int) -> None:
+        if _column != 1:
+            return
         item = self.legend_table.item(row, 1)
         metadata = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
         if not isinstance(metadata, dict) or not metadata.get("channel"):
@@ -979,7 +1236,9 @@ class PlotWorkspace(QWidget):
         self.legend_panel.setVisible(self._legend_display == LEGEND_DISPLAY_PANEL)
         self._remove_canvas_legends()
         if self._legend_display == LEGEND_DISPLAY_GRAPH and handles:
-            axes.legend(handles, labels, loc="best", fontsize=8)
+            graph_handles, graph_labels = self._legend_handles_and_labels(axes, self._secondary_axes(), include_hidden=False)
+            if graph_handles:
+                axes.legend(graph_handles, graph_labels, loc="best", fontsize=8)
 
     def _refresh_current_legend(self) -> None:
         if self.canvas.axes not in self.canvas.figure.axes:

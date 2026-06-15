@@ -9,6 +9,8 @@ Run with:
 """
 from __future__ import annotations
 
+import subprocess
+import sys
 import unittest
 
 import numpy as np
@@ -264,6 +266,28 @@ class MathsChannelServiceTests(unittest.TestCase):
 
 
 class PlottingDataServiceTests(unittest.TestCase):
+    def test_prepare_plot_series_without_filter_does_not_import_scipy_signal(self) -> None:
+        script = """
+import sys
+
+import pandas as pd
+
+from test_data_analyser.domain import PlotData
+from test_data_analyser.services.plotting_data_service import prepare_plot_series
+
+data = PlotData(
+    x=pd.Series([0.0, 1.0, 2.0]),
+    y_map={"A": pd.Series([10.0, 11.0, 12.0])},
+    x_map={"A": pd.Series([0.0, 1.0, 2.0])},
+)
+result = prepare_plot_series(data, use_filter=False)
+if not result.ok:
+    raise SystemExit(result.message)
+raise SystemExit(1 if "scipy.signal" in sys.modules else 0)
+"""
+        completed = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
     def test_analysis_window_masks_values(self) -> None:
         x = pd.Series([0.0, 1.0, 2.0, 3.0])
         y_map = {"A": pd.Series([10.0, 11.0, 12.0, 13.0])}
@@ -284,6 +308,45 @@ class PlottingDataServiceTests(unittest.TestCase):
 
 
 class PlotRenderServiceTests(unittest.TestCase):
+    def test_polynomial_best_fit_returns_formula(self) -> None:
+        fit = plot_render_service.polynomial_best_fit([0.0, 1.0, 2.0], [1.0, 3.0, 5.0], 1, sample_count=3)
+
+        self.assertIsNotNone(fit)
+        assert fit is not None
+        self.assertEqual(len(fit["x"]), 3)
+        self.assertEqual(len(fit["y"]), 3)
+        self.assertIn("y =", fit["formula"])
+        self.assertIn("2x", fit["formula"])
+
+    def test_best_fit_settings_are_limited_and_deduplicated(self) -> None:
+        raw_settings = [
+            {"channel": "A", "fit_type": "Polynomial", "order": 99},
+            {"channel": " a ", "fit_type": "Linear", "order": 1},
+        ]
+        raw_settings.extend({"channel": f"C{index}", "fit_type": "Squared", "order": 2} for index in range(6))
+
+        settings = plot_render_service.normalise_best_fit_settings(
+            raw_settings
+        )
+
+        self.assertEqual(len(settings), 5)
+        self.assertEqual(settings[0]["channel"], "A")
+        self.assertEqual(settings[0]["order"], plot_render_service.MAX_BEST_FIT_ORDER)
+
+    def test_eaton_colours_do_not_import_matplotlib_pyplot(self) -> None:
+        script = """
+import sys
+
+from test_data_analyser.services.plot_render_service import resolve_plot_colours
+
+colours = resolve_plot_colours("eaton")
+if not colours:
+    raise SystemExit("Expected Eaton colours")
+raise SystemExit(1 if "matplotlib.pyplot" in sys.modules else 0)
+"""
+        completed = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
     def test_persistent_channel_colours_empty_for_single_plot(self) -> None:
         mapping = plot_render_service.persistent_channel_colour_map(
             [["Voltage A", "Current A", "Pressure A"]],

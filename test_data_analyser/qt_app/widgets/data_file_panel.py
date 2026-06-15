@@ -22,6 +22,7 @@ from ..adapters import qt_file_dialogs, qt_widget_helpers
 
 class DataFilePanel(QFrame):
     fileLoaded = Signal(list)  # column names
+    sheetChanged = Signal(list)  # column names
     statusMessage = Signal(str)
 
     def __init__(self, view_model: DataLoadingViewModel, parent: QWidget | None = None) -> None:
@@ -77,16 +78,20 @@ class DataFilePanel(QFrame):
 
     def _on_sheet_selected(self, _index: int) -> None:
         if self._current_path:
-            self._load(self._current_path, self.sheet_combo.currentText())
+            self._load(self._current_path, self.sheet_combo.currentText(), sheet_change=True)
 
-    def _load(self, path: str, sheet_name: str | None) -> None:
+    def _load(self, path: str, sheet_name: str | None, *, sheet_change: bool = False) -> None:
         result = self.vm.load_file(path, sheet_name)
         self.statusMessage.emit(result.message)
         if not result.ok:
             self.file_label.setText(f"Could not load file:\n{result.message}")
             return
         self.file_label.setText(str(self.vm.state.filepath))
-        self.fileLoaded.emit(result.payload or [])
+        columns = result.payload or []
+        if sheet_change:
+            self.sheetChanged.emit(columns)
+        else:
+            self.fileLoaded.emit(columns)
 
     def refresh_from_state(self) -> None:
         path = self.vm.state.filepath

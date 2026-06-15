@@ -69,8 +69,9 @@ sessions keep loading:
 - `engineering_notes.py` — `EngineeringNotes` (accepts the structured dict form
   and the historical free-text string form).
 - `limits.py` — `LimitPoint`, `LimitLine`.
-- `plot_profile.py` — `PlotProfile` (now including `axis_ticks` and the
-  `generated` flag) plus `plot_profile_from_dict`, `plot_profile_to_dict`, and
+- `plot_profile.py` — `PlotProfile` (now including `axis_ticks`,
+  per-channel best-fit line settings, and the `generated` flag) plus
+  `plot_profile_from_dict`, `plot_profile_to_dict`, and
   `normalise_plot_profile`.
 - `run_model.py` — `RunMetadata`, `ComparisonSettings`,
   `CalculatedChannelDefinition`.
@@ -193,13 +194,14 @@ The only package that imports PySide6.
   profile; switching tabs captures the current profile and applies the selected
   one. `MainWindowViewModel` owns the add/duplicate/rename/delete/select
   operations, and each profile round-trips its channels, labels, axis limits,
-  ticks, legend mode, per-channel legend overrides, and `generated` flag.
+  ticks, legend mode, per-channel legend overrides including visibility,
+  best-fit line settings, and `generated` flag.
 - **Figure Options and legend styling.** `LegendAwareNavigationToolbar` augments
-  the Matplotlib Figure Options dialog with legend, axis-tick, and
-  auto-label/auto-fit controls while leaving curve styling to the Qt Legend
-  panel's channel editor. The legend can be shown in the right-side Qt panel or
-  in-graph, and the export path temporarily draws the panel legend onto the axes
-  so saved PNGs match the on-screen plot.
+  the Matplotlib Figure Options dialog with legend, axis-tick,
+  auto-label/auto-fit, and best-fit controls while leaving curve styling to the
+  Qt Legend panel's channel editor and Hide / Show controls. The legend can be
+  shown in the right-side Qt panel or in-graph, and the export path temporarily
+  draws the panel legend onto the axes so saved PNGs match the on-screen plot.
 - **Signals.** Panels communicate with the main window via Qt signals
   (`fileLoaded`, `channelsChanged`, `limitsChanged`, `comparisonRequested`,
   `cursorPointsChanged`, `analysisWindowRequested`, `statusMessage`); the main

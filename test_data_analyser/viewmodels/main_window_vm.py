@@ -13,6 +13,8 @@ import re
 from difflib import SequenceMatcher
 from typing import Any, Optional, cast
 
+import pandas as pd
+
 from ..core.config import __version__
 from ..core.utils import classify_channel_name
 from ..domain import normalise_plot_profile
@@ -280,6 +282,10 @@ class MainWindowViewModel:
                 value = str(style.get(source, "")).strip()
                 if value:
                     normalised[target] = value
+        if "hidden" in style:
+            value = style.get("hidden")
+            hidden = value if isinstance(value, bool) else str(value).strip().casefold() in {"1", "true", "yes", "on"}
+            normalised["hidden"] = "true" if hidden else "false"
         return normalised
 
     def plot_selection_preserves_appearance(self, previous: dict[str, Any], current: dict[str, Any]) -> bool:
@@ -501,6 +507,7 @@ class MainWindowViewModel:
         axis_limits: dict[str, Any] | None = None,
         axis_ticks: dict[str, Any] | None = None,
         legend_settings: dict[str, Any] | None = None,
+        best_fit_lines: list[dict[str, Any]] | None = None,
         analysis_window: dict[str, Any] | None = None,
         filter_settings: dict[str, Any] | None = None,
         generated: bool = False,
@@ -533,6 +540,7 @@ class MainWindowViewModel:
                 "axis_limits": dict(axis_limits or {}),
                 "axis_ticks": dict(axis_ticks or {}),
                 "legend": merged_legend,
+                "best_fit_lines": [dict(line) for line in best_fit_lines or []],
                 "analysis_window": dict(analysis_window or {}),
                 "filter": dict(filter_settings or {}),
                 "generated": bool(generated),
@@ -592,14 +600,26 @@ class MainWindowViewModel:
 
         self.state.runs = []
         self.state.active_run_index = -1
+        loaded_frames: dict[tuple[str, str], pd.DataFrame] = {}
+        if source_file_path and isinstance(self.state.df, pd.DataFrame):
+            loaded_frames[self._dataframe_cache_key(source_file_path, session.sheet_name or None)] = self.state.df
         for run_meta in session.runs:
             if not run_meta.filepath:
                 continue
-            add_result = self.runs_comparison.add_run(run_meta.filepath, run_meta.sheet_name or None)
+            run_sheet = run_meta.sheet_name or None
+            cache_key = self._dataframe_cache_key(run_meta.filepath, run_sheet)
+            cached_frame = loaded_frames.get(cache_key)
+            if cached_frame is not None:
+                add_result = self.runs_comparison.add_loaded_run(run_meta.filepath, run_sheet, cached_frame)
+            else:
+                add_result = self.runs_comparison.add_run(run_meta.filepath, run_sheet)
             if not add_result.ok:
                 warnings.append(f"Run '{run_meta.name}': {add_result.message}")
                 continue
             run = self.state.runs[add_result.payload]
+            run_df = run.get("df")
+            if isinstance(run_df, pd.DataFrame):
+                loaded_frames[cache_key] = run_df
             run["name"] = run_meta.name or run["name"]
             run["enabled"] = run_meta.enabled
             if run_meta.colour:
@@ -618,3 +638,11 @@ class MainWindowViewModel:
         if warnings:
             message += f" {len(warnings)} item(s) could not be fully restored."
         return OperationResult.success(message, payload=selection, warnings=warnings)
+
+    @staticmethod
+    def _dataframe_cache_key(path: str | Path, sheet_name: str | None) -> tuple[str, str]:
+        try:
+            resolved_path = str(Path(path).expanduser().resolve())
+        except Exception:
+            resolved_path = str(path)
+        return resolved_path, str(sheet_name or "")

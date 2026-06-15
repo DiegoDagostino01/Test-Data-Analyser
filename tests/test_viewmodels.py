@@ -19,7 +19,9 @@ import pandas as pd
 
 from test_data_analyser.core.settings_manager import SettingsManager
 from test_data_analyser.domain import PlotData
-from test_data_analyser.services import plot_render_service
+from test_data_analyser.services import plot_render_service, session_service
+import test_data_analyser.viewmodels.data_loading_vm as data_loading_module
+import test_data_analyser.viewmodels.runs_comparison_vm as runs_comparison_module
 from test_data_analyser.viewmodels import (
     AppState,
     CursorCompareViewModel,
@@ -101,6 +103,16 @@ class DataLoadingViewModelTests(unittest.TestCase):
             csv_path = Path(tmp) / "data.csv"
             csv_path.write_text("a,b\n1,2\n", encoding="utf-8")
             self.assertEqual(vm.get_sheets(csv_path), [])
+
+    def test_get_sheets_returns_xlsx_sheet_names(self) -> None:
+        vm = DataLoadingViewModel(AppState())
+        with tempfile.TemporaryDirectory() as tmp:
+            xlsx_path = Path(tmp) / "data.xlsx"
+            with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
+                pd.DataFrame({"A": [1]}).to_excel(writer, sheet_name="First", index=False)
+                pd.DataFrame({"B": [2]}).to_excel(writer, sheet_name="Second", index=False)
+
+            self.assertEqual(vm.get_sheets(xlsx_path), ["First", "Second"])
 
     def test_suggested_x_column(self) -> None:
         vm = DataLoadingViewModel(AppState())
@@ -667,6 +679,30 @@ class MainWindowViewModelTests(unittest.TestCase):
         self.assertEqual(vm.state.plot_profiles[0]["legend"]["display_mode"], "graph")
         self.assertEqual(vm.state.plot_profiles[0]["legend"]["channel_overrides"][key]["colour"], "#123456")
 
+    def test_legend_hidden_override_preserves_existing_style(self) -> None:
+        vm = MainWindowViewModel()
+        key = plot_render_service.normalise_channel_name("Motor Voltage")
+        vm.state.plot_profiles = [
+            {
+                "name": "Plot 1",
+                "x_column": "Time",
+                "y_columns": ["Motor Voltage"],
+                "legend": {
+                    "channel_overrides": {
+                        key: {"channel": "Motor Voltage", "colour": "#123456", "line_style": "--"}
+                    }
+                },
+            }
+        ]
+
+        result = vm.update_active_legend_channel_override("Motor Voltage", {"hidden": True})
+
+        self.assertTrue(result.ok, result.message)
+        style = vm.state.plot_profiles[0]["legend"]["channel_overrides"][key]
+        self.assertEqual(style["colour"], "#123456")
+        self.assertEqual(style["line_style"], "--")
+        self.assertEqual(style["hidden"], "true")
+
     def test_plot_selection_preserves_appearance_for_similar_channels_only(self) -> None:
         vm = MainWindowViewModel()
         vm.state.df = pd.DataFrame(
@@ -784,6 +820,7 @@ class MainWindowViewModelTests(unittest.TestCase):
                 "align_secondary_y_axis_grid": True,
             },
             legend_settings={"display_mode": "graph"},
+            best_fit_lines=[{"channel": "A", "fit_type": "Linear", "order": 1}],
             analysis_window={"start_x": "1", "end_x": "9"},
             filter_settings={"enabled": True, "cutoff_hz": "50", "order": "4"},
         )
@@ -800,6 +837,8 @@ class MainWindowViewModelTests(unittest.TestCase):
         self.assertEqual(profile["axis_ticks"]["x_major_tick"], "0.5")
         self.assertTrue(profile["axis_ticks"]["align_secondary_y_axis_grid"])
         self.assertEqual(profile["legend"]["display_mode"], "graph")
+        self.assertEqual(profile["best_fit_lines"][0]["channel"], "A")
+        self.assertEqual(profile["best_fit_lines"][0]["order"], 1)
         self.assertEqual(profile["analysis_window"]["start_x"], "1")
         self.assertTrue(profile["filter"]["enabled"])
         self.assertEqual(profile["engineering_notes"]["objective"], "Verify response")
@@ -854,6 +893,61 @@ class MainWindowViewModelTests(unittest.TestCase):
             self.assertEqual(target.state.engineering_notes["objective"], "Verify")
             self.assertEqual(len(target.state.runs), 1)
             self.assertIn("Sum", target.state.df.columns)
+
+    def test_restore_session_reuses_main_dataframe_for_matching_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_path = Path(tmp) / "data.xlsx"
+            data_path.write_text("placeholder", encoding="utf-8")
+            session_path = Path(tmp) / "s.json"
+            session_service.save_session_dict(
+                session_path,
+                {
+                    "version": "test",
+                    "file_path": str(data_path),
+                    "sheet_name": "Temperature",
+                    "runs": [
+                        {
+                            "name": "Main workbook run",
+                            "filepath": str(data_path),
+                            "sheet_name": "Temperature",
+                            "enabled": True,
+                            "colour": "#123456",
+                        }
+                    ],
+                    "active_plot_profile_index": 0,
+                    "plot_profiles": [{"name": "Plot 1", "x_column": "Time", "y_columns": ["Temp"]}],
+                    "calculated_channels": {},
+                },
+            )
+
+            loaded_frame = pd.DataFrame({"Time": [0.0, 1.0], "Temp": [20.0, 21.0]})
+            load_calls: list[tuple[str, str | None]] = []
+
+            def fake_main_load(path, sheet_name=None, settings_manager=None):
+                load_calls.append((str(path), sheet_name))
+                return loaded_frame
+
+            def fail_run_load(path, sheet_name=None, settings_manager=None):
+                raise AssertionError("matching run should reuse the main dataframe")
+
+            original_main_load = data_loading_module.load_data
+            original_run_load = runs_comparison_module.load_data
+            data_loading_module.load_data = fake_main_load
+            runs_comparison_module.load_data = fail_run_load
+            try:
+                target = MainWindowViewModel()
+                result = target.restore_session(session_path)
+            finally:
+                data_loading_module.load_data = original_main_load
+                runs_comparison_module.load_data = original_run_load
+
+            self.assertTrue(result.ok, result.message)
+            self.assertEqual(result.warnings, [])
+            self.assertEqual(load_calls, [(str(data_path), "Temperature")])
+            self.assertEqual(len(target.state.runs), 1)
+            self.assertEqual(target.state.runs[0]["name"], "Main workbook run")
+            self.assertEqual(target.state.runs[0]["colour"], "#123456")
+            self.assertEqual(list(target.state.runs[0]["df"]["Temp"]), [20.0, 21.0])
 
     def test_restore_missing_session_fails(self) -> None:
         self.assertFalse(MainWindowViewModel().restore_session("missing.json").ok)

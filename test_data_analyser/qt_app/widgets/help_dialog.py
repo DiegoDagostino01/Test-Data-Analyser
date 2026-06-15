@@ -59,7 +59,7 @@ HELP_PAGE_BODIES: dict[str, str] = {
         <h2>Step 3 - Generate Plot</h2>
         <p>Click <b>Generate Plot</b> to display the selected data.</p>
         <h2>Step 4 - Review Plot</h2>
-        <p>Use home, back, forward, pan, zoom, legend, and axis editing tools to inspect the data.</p>
+        <p>Use home, back, forward, pan, zoom, legend, axis editing, and best-fit tools to inspect the data.</p>
         <h2>Step 5 - Add Runs or Comparisons</h2>
         <p>Use the run-management tools to compare multiple data sets or repeated tests.</p>
         <h2>Step 6 - Analyse</h2>
@@ -72,11 +72,14 @@ HELP_PAGE_BODIES: dict[str, str] = {
     "File Ribbon": """
         <h2>Open Data</h2>
         <p>Loads a new test data file into the application. Load data before selecting plot channels.</p>
+        <p>For Excel workbooks, changing the <b>Sheet</b> reloads the data controls for the selected sheet while
+        preserving existing plot tabs, generated plot views, Requirements / Limits, and Engineering Notes.</p>
         <h2>Save Session</h2>
         <p>Saves the current working session so it can be restored later. Where supported, this preserves the
-        active setup, plot selections, notes, requirements, runs, and related state.</p>
+        active setup, plot selections, notes, requirements, runs, best-fit settings, and legend visibility.</p>
         <h2>Load Session</h2>
-        <p>Loads a previously saved session and restores the working context.</p>
+        <p>Loads a previously saved session and restores the working context. When the same workbook and sheet are
+        used by the main data and saved runs, the loaded data is reused during restore.</p>
         <h2>Export Data</h2>
         <p>Exports processed or selected data for use outside the application.</p>
         <div class="tip">Start with <b>Open Data</b>. Channel lists, plot generation, and most analysis tools depend
@@ -97,7 +100,7 @@ HELP_PAGE_BODIES: dict[str, str] = {
             <li>Selected primary Y-axis channels.</li>
             <li>Selected secondary Y-axis channels.</li>
             <li>Active and enabled runs.</li>
-            <li>Current axis and legend options.</li>
+            <li>Current axis, legend, and best-fit options.</li>
         </ul>
     """,
     "Analysis Ribbon": """
@@ -108,6 +111,8 @@ HELP_PAGE_BODIES: dict[str, str] = {
         <p>Shows the loaded raw data in table form for inspection, editing workflows, and export.</p>
         <h2>Maths Channels</h2>
         <p>Provides access to calculated or derived channels where supported by the current data and formulas.</p>
+        <h2>Best Fit Formulas</h2>
+        <p>Shows equations for generated best-fit lines from the active plot.</p>
         <h2>Cursor</h2>
         <p>Enables cursor-based inspection of plotted data where supported.</p>
         <div class="tip">Analysis tools are most useful after you have selected channels and generated a plot.</div>
@@ -186,10 +191,14 @@ HELP_PAGE_BODIES: dict[str, str] = {
         <h2>Zoom</h2>
         <p>Allows the user to zoom into a region.</p>
         <h2>Edit Axis</h2>
-        <p>Allows axis limits or labels to be adjusted where supported.</p>
+        <p>Allows axis limits, labels, legend placement, axis ticks, and best-fit lines to be adjusted where supported.</p>
+        <h2>Best Fits</h2>
+        <p>Use the <b>Best Fits</b> tab in <b>Edit Axis</b> after generating a plot. Select up to five plotted Y-axis
+        channels and choose a linear, squared, or polynomial fit. Polynomial fits allow the order to be selected.</p>
+        <p>Generated fit equations appear in <b>Analysis &gt; Best Fit Formulas</b>.</p>
         <h2>Legend Panel</h2>
-        <p>Shows plotted series and helps identify channels.</p>
-        <div class="tip">Combine zoom, pan, and axis editing to inspect local behaviour in the data.</div>
+        <p>Shows plotted series, supports channel style editing, and provides Hide / Show controls for plotted Y-axis channels.</p>
+        <div class="tip">Combine zoom, pan, axis editing, and best-fit lines to inspect local behaviour in the data.</div>
     """,
     "Exporting and Sessions": """
         <h2>Save Plot</h2>
@@ -197,7 +206,8 @@ HELP_PAGE_BODIES: dict[str, str] = {
         <h2>Export Data</h2>
         <p>Use this when you want data output for external analysis or reporting.</p>
         <h2>Save Session</h2>
-        <p>Use this when you want to preserve the current working state.</p>
+        <p>Use this when you want to preserve the current working state, including plot profiles, legend visibility,
+        best-fit settings, limits, notes, and runs.</p>
         <h2>Load Session</h2>
         <p>Use this when you want to continue from a previous working state.</p>
         <h2>Best practice</h2>
@@ -221,6 +231,8 @@ HELP_PAGE_BODIES: dict[str, str] = {
         <p>Use the secondary axis only for channels with different units or scales.</p>
         <h2>Legend is unclear</h2>
         <p>Enable run-name prefixes when comparing the same channels across multiple runs.</p>
+        <h2>Best-fit line is missing</h2>
+        <p>Confirm that the selected channel is currently plotted and has enough finite numeric X/Y values for the selected fit order.</p>
         <h2>Export does not show expected data</h2>
         <p>Confirm that the correct run, channels, and plot configuration are active before exporting.</p>
     """,
