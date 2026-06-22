@@ -45,6 +45,10 @@ stable channel IDs.
 - Added manual datasets to the session file: a manual session embeds its column
   registry and row values and reloads with no Excel file required, while Excel
   sessions persist the registry and reconcile channel IDs by name on reload.
+- Updated the in-app Help to document the renamed **Open Excel** command, the
+  new **Create Session** manual-session workflow, and full-dataset editing via
+  the Raw Data **Edit dataset** mode, including a new **Manual Sessions and
+  Dataset Editing** Help topic.
 
 **Compatibility**
 

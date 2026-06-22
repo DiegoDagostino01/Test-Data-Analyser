@@ -1672,7 +1672,7 @@ class HelpDialogTests(unittest.TestCase):
     def test_initial_page_selected(self) -> None:
         self.assertEqual(self.dialog.windowTitle(), "Test Data Analyser Help")
         self.assertFalse(self.dialog.isModal())
-        self.assertEqual(self.dialog.topic_list.count(), 13)
+        self.assertEqual(self.dialog.topic_list.count(), 14)
         self.assertEqual(self.dialog.topic_list.currentItem().text(), "Getting Started")
         self.assertIn("Normal workflow", self.dialog.content_browser.toPlainText())
 

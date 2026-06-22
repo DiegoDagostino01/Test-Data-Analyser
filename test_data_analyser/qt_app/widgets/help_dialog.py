@@ -33,7 +33,7 @@ HELP_PAGE_BODIES: dict[str, str] = {
         compare runs, review statistics, apply requirements, and prepare engineering notes.</p>
         <h2>Normal workflow</h2>
         <ol>
-            <li>Open a data file.</li>
+            <li>Open an Excel file, or create a blank manual session and enter data in the Raw Data tab.</li>
             <li>Choose the X-axis column.</li>
             <li>Select one or more Y-axis channels.</li>
             <li>Generate a plot.</li>
@@ -53,7 +53,8 @@ HELP_PAGE_BODIES: dict[str, str] = {
     """,
     "Typical Workflow": """
         <h2>Step 1 - Load Data</h2>
-        <p>Use <b>Open Data</b> to load a CSV or Excel test data file.</p>
+        <p>Use <b>Open Excel</b> to load a CSV or Excel test data file, or use <b>Create Session</b>
+        (<b>Ctrl+N</b>) to start a blank manual session and enter data in the Raw Data tab.</p>
         <h2>Step 2 - Select Axes</h2>
         <p>Choose the X-axis column, then select primary and/or secondary Y-axis channels.</p>
         <h2>Step 3 - Generate Plot</h2>
@@ -70,22 +71,52 @@ HELP_PAGE_BODIES: dict[str, str] = {
         <p>Use <b>Save Plot</b>, <b>Save Session</b>, <b>Load Session</b>, and <b>Export Data</b> as required.</p>
     """,
     "File Ribbon": """
-        <h2>Open Data</h2>
-        <p>Loads a new test data file into the application. Load data before selecting plot channels.</p>
+        <h2>Open Excel</h2>
+        <p>Loads a new CSV or Excel test data file into the application (shortcut <b>Ctrl+O</b>). Load data before
+        selecting plot channels.</p>
         <p>For Excel workbooks, changing the <b>Sheet</b> reloads the data controls for the selected sheet while
         preserving existing plot tabs, generated plot views, Requirements / Limits, and Engineering Notes.</p>
+        <h2>Create Session</h2>
+        <p>Starts a blank manual data session with no linked Excel file (shortcut <b>Ctrl+N</b>). The Raw Data tab
+        opens in <b>Edit dataset</b> mode so you can add columns and rows and type values directly. If the current
+        data has unsaved changes, you are asked to confirm before the new session replaces it. See the
+        <b>Manual Sessions and Dataset Editing</b> topic for the full workflow.</p>
         <h2>Save Session</h2>
         <p>Saves the current working session so it can be restored later. Where supported, this preserves the
         active setup, root data folder, plot selections, annotations, notes, requirements, runs, best-fit settings,
-        and legend visibility.</p>
+        and legend visibility. A manual session also embeds its data so it reloads without an Excel file.</p>
         <h2>Load Session</h2>
         <p>Loads a previously saved session, reloads the saved source data from disk, recalculates Maths Channels,
         and restores the working context. If a refreshed file no longer contains a saved plot channel, the load reports
         the missing reference without stopping the session restore.</p>
         <h2>Export Data</h2>
         <p>Exports processed or selected data for use outside the application.</p>
-        <div class="tip">Start with <b>Open Data</b>. Channel lists, plot generation, and most analysis tools depend
-        on a loaded data file.</div>
+        <div class="tip">Start with <b>Open Excel</b> or <b>Create Session</b>. Channel lists, plot generation, and
+        most analysis tools depend on having data loaded.</div>
+    """,
+    "Manual Sessions and Dataset Editing": """
+        <h2>Create a manual session</h2>
+        <p>Use <b>Create Session</b> on the File ribbon (or <b>Ctrl+N</b>) to start a blank session with no linked
+        Excel file. The Raw Data tab opens in <b>Edit dataset</b> mode, ready for you to build a dataset by hand.</p>
+        <h2>Edit dataset mode</h2>
+        <p>Tick <b>Edit dataset</b> on the Raw Data tab to edit the whole dataset. This works for both manual and
+        Excel sessions. In this mode you can:</p>
+        <ul>
+            <li>Use <b>Add Column</b>, <b>Rename Column</b>, and <b>Delete Column</b> to change the dataset structure.</li>
+            <li>Use <b>Add Row</b> and <b>Delete Row(s)</b> to add or remove data points.</li>
+            <li>Double-click a cell to edit its value.</li>
+        </ul>
+        <p>Edits affect the current session only and never change the original Excel file on disk.</p>
+        <h2>Channel IDs and renaming</h2>
+        <p>Every column keeps a stable internal channel ID, so renaming a column header does not break plots, Maths
+        Channels, limits, or saved sessions that already reference it. Column headers must be unique; a duplicate
+        name is rejected with a message.</p>
+        <h2>Numeric and text columns</h2>
+        <p>Columns are detected as numeric or text automatically. The plot X-axis and Y-axis selectors offer only
+        numeric-compatible channels, while text columns stay visible in the Raw Data table. If you delete a column
+        that a plot or Maths Channel still uses, the app warns you instead of failing.</p>
+        <div class="tip">Untick <b>Edit dataset</b> to return to the filtered read-only view, then select X/Y
+        channels and generate a plot as usual.</div>
     """,
     "Plot Ribbon": """
         <h2>Generate Plot</h2>
@@ -112,7 +143,9 @@ HELP_PAGE_BODIES: dict[str, str] = {
         <p>Displays summary statistics for selected channels, such as count, minimum, maximum, mean, and
         standard deviation where available.</p>
         <h2>Raw Data</h2>
-        <p>Shows the loaded raw data in table form for inspection, editing workflows, and export.</p>
+        <p>Shows the loaded data in table form for inspection and export. Tick <b>Edit dataset</b> to add, rename,
+        or delete columns and rows and edit cells for the current session; see the <b>Manual Sessions and Dataset
+        Editing</b> topic for details.</p>
         <h2>Maths Channels</h2>
         <p>Provides access to calculated or derived channels. Use the column dropdown and formula-builder buttons
         to insert valid formula text, then validate and save through the existing Maths Channel engine.</p>
@@ -145,7 +178,8 @@ HELP_PAGE_BODIES: dict[str, str] = {
     """,
     "Plot Controls": """
         <h2>X-axis column</h2>
-        <p>Selects the data column used for the horizontal axis.</p>
+        <p>Selects the data column used for the horizontal axis. Only numeric-compatible columns are offered here;
+        text columns are not listed but remain visible in the Raw Data table.</p>
         <h2>Channel group</h2>
         <p>Filters or groups available channels so selection is easier in large data files.</p>
         <h2>Primary Y-axis channels</h2>
@@ -212,7 +246,8 @@ HELP_PAGE_BODIES: dict[str, str] = {
         <p>Use this when you want data output for external analysis or reporting.</p>
         <h2>Save Session</h2>
         <p>Use this when you want to preserve the current working state, including plot profiles, legend visibility,
-        best-fit settings, limits, notes, root data folder, and runs.</p>
+        best-fit settings, limits, notes, root data folder, and runs. A manual session also embeds its data so it
+        reloads without an Excel file.</p>
         <h2>Load Session</h2>
         <p>Use this when you want to continue from a previous working state using the latest data from the saved source file.</p>
         <h2>Best practice</h2>
@@ -238,6 +273,11 @@ HELP_PAGE_BODIES: dict[str, str] = {
         <p>Enable run-name prefixes when comparing the same channels across multiple runs.</p>
         <h2>Best-fit line is missing</h2>
         <p>Confirm that the selected channel is currently plotted and has enough finite numeric X/Y values for the selected fit order.</p>
+        <h2>A channel is missing from the X/Y selectors</h2>
+        <p>Only numeric-compatible columns appear in the plot selectors. Check the column in the Raw Data tab and
+        correct any non-numeric values if it should be plottable.</p>
+        <h2>Duplicate column name rejected</h2>
+        <p>Column headers must be unique. Choose a different name when adding or renaming a column in Edit dataset mode.</p>
         <h2>Export does not show expected data</h2>
         <p>Confirm that the correct run, channels, and plot configuration are active before exporting.</p>
     """,
