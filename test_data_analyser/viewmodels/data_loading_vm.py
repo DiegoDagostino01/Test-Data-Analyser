@@ -12,6 +12,8 @@ from typing import Optional
 
 from ..core.config import DOMAIN_CONFIG
 from ..core.data_io import get_excel_sheets, load_data
+from ..domain import SOURCE_EXCEL
+from ..services import dataset_service
 from ..services.results import OperationResult
 from ..core.utils import infer_column_by_keywords
 from .app_state import AppState
@@ -42,9 +44,18 @@ class DataLoadingViewModel:
         except Exception as exc:
             return OperationResult.failure(str(exc))
 
+        new_root_file_directory = str(file_path.resolve().parent)
+        previous_path = self.state.filepath
+        previous_root_file_directory = self.state.root_file_directory
+
         self.state.df = df
         self.state.filepath = file_path
+        self.state.root_file_directory = new_root_file_directory
+        if previous_path != file_path or previous_root_file_directory != new_root_file_directory:
+            self.state.is_dirty = True
         self.state.sheet_name = sheet_name or ""
+        self.state.data_source_type = SOURCE_EXCEL
+        self.state.channel_registry = dataset_service.build_registry_for_dataframe(df)
         columns = [str(column) for column in df.columns]
         return OperationResult.success(
             f"Loaded {len(df):,} rows and {len(columns):,} columns.",

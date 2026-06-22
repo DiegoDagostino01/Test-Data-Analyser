@@ -14,11 +14,13 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -27,26 +29,43 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ...viewmodels.dataset_vm import DatasetViewModel
 from ...viewmodels.raw_data_vm import RawDataViewModel
 from ..adapters import qt_file_dialogs, qt_message_service
+from ..adapters.editable_dataset_model import EditableDatasetModel
 from ..adapters.editable_raw_data_model import EditableRawDataTableModel
 
 SelectionProvider = Callable[[], tuple[str, list[str], Optional[float], Optional[float]]]
 
 
 class RawDataPanel(QWidget):
-    def __init__(self, view_model: RawDataViewModel, parent: QWidget | None = None) -> None:
+    datasetChanged = Signal()
+
+    def __init__(
+        self,
+        view_model: RawDataViewModel,
+        dataset_view_model: DatasetViewModel,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.vm = view_model
+        self.dataset_vm = dataset_view_model
         self._selection_provider: Optional[SelectionProvider] = None
+        self._edit_mode = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.addLayout(self._build_controls())
+        layout.addLayout(self._build_structural_toolbar())
 
         self.model = EditableRawDataTableModel(self.vm.coerce_edit_value)
         self.model.cellEdited.connect(self._on_cell_edited)
         self.model.editFailed.connect(self._on_edit_failed)
+
+        self.dataset_model = EditableDatasetModel(self.dataset_vm)
+        self.dataset_model.cellEdited.connect(self._on_dataset_cell_edited)
+        self.dataset_model.cellWarning.connect(self._on_dataset_cell_warning)
+        self.dataset_model.editFailed.connect(self._on_edit_failed)
 
         self.table = QTableView()
         self.table.setModel(self.model)
@@ -63,13 +82,23 @@ class RawDataPanel(QWidget):
         layout.addWidget(self.status_label)
 
         self._update_undo_button()
+        self._update_structural_toolbar_visibility()
 
     # ------------------------------------------------------------------
     # Construction
     # ------------------------------------------------------------------
     def _build_controls(self) -> QHBoxLayout:
         controls = QHBoxLayout()
-        controls.addWidget(QLabel("Rows to display:"))
+        self.edit_mode_check = QCheckBox("Edit dataset")
+        self.edit_mode_check.setToolTip(
+            "Edit the full dataset: add, rename or delete columns and rows. "
+            "Changes affect the current session only."
+        )
+        self.edit_mode_check.toggled.connect(self._on_edit_mode_toggled)
+        controls.addWidget(self.edit_mode_check)
+
+        self.row_limit_label = QLabel("Rows to display:")
+        controls.addWidget(self.row_limit_label)
         self.row_limit_edit = QLineEdit("All")
         self.row_limit_edit.setFixedWidth(80)
         self.row_limit_edit.returnPressed.connect(self.refresh)
@@ -99,6 +128,23 @@ class RawDataPanel(QWidget):
         self.export_button.clicked.connect(self._export)
         controls.addWidget(self.export_button)
         return controls
+
+    def _build_structural_toolbar(self) -> QHBoxLayout:
+        toolbar = QHBoxLayout()
+        self._structural_buttons: list[QPushButton] = []
+        for text, handler in [
+            ("Add Column", self._add_column),
+            ("Rename Column", self._rename_column),
+            ("Delete Column", self._delete_column),
+            ("Add Row", self._add_row),
+            ("Delete Row(s)", self._delete_rows),
+        ]:
+            button = QPushButton(text)
+            button.clicked.connect(handler)
+            toolbar.addWidget(button)
+            self._structural_buttons.append(button)
+        toolbar.addStretch(1)
+        return toolbar
 
     # ------------------------------------------------------------------
     # Selection wiring
@@ -148,6 +194,137 @@ class RawDataPanel(QWidget):
 
     def export_selected_data(self) -> None:
         self._export()
+
+    # ------------------------------------------------------------------
+    # Full-dataset editing (Edit dataset mode)
+    # ------------------------------------------------------------------
+    def enter_edit_mode(self) -> None:
+        """Switch the panel into full-dataset edit mode (used for manual sessions)."""
+        if self.edit_mode_check.isChecked():
+            self._apply_edit_mode(True)
+        else:
+            self.edit_mode_check.setChecked(True)
+
+    def refresh_dataset(self) -> None:
+        self.dataset_model.refresh()
+        df = self.dataset_vm.state.df
+        rows = len(df) if df is not None else 0
+        columns = len(self.dataset_vm.editable_columns())
+        self.status_label.setText(
+            f"Editing dataset: {columns} column(s) × {rows} row(s). "
+            "Changes affect the current session only."
+        )
+
+    def _on_edit_mode_toggled(self, enabled: bool) -> None:
+        self._apply_edit_mode(enabled)
+
+    def _apply_edit_mode(self, enabled: bool) -> None:
+        self._edit_mode = enabled
+        if enabled:
+            self.table.setModel(self.dataset_model)
+            self.refresh_dataset()
+        else:
+            self.table.setModel(self.model)
+            self.refresh()
+        # Filter/inspection controls only apply to the read view; disabling them
+        # in edit mode keeps row indices aligned 1:1 for structural edits.
+        for widget in (
+            self.row_limit_label,
+            self.row_limit_edit,
+            self.apply_window_check,
+            self.drop_blank_check,
+            self.refresh_button,
+            self.undo_button,
+        ):
+            widget.setEnabled(not enabled)
+        self._update_structural_toolbar_visibility()
+        if not enabled:
+            self._update_undo_button()
+
+    def _update_structural_toolbar_visibility(self) -> None:
+        for button in getattr(self, "_structural_buttons", []):
+            button.setVisible(self._edit_mode)
+
+    def _selected_column_id(self) -> Optional[str]:
+        index = self.table.currentIndex()
+        if index.isValid():
+            channel_id = self.dataset_model.channel_id_at(index.column())
+            if channel_id:
+                return channel_id
+        columns = self.dataset_vm.editable_columns()
+        return columns[0]["id"] if columns else None
+
+    def _after_structural_change(self, result) -> None:
+        self.refresh_dataset()
+        for warning in result.warnings:
+            qt_message_service.warning(self, "Edit Dataset", warning)
+        self.datasetChanged.emit()
+
+    def _add_column(self) -> None:
+        name, ok = QInputDialog.getText(self, "Add Column", "New column name:")
+        if not ok or not name.strip():
+            return
+        result = self.dataset_vm.add_column(name.strip())
+        if not result.ok:
+            qt_message_service.warning(self, "Add Column", result.message)
+            return
+        self._after_structural_change(result)
+
+    def _rename_column(self) -> None:
+        channel_id = self._selected_column_id()
+        if channel_id is None:
+            qt_message_service.warning(self, "Rename Column", "Add a column first.")
+            return
+        current = self.dataset_vm.state.name_for_channel_id(channel_id) or ""
+        name, ok = QInputDialog.getText(self, "Rename Column", "New column name:", text=current)
+        if not ok or not name.strip():
+            return
+        result = self.dataset_vm.rename_column(channel_id, name.strip())
+        if not result.ok:
+            qt_message_service.warning(self, "Rename Column", result.message)
+            return
+        self._after_structural_change(result)
+
+    def _delete_column(self) -> None:
+        channel_id = self._selected_column_id()
+        if channel_id is None:
+            qt_message_service.warning(self, "Delete Column", "There is no column to delete.")
+            return
+        name = self.dataset_vm.state.name_for_channel_id(channel_id) or ""
+        if not qt_message_service.confirm(self, "Delete Column", f'Delete column "{name}"?'):
+            return
+        result = self.dataset_vm.delete_column(channel_id)
+        if not result.ok:
+            qt_message_service.warning(self, "Delete Column", result.message)
+            return
+        self._after_structural_change(result)
+
+    def _add_row(self) -> None:
+        result = self.dataset_vm.add_row()
+        if not result.ok:
+            qt_message_service.warning(self, "Add Row", result.message)
+            return
+        self._after_structural_change(result)
+
+    def _delete_rows(self) -> None:
+        selection_model = self.table.selectionModel()
+        rows = sorted({index.row() for index in selection_model.selectedIndexes()}) if selection_model else []
+        if not rows:
+            qt_message_service.warning(self, "Delete Row(s)", "Select one or more rows to delete.")
+            return
+        if not qt_message_service.confirm(self, "Delete Row(s)", f"Delete {len(rows)} selected row(s)?"):
+            return
+        result = self.dataset_vm.delete_rows(rows)
+        if not result.ok:
+            qt_message_service.warning(self, "Delete Row(s)", result.message)
+            return
+        self._after_structural_change(result)
+
+    def _on_dataset_cell_edited(self) -> None:
+        self.datasetChanged.emit()
+
+    def _on_dataset_cell_warning(self, message: str) -> None:
+        self.status_label.setText(message)
 
     # ------------------------------------------------------------------
     # Editing

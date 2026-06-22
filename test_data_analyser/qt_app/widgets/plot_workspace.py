@@ -16,9 +16,10 @@ from typing import Any, Optional, cast
 from cycler import cycler
 from matplotlib.backends.qt_editor import figureoptions
 from matplotlib.colors import to_hex
+from matplotlib.patches import FancyArrowPatch, Rectangle
 from matplotlib.ticker import MultipleLocator
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -30,8 +31,10 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
+    QMenu,
     QPushButton,
     QSplitter,
     QTableWidget,
@@ -42,6 +45,7 @@ from PySide6.QtWidgets import (
 
 from ...core.config import EATON_DARK_BLUE
 from ...core.utils import natural_sort_key
+from ...domain.annotations import normalise_annotations
 from ...services import plot_render_service
 from ...services.results import OperationResult
 from ...viewmodels.cursor_compare_vm import CursorCompareViewModel
@@ -64,6 +68,19 @@ CURVE_STYLE_KEYS = {
 LINE_STYLE_CHOICES = tuple(figureoptions.LINESTYLES.items())
 DRAW_STYLE_CHOICES = tuple(figureoptions.DRAWSTYLES.items())
 MARKER_STYLE_CHOICES = (("none", "None"), *tuple(figureoptions.MARKERS.items()))
+
+ANNOTATION_SELECT = "select"
+ANNOTATION_TEXT = "text"
+ANNOTATION_ARROW = "arrow"
+ANNOTATION_BOX = "box"
+ANNOTATION_TOOL_LABELS = {
+    ANNOTATION_SELECT: "Select",
+    ANNOTATION_TEXT: "Text",
+    ANNOTATION_ARROW: "Arrow",
+    ANNOTATION_BOX: "Box",
+}
+ANNOTATION_HANDLE_SIZE = 42
+ANNOTATION_PICK_TOLERANCE = 8
 
 
 class LegendChannelStyleDialog(QDialog):
@@ -236,6 +253,7 @@ class LegendChannelStyleDialog(QDialog):
 
 class PlotWorkspace(QWidget):
     cursorPointsChanged = Signal()
+    annotationsChanged = Signal()
     legendChannelStyleChanged = Signal(str, dict)
     legendChannelVisibilityChanged = Signal(str, bool)
     bestFitFormulasChanged = Signal()
@@ -261,10 +279,18 @@ class PlotWorkspace(QWidget):
         self._axis_tick_settings = self._normalise_axis_tick_settings({})
         self._best_fit_settings: list[dict[str, object]] = []
         self._best_fit_formula_rows: list[dict[str, object]] = []
+        self._annotations: list[dict[str, object]] = []
+        self._annotation_artists: dict[str, list[Any]] = {}
+        self._selected_annotation_id = ""
+        self._annotation_tool = ANNOTATION_SELECT
+        self._annotation_drag: dict[str, Any] | None = None
+        self._annotation_id_counter = 1
+        self._annotation_buttons: dict[str, QPushButton] = {}
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.canvas = MatplotlibCanvas(self)
+        self._install_annotation_toolbar_controls()
         self.apply_theme()
         self.canvas.toolbar.set_legend_display_controller(self.legend_display, self.set_legend_display)
         self.canvas.toolbar.set_export_preparer(self._legend_export_context)
@@ -290,10 +316,45 @@ class PlotWorkspace(QWidget):
         self.plot_legend_splitter.setStretchFactor(0, 1)
         self.plot_legend_splitter.setStretchFactor(1, 0)
         self.plot_legend_splitter.setSizes([900, self.LEGEND_DEFAULT_WIDTH])
-        layout.addWidget(self.plot_legend_splitter)
+        layout.addWidget(self.plot_legend_splitter, stretch=1)
 
         self.canvas.canvas.mpl_connect("button_press_event", self._on_canvas_click)
+        self.canvas.canvas.mpl_connect("motion_notify_event", self._on_canvas_motion)
+        self.canvas.canvas.mpl_connect("button_release_event", self._on_canvas_release)
         self.canvas.canvas.mpl_connect("key_press_event", self._on_canvas_key)
+
+    def _install_annotation_toolbar_controls(self) -> None:
+        toolbar = self.canvas.toolbar
+        before_action = getattr(toolbar, "edit_axis_action", None)
+        if before_action is None:
+            toolbar.addSeparator()
+        for tool, tooltip in (
+            (ANNOTATION_SELECT, "Select, move, or resize plot annotations."),
+            (ANNOTATION_TEXT, "Add a text box annotation."),
+            (ANNOTATION_ARROW, "Drag to add an arrow annotation."),
+            (ANNOTATION_BOX, "Drag to add a rectangle annotation."),
+        ):
+            button = QPushButton(ANNOTATION_TOOL_LABELS[tool])
+            button.setCheckable(True)
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            button.setToolTip(tooltip)
+            button.clicked.connect(lambda _checked=False, tool=tool: self.set_annotation_tool(tool))
+            self._annotation_buttons[tool] = button
+            if before_action is not None:
+                toolbar.insertWidget(before_action, button)
+            else:
+                toolbar.addWidget(button)
+        self.delete_annotation_button = QPushButton("Delete")
+        self.delete_annotation_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.delete_annotation_button.setToolTip("Delete the selected annotation.")
+        self.delete_annotation_button.clicked.connect(self.delete_selected_annotation)
+        if before_action is not None:
+            toolbar.insertWidget(before_action, self.delete_annotation_button)
+            toolbar.insertSeparator(before_action)
+        else:
+            toolbar.addWidget(self.delete_annotation_button)
+            toolbar.addSeparator()
+        self.set_annotation_tool(ANNOTATION_SELECT)
 
     def apply_theme(self, theme_name: str | None = None) -> None:
         self.canvas.apply_theme(theme_name or self._theme_name())
@@ -303,6 +364,666 @@ class PlotWorkspace(QWidget):
         if callable(resolver):
             return str(resolver())
         return "light"
+
+    # ------------------------------------------------------------------
+    # Annotation state / interaction
+    # ------------------------------------------------------------------
+    def set_annotation_tool(self, tool: str) -> None:
+        self._annotation_tool = tool if tool in ANNOTATION_TOOL_LABELS else ANNOTATION_SELECT
+        for name, button in self._annotation_buttons.items():
+            button.setChecked(name == self._annotation_tool)
+
+    def set_annotations(self, annotations: object) -> None:
+        self._annotations = normalise_annotations(annotations)
+        self._annotation_id_counter = max(self._annotation_id_counter, len(self._annotations) + 1)
+        if self._selected_annotation_id and self._annotation_by_id(self._selected_annotation_id) is None:
+            self._selected_annotation_id = ""
+        self._redraw_annotations()
+
+    def current_annotations(self) -> list[dict[str, object]]:
+        return normalise_annotations(self._annotations)
+
+    def selected_annotation_id(self) -> str:
+        return self._selected_annotation_id
+
+    def delete_selected_annotation(self) -> None:
+        if not self._selected_annotation_id:
+            return
+        self._delete_annotation(self._selected_annotation_id)
+
+    def edit_selected_annotation(self) -> None:
+        annotation = self._annotation_by_id(self._selected_annotation_id)
+        if annotation is None or annotation.get("type") != ANNOTATION_TEXT:
+            return
+        text, ok = QInputDialog.getText(
+            self,
+            "Edit Text Annotation",
+            "Text:",
+            text=str(annotation.get("text", "")),
+        )
+        if not ok:
+            return
+        text = text.strip()
+        if not text:
+            return
+        annotation["text"] = text
+        self._annotations_changed()
+
+    def _on_canvas_click(self, event) -> None:
+        if self._handle_annotation_button_press(event):
+            return
+        if not self._point_compare or self._cursor_vm is None:
+            return
+        if event.inaxes is None or event.xdata is None or event.button != 1:
+            return
+        if self._cursor_vm.lock_at(event.xdata):
+            point = self._cursor_vm.points[-1]
+            marker = self.canvas.axes.axvline(
+                point["x"], color=EATON_DARK_BLUE, linestyle="--", linewidth=1.0, alpha=0.75
+            )
+            self._cursor_artists.append(marker)
+            self.canvas.canvas.draw_idle()
+            self.cursorPointsChanged.emit()
+
+    def _handle_annotation_button_press(self, event) -> bool:
+        if event.button == 3:
+            self._show_annotation_context_menu(event)
+            return True
+        if event.button != 1:
+            return False
+        if self._annotation_tool == ANNOTATION_TEXT:
+            if self._valid_annotation_event(event):
+                self._add_text_annotation(event)
+                return True
+            return False
+        if self._annotation_tool in {ANNOTATION_ARROW, ANNOTATION_BOX}:
+            if self._valid_annotation_event(event):
+                self._annotation_drag = {
+                    "mode": f"new_{self._annotation_tool}",
+                    "axis": self._axis_name_for_event(event),
+                    "axes": event.inaxes,
+                    "start": (float(event.xdata), float(event.ydata)),
+                    "pixel_start": (float(event.x), float(event.y)),
+                }
+                return True
+            return False
+        handle_hit = self._hit_annotation_handle(event)
+        if handle_hit is not None:
+            annotation_id, handle = handle_hit
+            self._select_annotation(annotation_id)
+            self._start_annotation_drag(event, annotation_id, handle)
+            return True
+        annotation_id = self._hit_annotation(event)
+        if annotation_id:
+            self._select_annotation(annotation_id)
+            if bool(getattr(event, "dblclick", False)):
+                self.edit_selected_annotation()
+            else:
+                self._start_annotation_drag(event, annotation_id, "move")
+            return True
+        return False
+
+    def _on_canvas_motion(self, event) -> None:
+        drag = self._annotation_drag
+        if not drag or str(drag.get("mode", "")).startswith("new_"):
+            return
+        axes = drag.get("axes")
+        if axes is None:
+            return
+        current = self._event_data_for_axes(event, axes)
+        start = drag.get("start")
+        original = drag.get("original")
+        if current is None or not isinstance(start, tuple) or not isinstance(original, dict):
+            return
+        dx = float(current[0]) - float(start[0])
+        dy = float(current[1]) - float(start[1])
+        annotation = self._annotation_by_id(str(drag.get("id", "")))
+        if annotation is None:
+            return
+        self._apply_annotation_drag(annotation, original, str(drag.get("mode", "move")), dx, dy, current)
+        self._redraw_annotations()
+
+    def _on_canvas_release(self, event) -> None:
+        drag = self._annotation_drag
+        if not drag:
+            return
+        self._annotation_drag = None
+        mode = str(drag.get("mode", ""))
+        if mode in {"new_arrow", "new_box"}:
+            axes = drag.get("axes")
+            current = self._event_data_for_axes(event, axes) if axes is not None else None
+            start = drag.get("start")
+            if current is None or not isinstance(start, tuple):
+                return
+            if self._drag_distance_too_small(drag, event):
+                return
+            if mode == "new_arrow":
+                self._append_annotation(
+                    {
+                        "id": self._next_annotation_id(),
+                        "type": ANNOTATION_ARROW,
+                        "axis": str(drag.get("axis", "primary")),
+                        "start_x": float(start[0]),
+                        "start_y": float(start[1]),
+                        "end_x": float(current[0]),
+                        "end_y": float(current[1]),
+                    }
+                )
+            else:
+                self._append_annotation(
+                    {
+                        "id": self._next_annotation_id(),
+                        "type": ANNOTATION_BOX,
+                        "axis": str(drag.get("axis", "primary")),
+                        "x_min": float(start[0]),
+                        "x_max": float(current[0]),
+                        "y_min": float(start[1]),
+                        "y_max": float(current[1]),
+                    }
+                )
+            self.set_annotation_tool(ANNOTATION_SELECT)
+            return
+        self._annotations = normalise_annotations(self._annotations)
+        self._annotations_changed()
+
+    def _on_canvas_key(self, event) -> None:
+        if event.key in {"delete", "backspace"} and self._selected_annotation_id:
+            self.delete_selected_annotation()
+            return
+        if event.key == "escape" and self._selected_annotation_id:
+            self._select_annotation("")
+            return
+        if event.key == "escape":
+            self.clear_cursor_markers()
+            self.cursorPointsChanged.emit()
+
+    def _valid_annotation_event(self, event) -> bool:
+        return event.inaxes in self.canvas.figure.axes and event.xdata is not None and event.ydata is not None
+
+    def _add_text_annotation(self, event, text: str | None = None) -> None:
+        if text is None:
+            text, ok = QInputDialog.getText(self, "Add Text Annotation", "Text:")
+            if not ok:
+                return
+        text = str(text).strip()
+        if not text:
+            return
+        self._append_annotation(
+            {
+                "id": self._next_annotation_id(),
+                "type": ANNOTATION_TEXT,
+                "axis": self._axis_name_for_event(event),
+                "text": text,
+                "x": float(event.xdata),
+                "y": float(event.ydata),
+                "offset_x": 8.0,
+                "offset_y": -8.0,
+            }
+        )
+        self.set_annotation_tool(ANNOTATION_SELECT)
+
+    def _append_annotation(self, annotation: dict[str, object]) -> None:
+        normalised = normalise_annotations([*self._annotations, annotation])
+        if len(normalised) == len(self._annotations):
+            return
+        self._annotations = normalised
+        self._selected_annotation_id = str(normalised[-1].get("id", ""))
+        self._annotations_changed()
+
+    def _delete_annotation(self, annotation_id: str) -> None:
+        original_count = len(self._annotations)
+        self._annotations = [annotation for annotation in self._annotations if str(annotation.get("id", "")) != annotation_id]
+        if len(self._annotations) == original_count:
+            return
+        self._selected_annotation_id = ""
+        self._annotations_changed()
+
+    def _annotations_changed(self) -> None:
+        self._redraw_annotations()
+        self.annotationsChanged.emit()
+
+    def _select_annotation(self, annotation_id: str) -> None:
+        self._selected_annotation_id = annotation_id if self._annotation_by_id(annotation_id) is not None else ""
+        self._redraw_annotations()
+
+    def _annotation_by_id(self, annotation_id: str) -> dict[str, object] | None:
+        if not annotation_id:
+            return None
+        for annotation in self._annotations:
+            if str(annotation.get("id", "")) == annotation_id:
+                return annotation
+        return None
+
+    def _next_annotation_id(self) -> str:
+        existing = {str(annotation.get("id", "")) for annotation in self._annotations}
+        while True:
+            annotation_id = f"ann_{self._annotation_id_counter:03d}"
+            self._annotation_id_counter += 1
+            if annotation_id not in existing:
+                return annotation_id
+
+    def _axis_name_for_event(self, event) -> str:
+        return "secondary" if event.inaxes is self._secondary_axes() else "primary"
+
+    def _target_axes_for_annotation(self, annotation: dict[str, object]):
+        if annotation.get("axis") == "secondary":
+            secondary = self._secondary_axes()
+            if secondary is not None:
+                return secondary
+        return self.canvas.axes
+
+    def _event_data_for_axes(self, event, axes) -> tuple[float, float] | None:
+        event_x = getattr(event, "x", None)
+        event_y = getattr(event, "y", None)
+        if event_x is None or event_y is None:
+            return None
+        try:
+            if event.inaxes is axes and event.xdata is not None and event.ydata is not None:
+                return float(event.xdata), float(event.ydata)
+            x_value, y_value = axes.transData.inverted().transform((event_x, event_y))
+            return float(x_value), float(y_value)
+        except Exception:
+            return None
+
+    def _start_annotation_drag(self, event, annotation_id: str, mode: str) -> None:
+        annotation = self._annotation_by_id(annotation_id)
+        if annotation is None:
+            return
+        axes = self._target_axes_for_annotation(annotation)
+        start = self._event_data_for_axes(event, axes)
+        if start is None:
+            return
+        self._annotation_drag = {
+            "mode": mode,
+            "id": annotation_id,
+            "axes": axes,
+            "start": start,
+            "original": dict(annotation),
+        }
+
+    def _apply_annotation_drag(
+        self,
+        annotation: dict[str, object],
+        original: dict[str, object],
+        mode: str,
+        dx: float,
+        dy: float,
+        current: tuple[float, float],
+    ) -> None:
+        annotation_type = str(annotation.get("type", ""))
+        if mode == "move":
+            self._move_annotation(annotation, original, dx, dy)
+        elif annotation_type == ANNOTATION_ARROW and mode in {"start", "end"}:
+            annotation[f"{mode}_x"] = float(current[0])
+            annotation[f"{mode}_y"] = float(current[1])
+        elif annotation_type == ANNOTATION_BOX:
+            self._resize_box_annotation(annotation, original, mode, current)
+
+    @staticmethod
+    def _annotation_float(annotation: dict[str, object], key: str, default: float = 0.0) -> float:
+        try:
+            return float(cast(Any, annotation.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _annotation_style(annotation: dict[str, object]) -> dict[str, object]:
+        style = annotation.get("style", {})
+        return cast(dict[str, object], style) if isinstance(style, dict) else {}
+
+    @staticmethod
+    def _move_annotation(annotation: dict[str, object], original: dict[str, object], dx: float, dy: float) -> None:
+        annotation_type = str(annotation.get("type", ""))
+        if annotation_type == ANNOTATION_TEXT:
+            annotation["x"] = PlotWorkspace._annotation_float(original, "x") + dx
+            annotation["y"] = PlotWorkspace._annotation_float(original, "y") + dy
+        elif annotation_type == ANNOTATION_ARROW:
+            for point in ("start", "end"):
+                annotation[f"{point}_x"] = PlotWorkspace._annotation_float(original, f"{point}_x") + dx
+                annotation[f"{point}_y"] = PlotWorkspace._annotation_float(original, f"{point}_y") + dy
+        elif annotation_type == ANNOTATION_BOX:
+            annotation["x_min"] = PlotWorkspace._annotation_float(original, "x_min") + dx
+            annotation["x_max"] = PlotWorkspace._annotation_float(original, "x_max") + dx
+            annotation["y_min"] = PlotWorkspace._annotation_float(original, "y_min") + dy
+            annotation["y_max"] = PlotWorkspace._annotation_float(original, "y_max") + dy
+
+    @staticmethod
+    def _resize_box_annotation(
+        annotation: dict[str, object],
+        original: dict[str, object],
+        mode: str,
+        current: tuple[float, float],
+    ) -> None:
+        x_min = PlotWorkspace._annotation_float(original, "x_min")
+        x_max = PlotWorkspace._annotation_float(original, "x_max")
+        y_min = PlotWorkspace._annotation_float(original, "y_min")
+        y_max = PlotWorkspace._annotation_float(original, "y_max")
+        x_value, y_value = float(current[0]), float(current[1])
+        if "left" in mode:
+            x_min = x_value
+        if "right" in mode:
+            x_max = x_value
+        if "bottom" in mode:
+            y_min = y_value
+        if "top" in mode:
+            y_max = y_value
+        annotation["x_min"] = min(x_min, x_max)
+        annotation["x_max"] = max(x_min, x_max)
+        annotation["y_min"] = min(y_min, y_max)
+        annotation["y_max"] = max(y_min, y_max)
+
+    def _drag_distance_too_small(self, drag: dict[str, Any], event) -> bool:
+        start = drag.get("pixel_start")
+        event_x = getattr(event, "x", None)
+        event_y = getattr(event, "y", None)
+        if not isinstance(start, tuple) or event_x is None or event_y is None:
+            return True
+        return math.hypot(float(event_x) - float(start[0]), float(event_y) - float(start[1])) < 4.0
+
+    def _show_annotation_context_menu(self, event) -> None:
+        hit = self._hit_annotation(event)
+        if hit:
+            self._select_annotation(hit)
+        menu = QMenu(self)
+        add_text_action = menu.addAction("Add Text Box")
+        add_arrow_action = menu.addAction("Add Arrow")
+        add_box_action = menu.addAction("Add Box")
+        menu.addSeparator()
+        edit_action = menu.addAction("Edit Selected Annotation")
+        delete_action = menu.addAction("Delete Selected Annotation")
+        selected = self._annotation_by_id(self._selected_annotation_id)
+        edit_action.setEnabled(selected is not None and selected.get("type") == ANNOTATION_TEXT)
+        delete_action.setEnabled(selected is not None)
+        chosen = menu.exec(QCursor.pos())
+        if chosen == add_text_action and self._valid_annotation_event(event):
+            self._add_text_annotation(event)
+        elif chosen == add_arrow_action and self._valid_annotation_event(event):
+            self._add_default_arrow_annotation(event)
+        elif chosen == add_box_action and self._valid_annotation_event(event):
+            self._add_default_box_annotation(event)
+        elif chosen == edit_action:
+            self.edit_selected_annotation()
+        elif chosen == delete_action:
+            self.delete_selected_annotation()
+
+    def _add_default_arrow_annotation(self, event) -> None:
+        x_span, y_span = self._axes_span(event.inaxes)
+        self._append_annotation(
+            {
+                "id": self._next_annotation_id(),
+                "type": ANNOTATION_ARROW,
+                "axis": self._axis_name_for_event(event),
+                "start_x": float(event.xdata) - x_span * 0.08,
+                "start_y": float(event.ydata) + y_span * 0.08,
+                "end_x": float(event.xdata),
+                "end_y": float(event.ydata),
+            }
+        )
+
+    def _add_default_box_annotation(self, event) -> None:
+        x_span, y_span = self._axes_span(event.inaxes)
+        self._append_annotation(
+            {
+                "id": self._next_annotation_id(),
+                "type": ANNOTATION_BOX,
+                "axis": self._axis_name_for_event(event),
+                "x_min": float(event.xdata) - x_span * 0.05,
+                "x_max": float(event.xdata) + x_span * 0.05,
+                "y_min": float(event.ydata) - y_span * 0.05,
+                "y_max": float(event.ydata) + y_span * 0.05,
+            }
+        )
+
+    @staticmethod
+    def _axes_span(axes) -> tuple[float, float]:
+        try:
+            xmin, xmax = axes.get_xlim()
+            ymin, ymax = axes.get_ylim()
+            return max(abs(float(xmax) - float(xmin)), 1.0), max(abs(float(ymax) - float(ymin)), 1.0)
+        except Exception:
+            return 1.0, 1.0
+
+    def _hit_annotation_handle(self, event) -> tuple[str, str] | None:
+        event_x = getattr(event, "x", None)
+        event_y = getattr(event, "y", None)
+        if event_x is None or event_y is None or not self._selected_annotation_id:
+            return None
+        annotation = self._annotation_by_id(self._selected_annotation_id)
+        if annotation is None:
+            return None
+        axes = self._target_axes_for_annotation(annotation)
+        for handle, point in self._annotation_handle_points(annotation).items():
+            distance = self._pixel_distance(axes, point, (float(event_x), float(event_y)))
+            if distance <= ANNOTATION_PICK_TOLERANCE:
+                return self._selected_annotation_id, handle
+        return None
+
+    def _hit_annotation(self, event) -> str:
+        if getattr(event, "x", None) is None or getattr(event, "y", None) is None:
+            return ""
+        for annotation in reversed(self._annotations):
+            annotation_id = str(annotation.get("id", ""))
+            if self._annotation_contains_event(annotation, event):
+                return annotation_id
+        return ""
+
+    def _annotation_contains_event(self, annotation: dict[str, object], event) -> bool:
+        annotation_id = str(annotation.get("id", ""))
+        for artist in self._annotation_artists.get(annotation_id, []):
+            if bool(getattr(artist, "_tda_annotation_handle", False)):
+                continue
+            try:
+                contains, _details = artist.contains(event)
+            except Exception:
+                contains = False
+            if contains:
+                return True
+        return self._annotation_near_event(annotation, event)
+
+    def _annotation_near_event(self, annotation: dict[str, object], event) -> bool:
+        axes = self._target_axes_for_annotation(annotation)
+        event_x = getattr(event, "x", None)
+        event_y = getattr(event, "y", None)
+        if event_x is None or event_y is None:
+            return False
+        event_point = (float(event_x), float(event_y))
+        annotation_type = str(annotation.get("type", ""))
+        if annotation_type == ANNOTATION_TEXT:
+            return self._pixel_distance(
+                axes,
+                (self._annotation_float(annotation, "x"), self._annotation_float(annotation, "y")),
+                event_point,
+            ) <= 12
+        if annotation_type == ANNOTATION_ARROW:
+            start = (self._annotation_float(annotation, "start_x"), self._annotation_float(annotation, "start_y"))
+            end = (self._annotation_float(annotation, "end_x"), self._annotation_float(annotation, "end_y"))
+            return self._distance_to_segment_pixels(axes, start, end, event_point) <= ANNOTATION_PICK_TOLERANCE
+        if annotation_type == ANNOTATION_BOX:
+            return self._box_contains_event(annotation, axes, event_point)
+        return False
+
+    @staticmethod
+    def _pixel_distance(axes, data_point: tuple[float, float], pixel_point: tuple[float, float]) -> float:
+        x_pixel, y_pixel = axes.transData.transform(data_point)
+        return math.hypot(float(x_pixel) - pixel_point[0], float(y_pixel) - pixel_point[1])
+
+    @classmethod
+    def _distance_to_segment_pixels(
+        cls,
+        axes,
+        start: tuple[float, float],
+        end: tuple[float, float],
+        point: tuple[float, float],
+    ) -> float:
+        sx, sy = axes.transData.transform(start)
+        ex, ey = axes.transData.transform(end)
+        px, py = point
+        dx = float(ex) - float(sx)
+        dy = float(ey) - float(sy)
+        if dx == 0 and dy == 0:
+            return math.hypot(px - float(sx), py - float(sy))
+        t = max(0.0, min(1.0, ((px - float(sx)) * dx + (py - float(sy)) * dy) / (dx * dx + dy * dy)))
+        closest = (float(sx) + t * dx, float(sy) + t * dy)
+        return math.hypot(px - closest[0], py - closest[1])
+
+    def _box_contains_event(self, annotation: dict[str, object], axes, event_point: tuple[float, float]) -> bool:
+        corners = self._annotation_handle_points(annotation)
+        if not corners:
+            return False
+        lines = (
+            (corners["bottom_left"], corners["bottom_right"]),
+            (corners["bottom_right"], corners["top_right"]),
+            (corners["top_right"], corners["top_left"]),
+            (corners["top_left"], corners["bottom_left"]),
+        )
+        if any(self._distance_to_segment_pixels(axes, start, end, event_point) <= ANNOTATION_PICK_TOLERANCE for start, end in lines):
+            return True
+        try:
+            x_value, y_value = axes.transData.inverted().transform(event_point)
+            return (
+                self._annotation_float(annotation, "x_min") <= float(x_value) <= self._annotation_float(annotation, "x_max")
+                and self._annotation_float(annotation, "y_min") <= float(y_value) <= self._annotation_float(annotation, "y_max")
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _annotation_handle_points(annotation: dict[str, object]) -> dict[str, tuple[float, float]]:
+        annotation_type = str(annotation.get("type", ""))
+        if annotation_type == ANNOTATION_ARROW:
+            return {
+                "start": (PlotWorkspace._annotation_float(annotation, "start_x"), PlotWorkspace._annotation_float(annotation, "start_y")),
+                "end": (PlotWorkspace._annotation_float(annotation, "end_x"), PlotWorkspace._annotation_float(annotation, "end_y")),
+            }
+        if annotation_type == ANNOTATION_BOX:
+            x_min = PlotWorkspace._annotation_float(annotation, "x_min")
+            x_max = PlotWorkspace._annotation_float(annotation, "x_max")
+            y_min = PlotWorkspace._annotation_float(annotation, "y_min")
+            y_max = PlotWorkspace._annotation_float(annotation, "y_max")
+            return {
+                "bottom_left": (x_min, y_min),
+                "bottom_right": (x_max, y_min),
+                "top_left": (x_min, y_max),
+                "top_right": (x_max, y_max),
+            }
+        return {}
+
+    def _redraw_annotations(self) -> None:
+        if not hasattr(self, "canvas") or self.canvas.axes not in self.canvas.figure.axes:
+            return
+        self._draw_annotations(self.canvas.axes, self._secondary_axes())
+        self.canvas.canvas.draw_idle()
+
+    def _clear_annotation_artists(self) -> None:
+        for artists in self._annotation_artists.values():
+            for artist in artists:
+                try:
+                    artist.remove()
+                except (ValueError, AttributeError, NotImplementedError):
+                    pass
+        self._annotation_artists.clear()
+
+    def _draw_annotations(self, axes, secondary_axes) -> None:
+        self._clear_annotation_artists()
+        self._annotations = normalise_annotations(self._annotations)
+        valid_ids = {str(annotation.get("id", "")) for annotation in self._annotations}
+        if self._selected_annotation_id not in valid_ids:
+            self._selected_annotation_id = ""
+        for annotation in self._annotations:
+            target = secondary_axes if annotation.get("axis") == "secondary" and secondary_axes is not None else axes
+            artists = self._draw_annotation(target, annotation)
+            if self._selected_annotation_id == annotation.get("id"):
+                artists.extend(self._draw_annotation_handles(target, annotation))
+            self._annotation_artists[str(annotation.get("id", ""))] = artists
+
+    def _draw_annotation(self, axes, annotation: dict[str, object]) -> list[Any]:
+        annotation_type = str(annotation.get("type", ""))
+        if annotation_type == ANNOTATION_TEXT:
+            return [self._draw_text_annotation(axes, annotation)]
+        if annotation_type == ANNOTATION_ARROW:
+            return [self._draw_arrow_annotation(axes, annotation)]
+        if annotation_type == ANNOTATION_BOX:
+            return [self._draw_box_annotation(axes, annotation)]
+        return []
+
+    @staticmethod
+    def _draw_text_annotation(axes, annotation: dict[str, object]):
+        style = PlotWorkspace._annotation_style(annotation)
+        artist = axes.annotate(
+            str(annotation.get("text", "")),
+            xy=(PlotWorkspace._annotation_float(annotation, "x"), PlotWorkspace._annotation_float(annotation, "y")),
+            xytext=(
+                PlotWorkspace._annotation_float(annotation, "offset_x"),
+                PlotWorkspace._annotation_float(annotation, "offset_y"),
+            ),
+            textcoords="offset points",
+            color=str(style.get("text_color", "black")),
+            fontsize=9,
+            bbox={
+                "boxstyle": "round,pad=0.25",
+                "facecolor": str(style.get("background_color", "white")),
+                "edgecolor": str(style.get("border_color", "black")),
+                "linewidth": 1.0,
+            },
+            zorder=14,
+            annotation_clip=False,
+        )
+        artist.set_gid(f"annotation:{annotation.get('id', '')}")
+        return artist
+
+    @staticmethod
+    def _draw_arrow_annotation(axes, annotation: dict[str, object]):
+        style = PlotWorkspace._annotation_style(annotation)
+        artist = FancyArrowPatch(
+            (PlotWorkspace._annotation_float(annotation, "start_x"), PlotWorkspace._annotation_float(annotation, "start_y")),
+            (PlotWorkspace._annotation_float(annotation, "end_x"), PlotWorkspace._annotation_float(annotation, "end_y")),
+            arrowstyle="->",
+            mutation_scale=13,
+            linewidth=PlotWorkspace._style_float(style.get("line_width"), 1.5),
+            color=str(style.get("color", "red")),
+            zorder=13,
+        )
+        artist.set_gid(f"annotation:{annotation.get('id', '')}")
+        axes.add_patch(artist)
+        return artist
+
+    @staticmethod
+    def _draw_box_annotation(axes, annotation: dict[str, object]):
+        style = PlotWorkspace._annotation_style(annotation)
+        fill_color = str(style.get("fill_color", "transparent"))
+        transparent = fill_color.strip().casefold() in {"", "none", "transparent"}
+        artist = Rectangle(
+            (PlotWorkspace._annotation_float(annotation, "x_min"), PlotWorkspace._annotation_float(annotation, "y_min")),
+            PlotWorkspace._annotation_float(annotation, "x_max") - PlotWorkspace._annotation_float(annotation, "x_min"),
+            PlotWorkspace._annotation_float(annotation, "y_max") - PlotWorkspace._annotation_float(annotation, "y_min"),
+            fill=not transparent,
+            facecolor="none" if transparent else fill_color,
+            edgecolor=str(style.get("edge_color", "orange")),
+            linewidth=PlotWorkspace._style_float(style.get("line_width"), 1.5),
+            alpha=1.0 if transparent else 0.18,
+            zorder=12,
+        )
+        artist.set_gid(f"annotation:{annotation.get('id', '')}")
+        axes.add_patch(artist)
+        return artist
+
+    def _draw_annotation_handles(self, axes, annotation: dict[str, object]) -> list[Any]:
+        handles: list[Any] = []
+        for point in self._annotation_handle_points(annotation).values():
+            handle = axes.scatter(
+                [point[0]],
+                [point[1]],
+                s=ANNOTATION_HANDLE_SIZE,
+                marker="s",
+                facecolors="white",
+                edgecolors=EATON_DARK_BLUE,
+                linewidths=1.2,
+                label="_annotation_handle",
+                zorder=20,
+            )
+            setattr(handle, "_tda_annotation_handle", True)
+            handles.append(handle)
+        return handles
 
     def _build_legend_panel(self) -> QWidget:
         panel = QFrame()
@@ -450,6 +1171,7 @@ class PlotWorkspace(QWidget):
         self._best_fit_formula_rows = []
         self._remove_cursor_artists()
         self._set_cursor_data(None)
+        self._clear_annotation_artists()
         self.canvas.clear()
         self._update_legend_table([], [])
         self.legend_panel.setVisible(self._legend_display == LEGEND_DISPLAY_PANEL)
@@ -467,8 +1189,16 @@ class PlotWorkspace(QWidget):
         the on-screen figure stays clean.
         """
         temporary_legend = None
+        selected_annotation_id = self._selected_annotation_id
+        if selected_annotation_id:
+            self._selected_annotation_id = ""
+            self._redraw_annotations()
         if self._legend_display == LEGEND_DISPLAY_PANEL and self.canvas.axes in self.canvas.figure.axes:
-            handles, labels = self._legend_handles_and_labels(self.canvas.axes, self._secondary_axes())
+            handles, labels = self._legend_handles_and_labels(
+                self.canvas.axes,
+                self._secondary_axes(),
+                include_hidden=False,
+            )
             if handles:
                 temporary_legend = self.canvas.axes.legend(handles, labels, loc="best", fontsize=8)
         try:
@@ -476,6 +1206,10 @@ class PlotWorkspace(QWidget):
         finally:
             if temporary_legend is not None:
                 temporary_legend.remove()
+            if selected_annotation_id:
+                self._selected_annotation_id = selected_annotation_id
+                self._redraw_annotations()
+            elif temporary_legend is not None:
                 self.canvas.canvas.draw_idle()
 
     # ------------------------------------------------------------------
@@ -506,25 +1240,6 @@ class PlotWorkspace(QWidget):
         self._cursor_artists.clear()
         if self._cursor_vm is not None:
             self._cursor_vm.set_data(data)
-            self.cursorPointsChanged.emit()
-
-    def _on_canvas_click(self, event) -> None:
-        if not self._point_compare or self._cursor_vm is None:
-            return
-        if event.inaxes is None or event.xdata is None or event.button != 1:
-            return
-        if self._cursor_vm.lock_at(event.xdata):
-            point = self._cursor_vm.points[-1]
-            marker = self.canvas.axes.axvline(
-                point["x"], color=EATON_DARK_BLUE, linestyle="--", linewidth=1.0, alpha=0.75
-            )
-            self._cursor_artists.append(marker)
-            self.canvas.canvas.draw_idle()
-            self.cursorPointsChanged.emit()
-
-    def _on_canvas_key(self, event) -> None:
-        if event.key == "escape":
-            self.clear_cursor_markers()
             self.cursorPointsChanged.emit()
 
     # ------------------------------------------------------------------
@@ -602,6 +1317,7 @@ class PlotWorkspace(QWidget):
         channel_colours: Optional[dict[str, str]] = None,
         channel_styles: Optional[dict[str, dict[str, str]]] = None,
         axis_tick_settings: Optional[dict[str, object]] = None,
+        annotations: Optional[list[dict[str, object]]] = None,
     ) -> OperationResult:
         try:
             data = self.plot_vm.prepare_plot_data(x_col, y_cols, xmin, xmax)
@@ -626,6 +1342,7 @@ class PlotWorkspace(QWidget):
             channel_colours=channel_colours,
             channel_styles=channel_styles,
             axis_tick_settings=axis_tick_settings,
+            annotations=annotations,
         )
 
     def render_plot_data(
@@ -647,9 +1364,12 @@ class PlotWorkspace(QWidget):
         channel_colours: Optional[dict[str, str]] = None,
         channel_styles: Optional[dict[str, dict[str, str]]] = None,
         axis_tick_settings: Optional[dict[str, object]] = None,
+        annotations: Optional[list[dict[str, object]]] = None,
     ) -> OperationResult:
 
         secondary_set = set(secondary_y or [])
+        if annotations is not None:
+            self._annotations = normalise_annotations(annotations)
         self.canvas.clear()
         self._best_fit_formula_rows = []
         axes = self.canvas.axes
@@ -721,6 +1441,7 @@ class PlotWorkspace(QWidget):
         axes.grid(self._grid_visible(), alpha=0.35)
         handles, labels = self._legend_handles_and_labels(axes, secondary_axes)
         self._apply_legend_display(axes, handles, labels)
+        self._draw_annotations(axes, secondary_axes)
         self.canvas.draw()
         self._last_plot_data = data
         self._last_x_col = x_col
@@ -1422,6 +2143,7 @@ class PlotWorkspace(QWidget):
         axes.grid(self._grid_visible(), alpha=0.35)
         handles, labels = self._legend_handles_and_labels(axes, None)
         self._apply_legend_display(axes, handles, labels)
+        self._draw_annotations(axes, None)
         self.canvas.draw()
         self._set_cursor_data(None)
         return OperationResult.success(f"Comparison plot generated for {plotted} series.")

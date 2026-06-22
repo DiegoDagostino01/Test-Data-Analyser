@@ -80,6 +80,13 @@ class DataFilePanel(QFrame):
         if self._current_path:
             self._load(self._current_path, self.sheet_combo.currentText(), sheet_change=True)
 
+    def show_manual_session(self) -> None:
+        """Reflect that a manual (non-file) data session is active."""
+        self._current_path = None
+        self.file_label.setText("Manual data session (no linked file).")
+        self.sheet_combo.clear()
+        self.sheet_row.setVisible(False)
+
     def _load(self, path: str, sheet_name: str | None, *, sheet_change: bool = False) -> None:
         result = self.vm.load_file(path, sheet_name)
         self.statusMessage.emit(result.message)

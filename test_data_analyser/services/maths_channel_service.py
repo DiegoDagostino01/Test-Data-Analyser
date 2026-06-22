@@ -23,6 +23,40 @@ _BACKTICK_COLUMN_RE = re.compile(r"`([^`]+)`")
 _SAFE_FUNCTION_NAMES = {"abs", "sqrt", "log", "rolling_mean", "rolling_std", "where", "clip"}
 
 
+def _rename_bare_identifier(segment: str, old_name: str, new_name: str) -> str:
+    """Replace bare-identifier references to ``old_name`` outside backtick spans."""
+    if (not old_name.isidentifier()) or keyword.iskeyword(old_name) or old_name in _SAFE_FUNCTION_NAMES:
+        return segment
+    if new_name.isidentifier() and not keyword.iskeyword(new_name) and new_name not in _SAFE_FUNCTION_NAMES:
+        replacement = new_name
+    else:
+        replacement = f"`{new_name}`"
+    return re.sub(rf"\b{re.escape(old_name)}\b", replacement, segment)
+
+
+def rename_column_in_formula(formula: str, old_name: str, new_name: str) -> str:
+    """Rewrite a Maths Channel ``formula`` so references to ``old_name`` point at
+    ``new_name``.
+
+    Handles the two common reference forms — backtick-quoted (`` `Old Name` ``)
+    and bare identifiers (``Old``) — leaving other backtick-quoted columns and
+    function names untouched. Exotic forms are left as-is; a stale reference is
+    surfaced as a recalculation warning rather than crashing.
+    """
+    if not formula or old_name == new_name:
+        return formula
+    new_backtick = f"`{new_name}`"
+    parts: list[str] = []
+    last = 0
+    for match in _BACKTICK_COLUMN_RE.finditer(formula):
+        parts.append(_rename_bare_identifier(formula[last:match.start()], old_name, new_name))
+        content = match.group(1).strip()
+        parts.append(new_backtick if content == old_name else match.group(0))
+        last = match.end()
+    parts.append(_rename_bare_identifier(formula[last:], old_name, new_name))
+    return "".join(parts)
+
+
 class _FormulaEvaluator(ast.NodeVisitor):
     """Evaluate a restricted expression AST against prepared dataframe columns."""
 

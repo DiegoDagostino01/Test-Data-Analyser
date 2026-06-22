@@ -223,6 +223,68 @@ class MathsChannelsPanelTests(unittest.TestCase):
         self.panel._insert_column()
         self.assertIn("`A`", self.panel.formula_edit.toPlainText())
 
+    def test_formula_builder_buttons_insert_backend_syntax(self) -> None:
+        expected = {
+            "+": " + ",
+            "−": " - ",
+            "×": " * ",
+            "÷": " / ",
+            "√x": "sqrt()",
+            "x²": "**2",
+            "x^n": "**",
+            "1/x": "1 / ()",
+            "( )": "()",
+        }
+        for label, syntax in expected.items():
+            with self.subTest(label=label):
+                self.panel.formula_edit.clear()
+                self.panel.formula_buttons[label].click()
+                self.assertEqual(self.panel.formula_edit.toPlainText(), syntax)
+
+    def test_formula_builder_inserts_channel_inside_function_parentheses(self) -> None:
+        self.panel.formula_buttons["√x"].click()
+        self.panel.column_combo.setCurrentText("A")
+        self.panel._insert_column()
+        self.assertEqual(self.panel.formula_edit.toPlainText(), "sqrt(`A`)")
+
+    def test_formula_builder_addition_creates_channel(self) -> None:
+        self.panel.name_edit.setText("Built Sum")
+        self.panel.column_combo.setCurrentText("A")
+        self.panel._insert_column()
+        self.panel.formula_buttons["+"].click()
+        self.panel.column_combo.setCurrentText("B")
+        self.panel._insert_column()
+
+        self.panel._apply()
+
+        self.assertIn("Built Sum", self.state.calculated_channels)
+        self.assertEqual(list(self.state.df["Built Sum"]), [11.0, 22.0, 33.0])
+
+    def test_formula_builder_reciprocal_creates_channel(self) -> None:
+        self.panel.name_edit.setText("Inverse B")
+        self.panel.formula_buttons["1/x"].click()
+        self.panel.column_combo.setCurrentText("B")
+        self.panel._insert_column()
+
+        self.panel._apply()
+
+        self.assertIn("Inverse B", self.state.calculated_channels)
+        self.assertAlmostEqual(float(self.state.df["Inverse B"].iloc[0]), 1.0)
+        self.assertAlmostEqual(float(self.state.df["Inverse B"].iloc[1]), 0.5)
+        self.assertAlmostEqual(float(self.state.df["Inverse B"].iloc[2]), 1.0 / 3.0)
+
+    def test_formula_builder_invalid_formula_updates_status(self) -> None:
+        self.panel.formula_edit.setPlainText("A /")
+        self.panel._validate()
+        self.assertIn("Invalid formula", self.panel.validation_status_label.text())
+
+    def test_insert_column_with_backtick_uses_quoted_reference(self) -> None:
+        self.state.df = pd.DataFrame({"A`B": [1.0, 2.0]})
+        self.panel.refresh()
+        self.panel.column_combo.setCurrentText("A`B")
+        self.panel._insert_column()
+        self.assertEqual(self.panel.formula_edit.toPlainText(), "'A`B'")
+
     def test_existing_column_combo_is_grouped_and_naturally_sorted(self) -> None:
         self.state.df = pd.DataFrame(
             {
@@ -350,6 +412,10 @@ class LimitsPanelTests(unittest.TestCase):
         self.assertIsInstance(self.panel.content_scroll, QScrollArea)
         self.assertFalse(self.panel.content_splitter.childrenCollapsible())
         self.assertGreaterEqual(self.panel.content_splitter.minimumHeight(), 380)
+
+    def test_limit_points_table_expands_vertically(self) -> None:
+        self.assertEqual(self.panel.points_group.sizePolicy().verticalPolicy(), QSizePolicy.Policy.Expanding)
+        self.assertEqual(self.panel.points_table.sizePolicy().verticalPolicy(), QSizePolicy.Policy.Expanding)
 
     def test_margin_summary_is_separate_panel(self) -> None:
         self.assertIsNot(self.panel.summary_panel.parentWidget(), self.panel)
@@ -700,6 +766,13 @@ class PlotWorkspaceParityTests(unittest.TestCase):
         result = self.panel.generate_plot("Time", ["A"])
         self.assertTrue(result.ok)
         self.assertEqual(len(self.panel.canvas.figure.axes), 1)
+
+    def test_annotation_controls_live_on_plot_toolbar(self) -> None:
+        self.assertIsNone(self.panel.findChild(QFrame, "AnnotationToolbar"))
+        self.assertIs(self.panel.layout().itemAt(0).widget(), self.panel.plot_legend_splitter)
+        for button in self.panel._annotation_buttons.values():
+            self.assertIs(button.parentWidget(), self.panel.canvas.toolbar)
+        self.assertIs(self.panel.delete_annotation_button.parentWidget(), self.panel.canvas.toolbar)
 
     def test_secondary_axis_creates_twin(self) -> None:
         result = self.panel.generate_plot("Time", ["A", "B"], secondary_y=["B"])
@@ -1333,6 +1406,50 @@ class PlotWorkspaceParityTests(unittest.TestCase):
         # The temporary export legend is removed afterwards so the screen stays clean.
         self.assertIsNone(self.panel.canvas.axes.get_legend())
 
+    def test_panel_export_legend_excludes_hidden_channels(self) -> None:
+        channel_styles = {plot_render_service.normalise_channel_name("A"): {"channel": "A", "hidden": "true"}}
+        self.panel.generate_plot("Time", ["A", "B"], channel_styles=channel_styles)
+        captured: dict[str, object] = {}
+        original_base_save = matplotlib_qt_adapter.NavigationToolbar2QT.save_figure
+
+        def fake_base_save(toolbar, *args):
+            legend = self.panel.canvas.axes.get_legend()
+            captured["labels"] = [text.get_text() for text in legend.get_texts()] if legend else None
+            captured["hidden_series_visible"] = self.panel.canvas.axes.get_lines()[0].get_visible()
+
+        matplotlib_qt_adapter.NavigationToolbar2QT.save_figure = fake_base_save
+        try:
+            self.panel.canvas.toolbar.save_figure()
+        finally:
+            matplotlib_qt_adapter.NavigationToolbar2QT.save_figure = original_base_save
+
+        self.assertEqual(captured["labels"], ["B"])
+        self.assertFalse(captured["hidden_series_visible"])
+        self.assertIsNone(self.panel.canvas.axes.get_legend())
+
+    def test_panel_export_legend_omits_empty_legend_when_all_channels_hidden(self) -> None:
+        channel_styles = {
+            plot_render_service.normalise_channel_name("A"): {"channel": "A", "hidden": "true"},
+            plot_render_service.normalise_channel_name("B"): {"channel": "B", "hidden": "true"},
+        }
+        self.panel.generate_plot("Time", ["A", "B"], channel_styles=channel_styles)
+        captured: dict[str, object] = {}
+        original_base_save = matplotlib_qt_adapter.NavigationToolbar2QT.save_figure
+
+        def fake_base_save(toolbar, *args):
+            captured["legend"] = self.panel.canvas.axes.get_legend()
+            captured["lines_visible"] = [line.get_visible() for line in self.panel.canvas.axes.get_lines()]
+
+        matplotlib_qt_adapter.NavigationToolbar2QT.save_figure = fake_base_save
+        try:
+            self.panel.canvas.toolbar.save_figure()
+        finally:
+            matplotlib_qt_adapter.NavigationToolbar2QT.save_figure = original_base_save
+
+        self.assertIsNone(captured["legend"])
+        self.assertEqual(captured["lines_visible"], [False, False])
+        self.assertIsNone(self.panel.canvas.axes.get_legend())
+
     def test_graph_legend_is_preserved_when_saving_figure(self) -> None:
         self.panel.set_legend_display("graph")
         self.panel.generate_plot("Time", ["A"])
@@ -1408,6 +1525,77 @@ class PlotWorkspaceParityTests(unittest.TestCase):
             result = self.panel.save_plot_png(path)
             self.assertTrue(result.ok, result.message)
             self.assertTrue(os.path.exists(path))
+
+    def test_plot_annotations_render_as_matplotlib_artists(self) -> None:
+        annotations = [
+            {"id": "txt", "type": "text", "text": "Pressure dip", "x": 0.2, "y": 0.5},
+            {"id": "arr", "type": "arrow", "start_x": 0.2, "start_y": 0.2, "end_x": 0.4, "end_y": 0.4},
+            {"id": "box", "type": "box", "x_min": 0.5, "x_max": 0.8, "y_min": -0.5, "y_max": 0.5},
+        ]
+
+        result = self.panel.generate_plot("Time", ["A"], annotations=annotations)
+
+        self.assertTrue(result.ok, result.message)
+        artist_ids = {
+            str(getattr(artist, "get_gid", lambda: "")())
+            for artists in self.panel._annotation_artists.values()
+            for artist in artists
+        }
+        self.assertIn("annotation:txt", artist_ids)
+        self.assertIn("annotation:arr", artist_ids)
+        self.assertIn("annotation:box", artist_ids)
+        self.assertEqual(len(self.panel.current_annotations()), 3)
+
+    def test_annotations_save_with_png_without_selection_handles(self) -> None:
+        annotations = [
+            {"id": "arr", "type": "arrow", "start_x": 0.2, "start_y": 0.2, "end_x": 0.4, "end_y": 0.4},
+        ]
+        self.panel.generate_plot("Time", ["A"], annotations=annotations)
+        self.panel._select_annotation("arr")
+        self.assertTrue(any(bool(getattr(artist, "_tda_annotation_handle", False)) for artists in self.panel._annotation_artists.values() for artist in artists))
+
+        captured = {"had_handle": True}
+        original_savefig = self.panel.canvas.figure.savefig
+
+        def fake_savefig(*args, **kwargs):
+            captured["had_handle"] = any(
+                bool(getattr(collection, "_tda_annotation_handle", False))
+                for axes in self.panel.canvas.figure.axes
+                for collection in axes.collections
+            )
+
+        self.panel.canvas.figure.savefig = fake_savefig
+        try:
+            result = self.panel.save_plot_png("dummy.png")
+        finally:
+            self.panel.canvas.figure.savefig = original_savefig
+
+        self.assertTrue(result.ok, result.message)
+        self.assertFalse(captured["had_handle"])
+        self.assertEqual(self.panel.selected_annotation_id(), "arr")
+
+    def test_annotation_move_and_resize_update_data_coordinates(self) -> None:
+        self.panel.set_annotations(
+            [
+                {"id": "box", "type": "box", "x_min": 0.1, "x_max": 0.3, "y_min": 1.0, "y_max": 2.0},
+                {"id": "arr", "type": "arrow", "start_x": 0.2, "start_y": 0.2, "end_x": 0.4, "end_y": 0.4},
+            ]
+        )
+        box = self.panel._annotation_by_id("box")
+        arrow = self.panel._annotation_by_id("arr")
+        self.assertIsNotNone(box)
+        self.assertIsNotNone(arrow)
+
+        self.panel._move_annotation(box, dict(box), 0.5, -0.5)
+        self.panel._resize_box_annotation(box, dict(box), "top_right", (1.2, 3.0))
+        self.panel._apply_annotation_drag(arrow, dict(arrow), "end", 0.0, 0.0, (0.8, 0.9))
+
+        self.assertAlmostEqual(float(box["x_min"]), 0.6)
+        self.assertAlmostEqual(float(box["x_max"]), 1.2)
+        self.assertAlmostEqual(float(box["y_min"]), 0.5)
+        self.assertAlmostEqual(float(box["y_max"]), 3.0)
+        self.assertAlmostEqual(float(arrow["end_x"]), 0.8)
+        self.assertAlmostEqual(float(arrow["end_y"]), 0.9)
 
     def test_save_plot_png_appends_extension(self) -> None:
         self.panel.generate_plot("Time", ["A"])
@@ -1748,7 +1936,8 @@ class MainWindowLayoutTests(unittest.TestCase):
         self.assertTrue(window.show_ribbon_action.isCheckable())
 
         shortcuts = {action.text(): action.shortcut().toString() for action in window.actions()}
-        self.assertEqual(shortcuts.get("Open Data"), "Ctrl+O")
+        self.assertEqual(shortcuts.get("Open Excel"), "Ctrl+O")
+        self.assertEqual(shortcuts.get("Create Session"), "Ctrl+N")
         self.assertEqual(shortcuts.get("Save Session"), "Ctrl+S")
         self.assertEqual(shortcuts.get("Load Session"), "Ctrl+L")
 
@@ -1844,7 +2033,8 @@ class MainWindowLayoutTests(unittest.TestCase):
         collapsed_layout = window.collapsed_ribbon_bar.layout()
         self.assertEqual(collapsed_layout.itemAt(collapsed_layout.count() - 1).widget(), window.show_ribbon_button)
         for key in [
-            "FILE:Open Data",
+            "FILE:Open Excel",
+            "FILE:Create Session",
             "FILE:Save Session",
             "FILE:Load Session",
             "FILE:Export Data",
@@ -1943,6 +2133,34 @@ class MainWindowLayoutTests(unittest.TestCase):
         self.assertEqual(window.plot_tab_bar.count(), 3)
         self.assertEqual(window.plot_tab_bar.tabText(1), "Plot 2")
         self.assertEqual(window.plot_tab_bar.tabText(2), "+")
+
+    def test_new_plot_preserves_current_x_axis_selection(self) -> None:
+        window = self._window()
+        window.vm.state.df = pd.DataFrame(
+            {"Sample": [0.0, 1.0], "Time": [10.0, 20.0], "Flow": [5.0, 6.0], "A": [1.0, 2.0]}
+        )
+        window._on_file_loaded(window.vm.state.column_names())
+        window.axis_panel.apply_selection(window.vm.state.column_names(), "Time", ["A"], [])
+
+        window._new_plot_profile()
+        self.assertEqual(window.axis_panel.x_column(), "Time")
+        self.assertEqual(window.vm.state.plot_profiles[1]["x_column"], "Time")
+
+        window.axis_panel.apply_selection(window.vm.state.column_names(), "Flow", [], [])
+        window._new_plot_profile()
+        self.assertEqual(window.axis_panel.x_column(), "Flow")
+        self.assertEqual(window.vm.state.plot_profiles[2]["x_column"], "Flow")
+
+    def test_new_plot_falls_back_when_current_x_axis_is_unavailable(self) -> None:
+        window = self._window()
+        window.vm.state.df = pd.DataFrame({"Sample": [0.0, 1.0], "A": [1.0, 2.0]})
+        window._on_file_loaded(window.vm.state.column_names())
+        window.vm.state.current_x_axis = "Removed Channel"
+
+        window._new_plot_profile()
+
+        self.assertEqual(window.axis_panel.x_column(), "Sample")
+        self.assertEqual(window.vm.state.plot_profiles[1]["x_column"], "Sample")
 
     def test_plot_tabs_preserve_axis_selection_when_switching(self) -> None:
         window = self._window()
@@ -2373,6 +2591,37 @@ class MainWindowSessionRestoreTests(unittest.TestCase):
             qt_file_dialogs.open_session_file = original_dialog
             qt_message_service.warning = original_warn
 
+    def test_plot_annotations_save_and_restore_with_session(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data_path = os.path.join(directory, "data.csv")
+            pd.DataFrame({"Time": [0.0, 1.0, 2.0, 3.0], "A": [1.0, 2.0, 3.0, 4.0]}).to_csv(data_path, index=False)
+            session_path = os.path.join(directory, "session.json")
+
+            source = self._make_window(directory)
+            source.vm.data_loading.load_file(data_path, None)
+            source._on_file_loaded(source.vm.state.column_names())
+            source.axis_panel.apply_selection(source.vm.state.column_names(), "Time", ["A"], [])
+            source._on_generate_plot()
+            source.plot_workspace.set_annotations(
+                [
+                    {"id": "txt", "type": "text", "text": "Pressure dip", "x": 1.0, "y": 2.0},
+                    {"id": "arr", "type": "arrow", "start_x": 1.0, "start_y": 3.0, "end_x": 2.0, "end_y": 2.0},
+                    {"id": "box", "type": "box", "x_min": 0.5, "x_max": 2.5, "y_min": 1.5, "y_max": 3.5},
+                ]
+            )
+            self._save_session(source, session_path)
+
+            target = self._make_window(directory)
+            self._load_session(target, session_path)
+
+            restored = target.plot_workspace.current_annotations()
+            self.assertEqual([annotation["type"] for annotation in restored], ["text", "arrow", "box"])
+            self.assertEqual(restored[0]["text"], "Pressure dip")
+            self.assertTrue(target._plot_generated)
+            self.assertIn("txt", target.plot_workspace._annotation_artists)
+            self.assertIn("arr", target.plot_workspace._annotation_artists)
+            self.assertIn("box", target.plot_workspace._annotation_artists)
+
     def test_saved_plot_and_panels_restore_on_load(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             data_path = os.path.join(directory, "data.csv")
@@ -2419,6 +2668,40 @@ class MainWindowSessionRestoreTests(unittest.TestCase):
             # Engineering notes restored into state and the editor field.
             self.assertEqual(target.vm.engineering_notes.get_notes()["objective"], "Verify response")
             self.assertEqual(target.notes_panel._editors["objective"].toPlainText(), "Verify response")
+
+    def test_load_session_refreshes_modified_excel_plot_and_raw_data(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data_path = os.path.join(directory, "data.xlsx")
+            with pd.ExcelWriter(data_path, engine="openpyxl") as writer:
+                pd.DataFrame({"Time": [0.0, 1.0, 2.0], "A": [1.0, 2.0, 3.0]}).to_excel(
+                    writer,
+                    sheet_name="Data",
+                    index=False,
+                )
+            session_path = os.path.join(directory, "session.json")
+
+            source = self._make_window(directory)
+            source.vm.data_loading.load_file(data_path, "Data")
+            source._on_file_loaded(source.vm.state.column_names())
+            source.axis_panel.apply_selection(source.vm.state.column_names(), "Time", ["A"], [])
+            source._on_generate_plot()
+            self._save_session(source, session_path)
+
+            with pd.ExcelWriter(data_path, engine="openpyxl") as writer:
+                pd.DataFrame(
+                    {"Time": [0.0, 1.0, 2.0], "A": [10.0, 20.0, 30.0], "New Channel": [7.0, 8.0, 9.0]}
+                ).to_excel(writer, sheet_name="Data", index=False)
+
+            target = self._make_window(directory)
+            self._load_session(target, session_path)
+
+            self.assertEqual(list(target.vm.state.df["A"]), [10.0, 20.0, 30.0])
+            self.assertIn("New Channel", target.vm.state.column_names())
+            self.assertTrue(target._plot_generated)
+            lines = target.plot_workspace.canvas.axes.get_lines()
+            self.assertTrue(lines)
+            self.assertEqual(list(lines[0].get_ydata()), [10.0, 20.0, 30.0])
+            self.assertEqual(list(target.raw_data_panel.model.dataframe["A"]), [10.0, 20.0, 30.0])
 
     def test_session_without_plot_leaves_canvas_clean(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2632,6 +2915,76 @@ class MainWindowSessionRestoreTests(unittest.TestCase):
             self.assertEqual(window.plot_workspace.canvas.axes.get_title(), "Manual Title")
             self.assertEqual(window.plot_workspace.canvas.axes.get_ylim(), (0.0, 50.0))
             self.assertEqual(window.plot_workspace.axis_tick_setting_texts()["y_major_tick"], "10")
+
+
+@unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
+class ManualSessionUiTests(unittest.TestCase):
+    """Create Session, full-dataset editing, and numeric-only selectors."""
+
+    def _make_window(self, directory: str) -> "MainWindow":
+        manager = SettingsManager(os.path.join(directory, "settings.json"))
+        return MainWindow(manager)
+
+    def test_create_session_enters_edit_mode_and_manual_label(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            window = self._make_window(directory)
+            window.ribbon_buttons["FILE:Create Session"].click()
+            self.assertTrue(window.vm.state.is_manual_source)
+            self.assertTrue(window.raw_data_panel._edit_mode)
+            self.assertTrue(window.raw_data_panel.edit_mode_check.isChecked())
+            self.assertEqual(
+                window.data_panel.file_label.text(), "Manual data session (no linked file)."
+            )
+            self.assertGreater(window.axis_panel.x_combo.count(), 0)
+
+    def test_numeric_only_selectors_exclude_text_columns(self) -> None:
+        from test_data_analyser.services import dataset_service
+
+        with tempfile.TemporaryDirectory() as directory:
+            window = self._make_window(directory)
+            df = pd.DataFrame(
+                {"Time": [0.0, 1.0], "Pressure": [10.0, 11.0], "Label": ["a", "b"]}
+            )
+            window.vm.state.df = df
+            window.vm.state.channel_registry = dataset_service.build_registry_for_dataframe(df)
+            window._on_file_loaded(window.vm.state.column_names())
+
+            x_items = [window.axis_panel.x_combo.itemText(i) for i in range(window.axis_panel.x_combo.count())]
+            self.assertIn("Time", x_items)
+            self.assertIn("Pressure", x_items)
+            self.assertNotIn("Label", x_items)
+
+    def test_rename_column_updates_selectors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            window = self._make_window(directory)
+            window.ribbon_buttons["FILE:Create Session"].click()
+            channel_id = window.vm.state.channel_registry.id_for_name("Column 1")
+            self.assertTrue(window.vm.dataset.rename_column(channel_id, "Time").ok)
+            window.raw_data_panel.datasetChanged.emit()
+
+            x_items = [window.axis_panel.x_combo.itemText(i) for i in range(window.axis_panel.x_combo.count())]
+            self.assertIn("Time", x_items)
+            self.assertNotIn("Column 1", x_items)
+
+    def test_manual_session_generates_plot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            window = self._make_window(directory)
+            window.ribbon_buttons["FILE:Create Session"].click()
+            registry = window.vm.state.channel_registry
+            window.vm.dataset.rename_column(registry.id_for_name("Column 1"), "Time")
+            window.vm.dataset.rename_column(registry.id_for_name("Column 2"), "Pressure")
+            time_id = registry.id_for_name("Time")
+            pressure_id = registry.id_for_name("Pressure")
+            for row, (t_value, p_value) in enumerate([(0.0, 10.0), (1.0, 11.0), (2.0, 12.0)]):
+                window.vm.dataset.set_cell(time_id, row, str(t_value))
+                window.vm.dataset.set_cell(pressure_id, row, str(p_value))
+            window._on_dataset_changed()
+
+            window.axis_panel.apply_selection(window._plottable_columns(), "Time", ["Pressure"], [])
+            window._on_generate_plot()
+
+            self.assertTrue(window._plot_generated)
+            self.assertTrue(window.plot_workspace.canvas.axes.get_lines())
 
 
 class LastDataDirectoryHelperTests(unittest.TestCase):

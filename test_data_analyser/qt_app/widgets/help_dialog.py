@@ -76,10 +76,12 @@ HELP_PAGE_BODIES: dict[str, str] = {
         preserving existing plot tabs, generated plot views, Requirements / Limits, and Engineering Notes.</p>
         <h2>Save Session</h2>
         <p>Saves the current working session so it can be restored later. Where supported, this preserves the
-        active setup, plot selections, notes, requirements, runs, best-fit settings, and legend visibility.</p>
+        active setup, root data folder, plot selections, annotations, notes, requirements, runs, best-fit settings,
+        and legend visibility.</p>
         <h2>Load Session</h2>
-        <p>Loads a previously saved session and restores the working context. When the same workbook and sheet are
-        used by the main data and saved runs, the loaded data is reused during restore.</p>
+        <p>Loads a previously saved session, reloads the saved source data from disk, recalculates Maths Channels,
+        and restores the working context. If a refreshed file no longer contains a saved plot channel, the load reports
+        the missing reference without stopping the session restore.</p>
         <h2>Export Data</h2>
         <p>Exports processed or selected data for use outside the application.</p>
         <div class="tip">Start with <b>Open Data</b>. Channel lists, plot generation, and most analysis tools depend
@@ -90,8 +92,10 @@ HELP_PAGE_BODIES: dict[str, str] = {
         <p>Generates the plot using the currently selected X-axis and Y-axis channels.</p>
         <h2>Clear Plot</h2>
         <p>Clears the current plot area.</p>
+        <h2>Annotations</h2>
+        <p>Use the annotation controls in the plot toolbar to add, select, move, resize, edit, or delete text boxes, arrows, and boxes.</p>
         <h2>Save Plot</h2>
-        <p>Saves the current plot image after you have finalised the view, labels, axes, and legend.</p>
+        <p>Saves the current plot image after you have finalised the view, labels, axes, legend, and annotations.</p>
         <h2>Runs / Comparison</h2>
         <p>Opens or focuses tools related to comparing multiple runs.</p>
         <h2>What affects the plot?</h2>
@@ -110,7 +114,8 @@ HELP_PAGE_BODIES: dict[str, str] = {
         <h2>Raw Data</h2>
         <p>Shows the loaded raw data in table form for inspection, editing workflows, and export.</p>
         <h2>Maths Channels</h2>
-        <p>Provides access to calculated or derived channels where supported by the current data and formulas.</p>
+        <p>Provides access to calculated or derived channels. Use the column dropdown and formula-builder buttons
+        to insert valid formula text, then validate and save through the existing Maths Channel engine.</p>
         <h2>Best Fit Formulas</h2>
         <p>Shows equations for generated best-fit lines from the active plot.</p>
         <h2>Cursor</h2>
@@ -207,9 +212,9 @@ HELP_PAGE_BODIES: dict[str, str] = {
         <p>Use this when you want data output for external analysis or reporting.</p>
         <h2>Save Session</h2>
         <p>Use this when you want to preserve the current working state, including plot profiles, legend visibility,
-        best-fit settings, limits, notes, and runs.</p>
+        best-fit settings, limits, notes, root data folder, and runs.</p>
         <h2>Load Session</h2>
-        <p>Use this when you want to continue from a previous working state.</p>
+        <p>Use this when you want to continue from a previous working state using the latest data from the saved source file.</p>
         <h2>Best practice</h2>
         <ul>
             <li>Save sessions before making major changes.</li>

@@ -17,12 +17,13 @@ import pandas as pd
 
 from ..core.config import __version__
 from ..core.utils import classify_channel_name
-from ..domain import normalise_plot_profile
-from ..services import plot_render_service, session_service
+from ..domain import SOURCE_EXCEL, SOURCE_MANUAL, ComparisonSettings, normalise_plot_profile
+from ..services import dataset_service, plot_render_service, session_service
 from ..services.results import OperationResult
 from .app_state import AppState
 from .cursor_compare_vm import CursorCompareViewModel
 from .data_loading_vm import DataLoadingViewModel
+from .dataset_vm import DatasetViewModel
 from .engineering_notes_vm import EngineeringNotesViewModel
 from .limits_vm import LimitsViewModel
 from .maths_channels_vm import MathsChannelsViewModel
@@ -37,6 +38,7 @@ class MainWindowViewModel:
         self.state = AppState(settings_manager=settings_manager)
         self.settings = SettingsViewModel(settings_manager)
         self.data_loading = DataLoadingViewModel(self.state)
+        self.dataset = DatasetViewModel(self.state)
         self.plot_workspace = PlotWorkspaceViewModel(self.state)
         self.raw_data = RawDataViewModel(self.state)
         self.maths_channels = MathsChannelsViewModel(self.state)
@@ -60,15 +62,52 @@ class MainWindowViewModel:
         """Start a fresh one-plot workspace for a newly opened data file."""
         self.state.plot_profiles = [normalise_plot_profile({"name": "Plot 1"})]
         self.state.active_plot_profile_index = 0
+        self.state.current_x_axis = ""
         self.state.limit_lines = []
         self.state.active_limit_line_index = 0
         self.state.engineering_notes = {}
+
+    def create_manual_session(
+        self, *, columns: list[str] | None = None, rows: int = 8
+    ) -> OperationResult:
+        """Start a blank manual data session (no linked Excel file).
+
+        Creates a small editable starter grid with stable channel IDs, resets the
+        plot workspace, runs, and maths channels, and marks the source as manual
+        so plotting/maths/session save all flow through the same pipeline as
+        Excel-loaded data.
+        """
+        names = [str(name).strip() for name in (columns or ["Column 1", "Column 2", "Column 3"])]
+        names = [name for name in names if name]
+        if not names:
+            names = ["Column 1"]
+        row_count = max(0, int(rows))
+        df = pd.DataFrame(
+            {name: pd.Series([float("nan")] * row_count, dtype="float64") for name in names}
+        )
+        self.state.df = df
+        self.state.channel_registry = dataset_service.build_registry_for_dataframe(df)
+        self.state.data_source_type = SOURCE_MANUAL
+        self.state.filepath = None
+        self.state.sheet_name = ""
+        self.state.root_file_directory = ""
+        self.state.calculated_channels = {}
+        self.state.runs = []
+        self.state.active_run_index = -1
+        self.state.comparison = ComparisonSettings()
+        self.reset_plot_profiles()
+        self.state.is_dirty = True
+        return OperationResult.success(
+            "Created a new manual data session.", payload=list(df.columns)
+        )
 
     def add_plot_profile(self, name: str = "") -> OperationResult:
         self.ensure_plot_profiles()
         profile_name = name.strip() or self._next_plot_name()
         profile_name = self._unique_profile_name(profile_name)
-        self.state.plot_profiles.append(normalise_plot_profile({"name": profile_name}))
+        self.state.plot_profiles.append(
+            normalise_plot_profile({"name": profile_name, "x_column": self._current_x_axis_or_default()})
+        )
         self.state.active_plot_profile_index = len(self.state.plot_profiles) - 1
         return OperationResult.success(f"Created plot '{profile_name}'.", payload=self.state.active_plot_profile_index)
 
@@ -122,6 +161,12 @@ class MainWindowViewModel:
         profile = self.state.active_plot_profile() or {}
         return OperationResult.success(f"Selected plot '{profile.get('name', index + 1)}'.", payload=index)
 
+    def set_current_x_axis(self, x_column: str) -> str:
+        """Remember the current X-axis selection if it is available in the active data."""
+        candidate = str(x_column).strip()
+        self.state.current_x_axis = candidate if candidate in self.state.column_names() else ""
+        return self.state.current_x_axis
+
     def _clamped_profile_index(self, index: int) -> int:
         if not self.state.plot_profiles:
             return 0
@@ -139,6 +184,13 @@ class MainWindowViewModel:
         while f"{candidate} {counter}" in existing:
             counter += 1
         return f"{candidate} {counter}"
+
+    def _current_x_axis_or_default(self) -> str:
+        current = str(self.state.current_x_axis).strip()
+        columns = self.state.column_names()
+        if current and current in columns:
+            return current
+        return self.data_loading.suggested_x_column(columns)
 
     def persistent_plot_channel_colours(
         self,
@@ -442,8 +494,15 @@ class MainWindowViewModel:
     # ------------------------------------------------------------------
     def build_session(self) -> dict[str, Any]:
         """Assemble a normalised session dictionary from the current state."""
+        manual = self.state.data_source_type == SOURCE_MANUAL
+        dataset_rows = (
+            dataset_service.rows_from_dataframe(self.state.channel_registry, self.state.df)
+            if manual
+            else []
+        )
         return session_service.build_session_dict(
             version=__version__,
+            root_file_directory=self.state.root_file_directory or self._root_directory_for_file(self.state.filepath),
             file_path=str(self.state.filepath) if self.state.filepath else "",
             sheet_name=self.state.sheet_name,
             runs=self.runs_comparison.serialise_runs(),
@@ -451,6 +510,9 @@ class MainWindowViewModel:
             active_plot_profile_index=self.state.active_plot_profile_index,
             plot_profiles=[normalise_plot_profile(profile) for profile in self.state.plot_profiles],
             calculated_channels=self.maths_channels.normalise_definitions(self.state.calculated_channels),
+            data_source_type=self.state.data_source_type,
+            channel_registry=self.state.channel_registry.to_dict(),
+            dataset_rows=dataset_rows,
         )
 
     def save_session(self, path: str | Path) -> OperationResult:
@@ -459,6 +521,7 @@ class MainWindowViewModel:
             saved_path = session_service.save_session_dict(path, session)
         except Exception as exc:
             return OperationResult.failure(f"Could not save the analysis session: {exc}")
+        self.state.is_dirty = False
         return OperationResult.success(f"Session saved successfully:\n{saved_path}", payload=str(saved_path))
 
     def load_session(self, path: str | Path) -> OperationResult:
@@ -485,8 +548,12 @@ class MainWindowViewModel:
         self.state.calculated_channels = {
             name: definition.to_dict() for name, definition in session.calculated_channels.items()
         }
+        self.state.data_source_type = session.data_source_type
+        self.state.channel_registry = session.channel_registry
+        self.state.root_file_directory = session.root_file_directory
         self.state.comparison = session.comparison
         self.state.active_run_index = session.comparison.active_run_index
+        self.state.is_dirty = False
         return OperationResult.success("Session loaded.", payload=session)
 
     # ------------------------------------------------------------------
@@ -508,6 +575,7 @@ class MainWindowViewModel:
         axis_ticks: dict[str, Any] | None = None,
         legend_settings: dict[str, Any] | None = None,
         best_fit_lines: list[dict[str, Any]] | None = None,
+        annotations: list[dict[str, Any]] | None = None,
         analysis_window: dict[str, Any] | None = None,
         filter_settings: dict[str, Any] | None = None,
         generated: bool = False,
@@ -520,6 +588,7 @@ class MainWindowViewModel:
         the existing on-disk format.
         """
         self.ensure_plot_profiles()
+        self.set_current_x_axis(x_column)
         index = self._clamped_profile_index(self.state.active_plot_profile_index)
         existing = dict(self.state.plot_profiles[index])
         existing_legend = existing.get("legend", {}) if isinstance(existing.get("legend", {}), dict) else {}
@@ -541,6 +610,7 @@ class MainWindowViewModel:
                 "axis_ticks": dict(axis_ticks or {}),
                 "legend": merged_legend,
                 "best_fit_lines": [dict(line) for line in best_fit_lines or []],
+                "annotations": [dict(annotation) for annotation in (annotations if annotations is not None else existing.get("annotations", []))],
                 "analysis_window": dict(analysis_window or {}),
                 "filter": dict(filter_settings or {}),
                 "generated": bool(generated),
@@ -584,19 +654,41 @@ class MainWindowViewModel:
         self.state.active_limit_line_index = 0
         self.state.engineering_notes = dict(profile.get("engineering_notes", {}))
 
-        source_file_path = str(data_file_override) if data_file_override else session.file_path
+        source_file_path = ""
         main_data_warning = ""
         self.state.df = None
         self.state.filepath = None
-        self.state.sheet_name = session.sheet_name
-        if source_file_path:
-            load_result = self.data_loading.load_file(source_file_path, session.sheet_name or None)
-            if not load_result.ok:
-                main_data_warning = load_result.message
-                warnings.append(f"Main data file: {main_data_warning}")
+
+        if session.data_source_type == SOURCE_MANUAL:
+            self.state.data_source_type = SOURCE_MANUAL
+            self.state.channel_registry = session.channel_registry
+            self.state.df = dataset_service.dataframe_from_rows(
+                session.channel_registry, session.dataset_rows
+            )
+            self.state.sheet_name = ""
+            self.state.root_file_directory = session.root_file_directory
+        else:
+            self.state.data_source_type = SOURCE_EXCEL
+            source_file_path = str(data_file_override) if data_file_override else self._source_file_from_session(session)
+            self.state.root_file_directory = session.root_file_directory
+            self.state.sheet_name = session.sheet_name
+            if source_file_path:
+                load_result = self.data_loading.load_file(source_file_path, session.sheet_name or None)
+                if not load_result.ok:
+                    main_data_warning = load_result.message
+                    warnings.append(f"Main data file: {main_data_warning}")
+                    self.state.root_file_directory = self._root_directory_from_text(source_file_path)
+                else:
+                    # Preserve saved channel IDs across the disk reload so that
+                    # ID-based profile/maths references keep resolving.
+                    self.state.channel_registry = dataset_service.build_registry_for_dataframe(
+                        self.state.df, existing=session.channel_registry
+                    )
 
         if self.state.df is not None and self.state.calculated_channels:
             warnings.extend(self.maths_channels.recalculate().errors)
+        if self.state.df is not None:
+            warnings.extend(self._missing_saved_plot_channel_warnings())
 
         self.state.runs = []
         self.state.active_run_index = -1
@@ -634,6 +726,7 @@ class MainWindowViewModel:
             "main_data_loaded": self.state.df is not None,
             "main_data_warning": main_data_warning,
         }
+        self.state.is_dirty = data_file_override is not None
         message = "Session loaded."
         if warnings:
             message += f" {len(warnings)} item(s) could not be fully restored."
@@ -646,3 +739,77 @@ class MainWindowViewModel:
         except Exception:
             resolved_path = str(path)
         return resolved_path, str(sheet_name or "")
+
+    @classmethod
+    def _source_file_from_session(cls, session: Any) -> str:
+        file_path = str(getattr(session, "file_path", "") or "")
+        root_file_directory = str(getattr(session, "root_file_directory", "") or "")
+        if not root_file_directory or not file_path:
+            return file_path
+        file_name = Path(file_path).name
+        if not file_name:
+            return file_path
+        try:
+            return str(Path(root_file_directory) / file_name)
+        except Exception:
+            return file_path
+
+    @staticmethod
+    def _root_directory_for_file(file_path: str | Path | None) -> str:
+        if not file_path:
+            return ""
+        try:
+            parent = Path(file_path).parent
+        except Exception:
+            return ""
+        return "" if str(parent) in {"", "."} else str(parent)
+
+    @staticmethod
+    def _root_directory_from_text(file_path: str) -> str:
+        try:
+            return str(Path(file_path).expanduser().parent)
+        except Exception:
+            return ""
+
+    def _missing_saved_plot_channel_warnings(self) -> list[str]:
+        available = set(self.state.column_names())
+        if not available:
+            return []
+        warnings: list[str] = []
+        seen: set[tuple[str, str, str]] = set()
+        for index, profile in enumerate(self.state.plot_profiles):
+            profile_name = str(profile.get("name", f"Plot {index + 1}")).strip() or f"Plot {index + 1}"
+            x_column = str(profile.get("x_column", "")).strip()
+            if x_column and x_column not in available:
+                key = (profile_name, "x", x_column)
+                if key not in seen:
+                    warnings.append(
+                        f"The saved plot '{profile_name}' references X-axis column '{x_column}', "
+                        "but this channel was not found in the current data file."
+                    )
+                    seen.add(key)
+            for channel in self._profile_y_channel_references(profile):
+                if channel in available:
+                    continue
+                key = (profile_name, "y", channel)
+                if key in seen:
+                    continue
+                warnings.append(
+                    f"The saved plot '{profile_name}' references '{channel}', "
+                    "but this channel was not found in the current data file."
+                )
+                seen.add(key)
+        return warnings
+
+    @staticmethod
+    def _profile_y_channel_references(profile: dict[str, Any]) -> list[str]:
+        channels: list[str] = []
+        for key in ("y_columns", "secondary_y_columns"):
+            values = profile.get(key, [])
+            if not isinstance(values, list):
+                continue
+            for value in values:
+                channel = str(value).strip()
+                if channel and channel not in channels:
+                    channels.append(channel)
+        return channels

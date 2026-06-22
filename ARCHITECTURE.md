@@ -60,6 +60,10 @@ Plain dataclasses that mirror the on-disk JSON shapes, each with
 sessions keep loading:
 
 - `models.py` — the runtime `PlotData` container.
+- `dataset.py` — `ColumnSpec` and `ChannelRegistry`: the stable-ID (`ch_001`)
+  channel registry that decouples a column's internal identity from its display
+  name (so a header can be renamed without breaking references), plus the
+  data-source-type constants (`excel`/`manual`).
 - `settings.py` — per-plot view/setting structures (`AxisLimits`,
   `AxisTickSettings`, `AnalysisWindow`, `FilterSettings`, `LegendSettings`,
   `RawDataViewSettings`, `ManualLabelFlags`). `AxisTickSettings` holds the
@@ -69,13 +73,18 @@ sessions keep loading:
 - `engineering_notes.py` — `EngineeringNotes` (accepts the structured dict form
   and the historical free-text string form).
 - `limits.py` — `LimitPoint`, `LimitLine`.
+- `annotations.py` — tolerant normalisation for plot-level text, arrow, and box
+  annotations stored in session/profile JSON.
 - `plot_profile.py` — `PlotProfile` (now including `axis_ticks`,
-  per-channel best-fit line settings, and the `generated` flag) plus
-  `plot_profile_from_dict`, `plot_profile_to_dict`, and
+  per-channel best-fit line settings, plot annotations, and the `generated`
+  flag) plus `plot_profile_from_dict`, `plot_profile_to_dict`, and
   `normalise_plot_profile`.
 - `run_model.py` — `RunMetadata`, `ComparisonSettings`,
   `CalculatedChannelDefinition`.
-- `session.py` — `SessionState`, the top-level analysis-session model.
+- `session.py` — `SessionState`, the top-level analysis-session model,
+  including the saved root file directory used to resolve moved source data, the
+  data-source type, the channel registry, and the embedded row values for manual
+  sessions.
 - `conversions.py` — shared, defensive value-coercion helpers.
 
 Import these directly, e.g. `from test_data_analyser.domain import PlotData`.
@@ -107,6 +116,10 @@ must not embed in a canvas or show dialogs; they return values or an
   a stable colour (no Qt).
 - `raw_data_service.py` — selected-data framing/filtering, blank-row removal,
   row-limit parsing, and edit coercion.
+- `dataset_service.py` — source-agnostic dataset edits over a
+  `(DataFrame, ChannelRegistry)` pair: build/reconcile the registry with stable
+  channel IDs, add/rename/delete columns, add/delete rows, coerce cell edits,
+  and serialise/rebuild manual rows for session embedding (no Qt).
 - `run_comparison_service.py` — enabled-run filtering, common-X range,
   per-channel comparison framing, comparison statistics, and run serialisation.
 - `cursor_service.py` — nearest plotted sample and the locked-point/delta
@@ -121,11 +134,16 @@ ViewModels coordinate domain state and services, expose plain Python data, and
 return `OperationResult`. They hold no Qt objects, open no dialogs, and show no
 message boxes.
 
-- `app_state.py` — `AppState`: the single source of truth (dataframe, source
-  file/sheet, plot profiles, runs + active index, calculated channels, limit
-  lines + active index, engineering notes, comparison settings, settings
-  manager).
+- `app_state.py` — `AppState`: the single source of truth (dataframe, data
+  source type, channel registry, source file/sheet/root directory, dirty flag,
+  current X-axis default, plot profiles, runs + active index, calculated
+  channels, limit lines + active index, engineering notes, comparison settings,
+  settings manager).
 - `data_loading_vm.py` — file/sheet loading into the state.
+- `dataset_vm.py` — coordinates full-dataset editing (add/rename/delete columns
+  and rows, cell edits) and propagates a column rename/delete across plot
+  profiles, the current X-axis, Maths Channel formulas, and limits so stable
+  channel IDs keep every reference consistent.
 - `plot_workspace_vm.py` — plot-data preparation, selected ranges, statistics,
   and prepared plot/comparison series (pulls numeric series from the state
   directly).
@@ -134,7 +152,8 @@ message boxes.
   export.
 - `maths_channels_vm.py` — validate/apply/recalculate/delete calculated
   channels plus table-display data for the Qt panel, mutating the state's
-  dataframe/definitions in place.
+  dataframe/definitions in place. Formula validation and calculation remain in
+  the shared Maths Channel evaluator; the Qt builder only inserts formula text.
 - `limits_vm.py` — limit-line + point CRUD, colour-preset helpers, active
   ranges, table-display data, and the margin-to-limit summary.
 - `runs_comparison_vm.py` — run CRUD (load/remove/duplicate/rename/set-active/
@@ -148,9 +167,9 @@ message boxes.
 - `main_window_vm.py` — the top-level coordinator owning `AppState` and every
   feature viewmodel, multiple plot-profile management
   (`add`/`duplicate`/`rename`/`delete`/`select_plot_profile`, plus
-  `ensure`/`reset_plot_profiles` and `persistent_plot_channel_colours`), and
-  session build/save/load and full restore (`capture_working_state`,
-  `restore_session`).
+  `ensure`/`reset_plot_profiles`, current-X-axis preservation, and
+  `persistent_plot_channel_colours`), and session build/save/load and full
+  restore (`capture_working_state`, `restore_session`).
 
 ### `qt_app/` — the PySide6 UI
 
@@ -176,6 +195,8 @@ The only package that imports PySide6.
 - `adapters/` — the Qt/Matplotlib boundary objects (no business logic):
   `pandas_table_model` (reusable `QAbstractTableModel`),
   `editable_raw_data_model` (inline-editing subclass),
+  `editable_dataset_model` (full-dataset editing model backed by the channel
+  registry, used by the Raw Data tab's *Edit dataset* mode),
   `matplotlib_qt_adapter` (owns the `FigureCanvasQTAgg` + the
   `LegendAwareNavigationToolbar`, which extends Figure Options with legend,
   axis-tick, and auto-label/auto-fit controls, applies the active theme to the
@@ -185,23 +206,36 @@ The only package that imports PySide6.
 
 ## Key flows
 
+- **Data sources.** The File ribbon offers **Open Excel** (load a CSV/XLSX/XLS
+  file) and **Create Session** (start a blank manual dataset). Both build a
+  `ChannelRegistry` with stable `ch_001`-style IDs and feed the same dataframe
+  in `AppState.df`, so plotting, Maths Channels, axis selectors, and sessions
+  work identically regardless of source. The Raw Data tab's *Edit dataset* mode
+  edits columns/rows/cells in either mode; edits are session-only and never
+  rewrite the original Excel file. Plot selectors offer only numeric-compatible
+  channels.
 - **Plotting.** `MainWindow._generate_plot()` reads the axis panel (X, primary &
   secondary Y, plot kind, analysis window, filter), asks `PlotWorkspace` to
   render prepared series from `PlotWorkspaceViewModel`, applies persistent
   per-channel colours, axis padding, and major-tick spacing, draws limit
-  overlays, and refreshes statistics, raw data, margins, and the cursor state.
+  overlays and plot annotations as Matplotlib artists, and refreshes
+  statistics, raw data, margins, and the cursor state.
 - **Plot profiles.** The plot-tab bar maps to `MainWindow`'s active plot
   profile; switching tabs captures the current profile and applies the selected
   one. `MainWindowViewModel` owns the add/duplicate/rename/delete/select
   operations, and each profile round-trips its channels, labels, axis limits,
   ticks, legend mode, per-channel legend overrides including visibility,
-  best-fit line settings, and `generated` flag.
+  best-fit line settings, annotations, and `generated` flag. New profiles
+  inherit the currently selected X-axis when it is still present in the active
+  dataframe.
 - **Figure Options and legend styling.** `LegendAwareNavigationToolbar` augments
   the Matplotlib Figure Options dialog with legend, axis-tick,
   auto-label/auto-fit, and best-fit controls while leaving curve styling to the
   Qt Legend panel's channel editor and Hide / Show controls. The legend can be
   shown in the right-side Qt panel or in-graph, and the export path temporarily
-  draws the panel legend onto the axes so saved PNGs match the on-screen plot.
+  draws the panel legend onto the axes so saved PNGs match the on-screen plot;
+  plot annotations are already Matplotlib artists, so they are captured by the
+  same `savefig` path.
 - **Signals.** Panels communicate with the main window via Qt signals
   (`fileLoaded`, `channelsChanged`, `limitsChanged`, `comparisonRequested`,
   `cursorPointsChanged`, `analysisWindowRequested`, `statusMessage`); the main
@@ -212,10 +246,15 @@ The only package that imports PySide6.
 - **Sessions.** `capture_working_state()` folds the top-level limit lines,
   engineering notes, axis selection, the `generated` flag, and the live plot
   appearance, including legend channel overrides, into a plot profile;
-  `restore_session()` reloads the file and runs, recalculates maths channels,
-  and returns the saved selection (plus warnings) for the UI to re-apply and
-  re-render. File and session dialogs reopen at the last-used directory
-  remembered in settings.
+  `restore_session()` resolves the source file from the saved root directory,
+  reloads current source data and runs from disk, recalculates maths channels,
+  and returns the saved selection (plus warnings such as missing refreshed-data
+  channels) for the UI to re-apply and re-render. A **manual** session instead
+  embeds its channel registry and row values and rebuilds the dataframe in
+  memory, requiring no Excel file; an **excel** session reloads from disk and
+  reconciles the registry by name so channel IDs stay stable across reloads.
+  File and session dialogs reopen at the last-used directory remembered in
+  settings.
 
 ## Branding
 
@@ -258,6 +297,12 @@ above. Historical step-by-step migration notes are archived under
 - **Channel grouping & persistent colours.** Deterministic engineering channel
   classification (`core/utils`) drives the axis panel's channel filter, and
   `plot_render_service` keeps recurring channels on stable colours across plots.
+- **Session data refresh.** Sessions persist configuration plus source paths;
+  on load, source CSV/XLSX/XLS data is re-read from disk and Maths Channels are
+  recalculated from the refreshed dataframe.
+- **Maths Channel builder.** The Qt Maths Channels panel provides formula
+  insertion buttons and safe channel insertion while keeping formula parsing and
+  evaluation inside the framework-independent Maths Channel service.
 - **Natural channel ordering.** User-facing channel lists and tables use the
   shared natural sort key, preserving channel group order where grouping is
   displayed.

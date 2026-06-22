@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .annotations import normalise_annotations
 from .conversions import _int, _mapping, _string, _string_list
 from .engineering_notes import EngineeringNotes
 from .limits import LimitLine
@@ -86,6 +87,7 @@ class PlotProfile:
     engineering_notes: EngineeringNotes = field(default_factory=EngineeringNotes)
     limit_lines: list[LimitLine] = field(default_factory=list)
     best_fit_lines: list[dict[str, object]] = field(default_factory=list)
+    annotations: list[dict[str, object]] = field(default_factory=list)
     manual_labels: ManualLabelFlags = field(default_factory=ManualLabelFlags)
     generated: bool = False
 
@@ -114,6 +116,7 @@ class PlotProfile:
             engineering_notes=EngineeringNotes.from_dict(data.get("engineering_notes")),
             limit_lines=[LimitLine.from_dict(line) for line in limit_lines] if isinstance(limit_lines, list) else [],
             best_fit_lines=_best_fit_lines(data.get("best_fit_lines")),
+            annotations=normalise_annotations(data.get("annotations")),
             manual_labels=ManualLabelFlags.from_dict(data.get("manual_labels")),
             generated=bool(data.get("generated", False)),
         )
@@ -140,6 +143,7 @@ class PlotProfile:
             "engineering_notes": self.engineering_notes.to_dict(),
             "limit_lines": [line.to_dict() for line in self.limit_lines],
             "best_fit_lines": [dict(line) for line in self.best_fit_lines],
+            "annotations": [dict(annotation) for annotation in self.annotations],
             "manual_labels": self.manual_labels.to_dict(),
             "generated": self.generated,
         }

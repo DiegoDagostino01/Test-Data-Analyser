@@ -104,9 +104,12 @@ Maths Channels let you create derived dataframe columns inside the app, then use
 them like normal channels for X/Y selection, secondary Y plotting, statistics,
 raw data views/exports, and requirement/limit comparisons.
 
-Open **Maths Channels**, enter a channel name, build a formula using backticked
-column names, quoted exact column names, or the column insertion dropdown, then
-click **Apply / Save Channel**. Example formulas:
+Open **Maths Channels**, enter a channel name, then build a formula with the
+column insertion dropdown, the formula-builder buttons (`+`, `-`, `*`, `/`,
+`sqrt()`, square, power, reciprocal, and brackets), or direct manual editing.
+Column insertion writes safe formula references for channel names with spaces or
+symbols. Click **Validate Formula** to check the generated text against the
+existing formula engine, then click **Apply / Save Channel**. Example formulas:
 
 ```text
 `Outlet Pressure` - `Inlet Pressure`
@@ -117,10 +120,10 @@ clip(`Pressure`, 0, 500)
 ```
 
 Calculated channel definitions are saved in analysis sessions and recalculated
-when a session is loaded. Channel lists are sorted naturally throughout the app,
-so numbered names such as `TC2` and `TC10` appear in engineering-friendly order;
-where channel groups are shown, the group order is preserved and each group is
-sorted internally.
+from the refreshed source data when a session is loaded. Channel lists are
+sorted naturally throughout the app, so numbered names such as `TC2` and `TC10`
+appear in engineering-friendly order; where channel groups are shown, the group
+order is preserved and each group is sorted internally.
 
 ## Plot options
 
@@ -150,10 +153,17 @@ the Figure Options dialog. Configurable axis padding (Settings > Axis Padding)
 keeps a margin around auto-fitted data, and saved figure exports include the
 legend.
 
+Use the **Annotations** controls in the plot toolbar to select, add text boxes,
+draw arrows, or draw boxes directly on the active plot. Annotations are stored
+with the plot tab in data coordinates, can be moved/edited/deleted, and are
+included in saved PNG exports.
+
 Use the **+** tab beside the plot tabs above the canvas to create additional
-plots. Each plot tab keeps its own X-axis selection, Y-axis selections, plot
+plots. New plot tabs inherit the currently selected X-axis when that channel is
+still available, falling back to the suggested/default X column only when
+needed. Each plot tab keeps its own X-axis selection, Y-axis selections, plot
 title, axis labels, limits, ticks, legend mode, legend channel overrides, notes,
-and requirement overlays.
+annotations, and requirement overlays.
 Right-click a plot tab to duplicate, rename, or delete it; all plot tabs are
 saved and restored with analysis sessions. Re-generating a plot preserves manual
 axis labels, limits, and tick spacing for plot-kind changes or similar channel
@@ -170,7 +180,8 @@ the **margin-to-limit summary** table reports each channel's PASS/WARN/FAIL
 status, margin, margin percentage, worst point, first failure point, and detail
 message against the active selection. Limit margins are evaluated by
 interpolating the limit line over the channel's X data, and a PASS within 5%
-margin is highlighted as WARN.
+margin is highlighted as WARN. The X/Y point table expands vertically when the
+Limits tab has spare space, making larger point sets easier to review.
 
 ## Engineering Notes
 
@@ -191,12 +202,17 @@ into the analysis-window fields.
 ## Analysis sessions
 
 The **File** ribbon's **Save Session** command writes the current file
-reference, axis selection, plot profiles, calculated-channel definitions, limit
-lines, engineering notes, legend channel overrides, and run/comparison settings
-to a JSON file. **Load Session** restores them — reloading the source file and
-comparison runs from their saved paths, recalculating maths channels, and
-re-applying the selection across every panel.
-Saved sessions remain compatible with the original on-disk format.
+reference, root file directory, axis selection, plot profiles,
+calculated-channel definitions, limit lines, engineering notes, legend channel
+overrides, plot annotations, and run/comparison settings to a JSON file.
+**Load Session** restores the configuration, reloads the current source
+CSV/XLSX/XLS data from disk, reloads comparison runs from their saved paths,
+recalculates Maths Channels, and re-applies the selection across every panel.
+If a refreshed data file no longer
+contains a saved plot channel, the session still loads and reports the missing
+reference clearly.
+Saved sessions remain compatible with the earlier on-disk format; older session
+files without `root_file_directory` are normalised on load.
 
 ## Architecture
 

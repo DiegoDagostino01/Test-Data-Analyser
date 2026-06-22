@@ -188,3 +188,28 @@ def numeric_series(series: pd.Series) -> pd.Series:
     text = text.str.extract(NUMERIC_EXTRACT_RE, expand=False)
     return pd.to_numeric(text, errors="coerce")
 
+
+#: Blank/placeholder tokens treated as missing values when classifying a column.
+_BLANK_TOKENS = frozenset({"", "-", "--", "N/A", "n/a", "None", "none", "nan", "NaN"})
+
+
+def detect_column_data_type(series: pd.Series, *, threshold: float = 0.6) -> str:
+    """Classify a column as ``"numeric"`` or ``"text"``.
+
+    Detection mirrors the tolerant :func:`numeric_series` coercion used by the
+    plotting pipeline: a column is numeric when at least ``threshold`` of its
+    non-blank values coerce to numbers. Fully blank columns are treated as
+    numeric so a freshly created manual column stays plottable until
+    non-numeric text is entered.
+    """
+    if pd.api.types.is_numeric_dtype(series):
+        return "numeric"
+    coerced = numeric_series(series)
+    text = series.astype(str).str.strip()
+    non_blank = ~(series.isna() | text.isin(_BLANK_TOKENS))
+    total = int(non_blank.sum())
+    if total == 0:
+        return "numeric"
+    numeric_count = int((coerced.notna() & non_blank).sum())
+    return "numeric" if (numeric_count / total) >= threshold else "text"
+

@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSplitter,
     QStyledItemDelegate,
     QTableView,
@@ -268,8 +269,7 @@ class LimitsPanel(QWidget):
         form.addRow("Colour:", colour_row)
         outer.addLayout(form)
 
-        outer.addWidget(self._build_points_group())
-        outer.addStretch(1)
+        outer.addWidget(self._build_points_group(), stretch=1)
         return editor
 
     def _build_summary_panel(self) -> QWidget:
@@ -321,6 +321,8 @@ class LimitsPanel(QWidget):
 
     def _build_points_group(self) -> QWidget:
         group = QGroupBox("X vs Y Limit Points — minimum 2 points to plot / calculate margin")
+        group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.points_group = group
         group_layout = QVBoxLayout(group)
 
         entry_row = QHBoxLayout()
@@ -353,8 +355,9 @@ class LimitsPanel(QWidget):
         self.points_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.points_table.verticalHeader().setVisible(False)
         self.points_table.setMinimumHeight(140)
+        self.points_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.points_table.selectionModel().selectionChanged.connect(self._on_point_selected)
-        group_layout.addWidget(self.points_table)
+        group_layout.addWidget(self.points_table, stretch=1)
         return group
 
     # ------------------------------------------------------------------

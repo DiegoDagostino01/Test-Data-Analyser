@@ -103,7 +103,8 @@ class MainWindow(QMainWindow):
 
     def _build_file_shortcuts(self) -> None:
         for text, shortcut, handler in [
-            ("Open Data", "Ctrl+O", self._open_via_panel),
+            ("Open Excel", "Ctrl+O", self._open_via_panel),
+            ("Create Session", "Ctrl+N", self._create_manual_session),
             ("Save Session", "Ctrl+S", self.save_session),
             ("Load Session", "Ctrl+L", self.load_session),
         ]:
@@ -123,8 +124,9 @@ class MainWindow(QMainWindow):
         self.axis_panel = AxisSelectionPanel()
         self.plot_workspace = PlotWorkspace(self.vm.plot_workspace, self.vm.settings)
         self.statistics_panel = StatisticsPanel()
-        self.raw_data_panel = RawDataPanel(self.vm.raw_data)
+        self.raw_data_panel = RawDataPanel(self.vm.raw_data, self.vm.dataset)
         self.raw_data_panel.set_selection_provider(self._current_axis_selection)
+        self.raw_data_panel.datasetChanged.connect(self._on_dataset_changed)
         self.maths_panel = MathsChannelsPanel(self.vm.maths_channels)
         self.best_fit_formulas_panel = BestFitFormulasPanel()
         self.limits_panel = LimitsPanel(self.vm.limits, self.vm.plot_workspace)
@@ -134,6 +136,7 @@ class MainWindow(QMainWindow):
         self.runs_panel = RunsComparisonPanel(self.vm.runs_comparison)
         self.runs_panel.set_selection_provider(self._current_axis_selection)
         self.plot_workspace.set_cursor_viewmodel(self.vm.cursor_compare)
+        self.plot_workspace.annotationsChanged.connect(self._on_annotations_changed)
         self.plot_workspace.legendChannelStyleChanged.connect(self._on_legend_channel_style_changed)
         self.plot_workspace.legendChannelVisibilityChanged.connect(self._on_legend_channel_visibility_changed)
         self.plot_workspace.bestFitFormulasChanged.connect(self._refresh_best_fit_formulas)
@@ -285,7 +288,8 @@ class MainWindow(QMainWindow):
             (
                 "FILE",
                 [
-                    ("Open Data", self._open_via_panel),
+                    ("Open Excel", self._open_via_panel),
+                    ("Create Session", self._create_manual_session),
                     ("Save Session", self.save_session),
                     ("Load Session", self.load_session),
                     ("Export Data", self._export_selected_data),
@@ -604,6 +608,7 @@ class MainWindow(QMainWindow):
             plot_kind=self.axis_panel.plot_kind(),
             legend_settings=self._current_legend_settings(profile),
             best_fit_lines=self.plot_workspace.best_fit_settings(),
+            annotations=self.plot_workspace.current_annotations(),
             analysis_window=self.axis_panel.analysis_window_texts(),
             axis_ticks=self.plot_workspace.axis_tick_setting_texts(),
             filter_settings=self.axis_panel.filter_setting_texts(),
@@ -625,6 +630,7 @@ class MainWindow(QMainWindow):
             plot_kind=str(profile.get("plot_kind", "Line")),
             legend_settings=self._current_legend_settings(profile),
             best_fit_lines=list(profile.get("best_fit_lines", [])) if isinstance(profile.get("best_fit_lines"), list) else [],
+            annotations=list(profile.get("annotations", [])) if isinstance(profile.get("annotations"), list) else [],
             analysis_window=dict(profile.get("analysis_window", {})) if isinstance(profile.get("analysis_window"), dict) else {},
             axis_ticks=dict(profile.get("axis_ticks", {})) if isinstance(profile.get("axis_ticks"), dict) else {},
             filter_settings=dict(profile.get("filter", {})) if isinstance(profile.get("filter"), dict) else {},
@@ -685,7 +691,7 @@ class MainWindow(QMainWindow):
         self.vm.state.active_limit_line_index = 0
         self.vm.state.engineering_notes = dict(profile.get("engineering_notes", {}))
 
-        columns = self.vm.state.column_names()
+        columns = self._plottable_columns()
         self.axis_panel.apply_selection(
             columns,
             str(profile.get("x_column", "")),
@@ -701,6 +707,8 @@ class MainWindow(QMainWindow):
         self.plot_workspace.set_legend_display(str(display_mode))
         best_fit_lines = profile.get("best_fit_lines", []) if isinstance(profile, dict) else []
         self.plot_workspace.set_best_fit_settings(best_fit_lines if isinstance(best_fit_lines, list) else [])
+        annotations = profile.get("annotations", []) if isinstance(profile, dict) else []
+        self.plot_workspace.set_annotations(annotations if isinstance(annotations, list) else [])
         self.statistics_panel.set_statistics(self.vm.plot_workspace.statistics([]))
         self.raw_data_panel.clear()
         if clear_global_forms:
@@ -716,6 +724,53 @@ class MainWindow(QMainWindow):
 
     def _open_via_panel(self) -> None:
         self.data_panel.open_file()
+
+    def _create_manual_session(self) -> None:
+        if self.vm.state.has_data and self.vm.state.is_dirty:
+            if not qt_message_service.confirm(
+                self,
+                "Create Session",
+                "Start a new manual data session? Any unsaved changes to the current data will be lost.",
+            ):
+                return
+        result = self.vm.create_manual_session()
+        self._current_session_path = None
+        self._plot_generated = False
+        self._plot_display_frozen = False
+        self._last_plot_selection = None
+        self._plot_profile_snapshots.clear()
+        self._sync_plot_tabs()
+        self.plot_workspace.clear_plot()
+        self.cursor_panel.refresh()
+        self.data_panel.show_manual_session()
+        suggested_x = self.vm.data_loading.suggested_x_column(self._plottable_columns())
+        self.axis_panel.set_columns(
+            self._plottable_columns(), suggested_x, maths_channel_names=self._maths_channel_names()
+        )
+        self.vm.set_current_x_axis(self.axis_panel.x_column())
+        self.statistics_panel.set_statistics(self.vm.plot_workspace.statistics([]))
+        self.maths_panel.clear_form()
+        self.maths_panel.refresh()
+        self.limits_panel.refresh()
+        self.notes_panel.load_from_state()
+        self.runs_panel.refresh()
+        self.raw_data_panel.enter_edit_mode()
+        self._show_analysis_page(1)
+        self.statusBar().showMessage(
+            f"{result.message} Edit the Raw Data table, then generate a plot."
+        )
+
+    def _on_dataset_changed(self) -> None:
+        """Refresh channel-dependent views after a structural or cell dataset edit."""
+        self.axis_panel.update_columns(
+            self._plottable_columns(), maths_channel_names=self._maths_channel_names()
+        )
+        self.vm.set_current_x_axis(self.axis_panel.x_column())
+        if self.vm.state.calculated_channels:
+            self.vm.maths_channels.recalculate()
+        self.maths_panel.refresh()
+        self.statistics_panel.set_statistics(self.vm.plot_workspace.statistics([]))
+        self.vm.state.is_dirty = True
 
     def _set_ribbon_visible(self, visible: bool) -> None:
         if hasattr(self, "ribbon"):
@@ -831,7 +886,10 @@ class MainWindow(QMainWindow):
 
     def _apply_loaded_session(self, selection: dict) -> None:
         self._plot_profile_snapshots.clear()
-        self.data_panel.refresh_from_state()
+        if self.vm.state.is_manual_source:
+            self.data_panel.show_manual_session()
+        else:
+            self.data_panel.refresh_from_state()
         self._sync_plot_tabs()
         self._apply_active_plot_profile(clear_global_forms=True)
 
@@ -946,6 +1004,7 @@ class MainWindow(QMainWindow):
             channel_colours=self.vm.persistent_plot_channel_colours(primary_y, secondary_y),
             channel_styles=self.vm.active_legend_channel_overrides(),
             axis_tick_settings=profile.get("axis_ticks", {}) if isinstance(profile.get("axis_ticks"), dict) else {},
+            annotations=list(profile.get("annotations", [])) if isinstance(profile.get("annotations"), list) else [],
             **self._appearance_kwargs(appearance),
         )
         if result.ok:
@@ -971,6 +1030,15 @@ class MainWindow(QMainWindow):
             return
         self._plot_generated = True
         self.statusBar().showMessage(result.message)
+
+    def _on_annotations_changed(self) -> None:
+        self.vm.ensure_plot_profiles()
+        index = self.vm.state.active_plot_profile_index
+        if not 0 <= index < len(self.vm.state.plot_profiles):
+            return
+        self.vm.state.plot_profiles[index]["annotations"] = self.plot_workspace.current_annotations()
+        self.vm.state.is_dirty = True
+        self.statusBar().showMessage("Plot annotations updated.")
 
     def _on_legend_channel_visibility_changed(self, channel: str, hidden: bool) -> None:
         result = self.vm.update_active_legend_channel_override(channel, {"channel": channel, "hidden": hidden})
@@ -1002,7 +1070,8 @@ class MainWindow(QMainWindow):
         self._sync_plot_tabs()
         self.plot_workspace.clear_plot()
         self.cursor_panel.refresh()
-        self.axis_panel.set_columns(columns, suggested_x, maths_channel_names=self._maths_channel_names())
+        self.axis_panel.set_columns(self._plottable_columns(), suggested_x, maths_channel_names=self._maths_channel_names())
+        self.vm.set_current_x_axis(self.axis_panel.x_column())
         self.statistics_panel.set_statistics(self.vm.plot_workspace.statistics([]))
         self.raw_data_panel.clear()
         self.maths_panel.clear_form()
@@ -1016,7 +1085,8 @@ class MainWindow(QMainWindow):
         self._capture_current_plot_profile()
         self._plot_display_frozen = self._plot_generated
         self._last_plot_selection = None
-        self.axis_panel.update_columns(columns, maths_channel_names=self._maths_channel_names())
+        self.axis_panel.update_columns(self._plottable_columns(), maths_channel_names=self._maths_channel_names())
+        self.vm.set_current_x_axis(self.axis_panel.x_column())
         self.statistics_panel.set_statistics(self.vm.plot_workspace.statistics([]))
         self.raw_data_panel.clear()
         self.maths_panel.refresh()
@@ -1117,6 +1187,8 @@ class MainWindow(QMainWindow):
         channel_colours = self.vm.persistent_plot_channel_colours(primary_y, secondary_y)
         channel_styles = self.vm.active_legend_channel_overrides()
         tick_settings = self.plot_workspace.axis_tick_setting_texts() if axis_tick_settings is None else axis_tick_settings
+        profile = self.vm.state.active_plot_profile() or {}
+        annotations = profile.get("annotations", []) if isinstance(profile, dict) else []
         result = self.plot_workspace.generate_plot(
             x_col,
             y_cols,
@@ -1131,6 +1203,7 @@ class MainWindow(QMainWindow):
             channel_colours=channel_colours,
             channel_styles=channel_styles,
             axis_tick_settings=tick_settings,
+            annotations=annotations if isinstance(annotations, list) else [],
             **self._appearance_kwargs(appearance),
         )
         if result.ok:
@@ -1195,8 +1268,19 @@ class MainWindow(QMainWindow):
     def _maths_channel_names(self) -> list[str]:
         return list(self.vm.state.calculated_channels.keys())
 
+    def _plottable_columns(self) -> list[str]:
+        """Numeric source columns plus Maths Channels, for the axis selectors.
+
+        Text columns are excluded so only numeric-compatible channels are offered
+        for plotting; Maths Channels (numeric, tracked outside the registry) are
+        appended.
+        """
+        numeric = self.vm.state.numeric_column_names()
+        maths = [name for name in self._maths_channel_names() if name not in numeric]
+        return numeric + maths
+
     def _on_channels_changed(self) -> None:
-        columns = self.vm.maths_channels.state.column_names()
+        columns = self._plottable_columns()
         if columns:
             self.axis_panel.update_columns(columns, maths_channel_names=self._maths_channel_names())
         self.raw_data_panel.refresh()

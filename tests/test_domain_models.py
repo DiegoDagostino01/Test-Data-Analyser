@@ -17,6 +17,7 @@ from test_data_analyser.domain import (
     AxisLimits,
     AxisTickSettings,
     CalculatedChannelDefinition,
+    ChannelRegistry,
     ComparisonSettings,
     EngineeringNotes,
     LegendSettings,
@@ -24,6 +25,7 @@ from test_data_analyser.domain import (
     PlotProfile,
     RunMetadata,
     SessionState,
+    normalise_annotations,
     normalise_plot_profile,
 )
 
@@ -214,13 +216,38 @@ class PlotProfileTests(unittest.TestCase):
         self.assertEqual(profile.plot_kind, "Line")
         self.assertTrue(profile.grid)
 
+    def test_annotations_are_preserved_and_malformed_entries_are_skipped(self) -> None:
+        annotations = normalise_annotations(
+            [
+                {"id": "txt", "type": "text", "text": "Pressure dip", "x": "1.5", "y": "2.5"},
+                {"id": "arr", "type": "arrow", "axis": "secondary", "start_x": 1, "start_y": 2, "end_x": 3, "end_y": 4},
+                {"id": "box", "type": "box", "x_min": 3, "x_max": 1, "y_min": 4, "y_max": 2},
+                {"id": "bad", "type": "text", "x": 1, "y": 2},
+                {"id": "unknown", "type": "circle", "x": 1, "y": 2},
+            ]
+        )
+
+        self.assertEqual([annotation["type"] for annotation in annotations], ["text", "arrow", "box"])
+        self.assertEqual(annotations[0]["axis"], "primary")
+        self.assertEqual(annotations[1]["axis"], "secondary")
+        self.assertEqual(annotations[2]["x_min"], 1.0)
+        profile = PlotProfile.from_dict({"annotations": annotations})
+        self.assertEqual(profile.to_dict()["annotations"], annotations)
+
 
 class SessionStateTests(unittest.TestCase):
     def _sample_session(self) -> dict:
         return {
             "version": "1.00.00",
+            "root_file_directory": r"C:\\data",
             "file_path": r"C:\\data\\run1.xlsx",
             "sheet_name": "Sheet1",
+            "data_source_type": "excel",
+            "channel_registry": {
+                "columns": [{"id": "ch_001", "display_name": "Time", "data_type": "numeric"}],
+                "next_id": 2,
+            },
+            "dataset_rows": [],
             "runs": [
                 {
                     "name": "Run 1",
@@ -264,6 +291,11 @@ class SessionStateTests(unittest.TestCase):
         self.assertEqual(restored["calculated_channels"], {})
         self.assertEqual(restored["active_plot_profile_index"], 0)
         self.assertEqual(restored["active_run_index"], -1)
+        self.assertEqual(restored["root_file_directory"], "")
+
+    def test_missing_root_directory_is_derived_from_file_path(self) -> None:
+        restored = SessionState.from_dict({"file_path": r"C:\data\run1.xlsx"}).to_dict()
+        self.assertEqual(restored["root_file_directory"], r"C:\data")
 
     def test_invalid_calculated_channels_are_dropped(self) -> None:
         session = self._sample_session()
@@ -275,6 +307,53 @@ class SessionStateTests(unittest.TestCase):
     def test_non_dict_input_is_handled(self) -> None:
         restored = SessionState.from_dict(None).to_dict()
         self.assertEqual(restored["plot_profiles"], [])
+
+
+class ChannelRegistryTests(unittest.TestCase):
+    def _registry(self) -> ChannelRegistry:
+        registry = ChannelRegistry()
+        registry.add_column("Time", "numeric")
+        registry.add_column("Pressure", "numeric")
+        registry.add_column("Serial", "text")
+        return registry
+
+    def test_allocate_ids_are_sequential_and_unique(self) -> None:
+        registry = self._registry()
+        self.assertEqual(registry.ids(), ["ch_001", "ch_002", "ch_003"])
+
+    def test_lookups_resolve_both_directions(self) -> None:
+        registry = self._registry()
+        channel_id = registry.id_for_name("Pressure")
+        self.assertEqual(channel_id, "ch_002")
+        self.assertEqual(registry.name_for_id(channel_id), "Pressure")
+        self.assertEqual(registry.numeric_names(), ["Time", "Pressure"])
+
+    def test_has_display_name_respects_exclusion(self) -> None:
+        registry = self._registry()
+        self.assertTrue(registry.has_display_name("Time"))
+        self.assertFalse(
+            registry.has_display_name("Time", exclude_id=registry.id_for_name("Time"))
+        )
+
+    def test_round_trip_preserves_ids_and_counter(self) -> None:
+        registry = self._registry()
+        restored = ChannelRegistry.from_dict(registry.to_dict())
+        self.assertEqual(restored.ids(), ["ch_001", "ch_002", "ch_003"])
+        self.assertEqual(restored.next_id, 4)
+        self.assertEqual(restored.spec_for_name("Serial").data_type, "text")
+
+    def test_sync_next_id_recovers_from_stale_counter(self) -> None:
+        registry = ChannelRegistry.from_dict(
+            {"columns": [{"id": "ch_010", "display_name": "A", "data_type": "numeric"}], "next_id": 1}
+        )
+        self.assertEqual(registry.allocate_id(), "ch_011")
+
+    def test_names_and_ids_resolution_skips_unknown(self) -> None:
+        registry = self._registry()
+        ids = registry.names_to_ids(["Pressure", "Missing", "Time"])
+        self.assertEqual(ids, ["ch_002", "ch_001"])
+        names = registry.ids_to_names(["ch_001", "ch_999", "ch_003"])
+        self.assertEqual(names, ["Time", "Serial"])
 
 
 if __name__ == "__main__":

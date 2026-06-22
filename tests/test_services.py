@@ -19,6 +19,7 @@ import pandas as pd
 from test_data_analyser.domain import PlotData
 from test_data_analyser.services import (
     cursor_service,
+    dataset_service,
     limits_service,
     maths_channel_service,
     plot_render_service,
@@ -483,6 +484,124 @@ class OperationResultTests(unittest.TestCase):
         bad = OperationResult.failure("nope")
         self.assertFalse(bad.ok)
         self.assertEqual(bad.errors, ["nope"])
+
+
+class DatasetServiceTests(unittest.TestCase):
+    def _dataset(self):
+        df = pd.DataFrame({"Time": [0.0, 1.0, 2.0], "Pressure": [10.0, 11.0, 12.0]})
+        registry = dataset_service.build_registry_for_dataframe(df)
+        return df, registry
+
+    def test_build_registry_assigns_stable_ids_and_types(self) -> None:
+        df = pd.DataFrame({"Time": [0.0, 1.0], "Label": ["a", "b"]})
+        registry = dataset_service.build_registry_for_dataframe(df)
+        self.assertEqual(registry.ids(), ["ch_001", "ch_002"])
+        self.assertEqual(registry.spec_for_name("Time").data_type, "numeric")
+        self.assertEqual(registry.spec_for_name("Label").data_type, "text")
+        self.assertEqual(registry.numeric_names(), ["Time"])
+
+    def test_build_registry_preserves_ids_on_reconcile(self) -> None:
+        df, registry = self._dataset()
+        original_id = registry.id_for_name("Pressure")
+        reloaded = pd.DataFrame(
+            {"Time": [0.0, 1.0], "Pressure": [9.0, 9.5], "Flow": [1.0, 2.0]}
+        )
+        reconciled = dataset_service.build_registry_for_dataframe(reloaded, existing=registry)
+        self.assertEqual(reconciled.id_for_name("Pressure"), original_id)
+        self.assertNotIn(reconciled.id_for_name("Flow"), {None, original_id})
+
+    def test_add_column_blocks_duplicate(self) -> None:
+        df, registry = self._dataset()
+        ok = dataset_service.add_column(df, registry, "Flow")
+        self.assertTrue(ok.ok)
+        self.assertIn("Flow", ok.payload["df"].columns)
+        dup = dataset_service.add_column(df, registry, "Flow")
+        self.assertFalse(dup.ok)
+        self.assertIn("already exists", dup.message)
+
+    def test_rename_column_updates_df_and_registry(self) -> None:
+        df, registry = self._dataset()
+        channel_id = registry.id_for_name("Pressure")
+        result = dataset_service.rename_column(df, registry, channel_id, "Outlet Pressure")
+        self.assertTrue(result.ok)
+        self.assertIn("Outlet Pressure", df.columns)
+        self.assertNotIn("Pressure", df.columns)
+        self.assertEqual(registry.name_for_id(channel_id), "Outlet Pressure")
+
+    def test_rename_column_blocks_duplicate(self) -> None:
+        df, registry = self._dataset()
+        channel_id = registry.id_for_name("Pressure")
+        result = dataset_service.rename_column(df, registry, channel_id, "Time")
+        self.assertFalse(result.ok)
+        self.assertIn("already exists", result.message)
+
+    def test_delete_column_removes_from_df_and_registry(self) -> None:
+        df, registry = self._dataset()
+        channel_id = registry.id_for_name("Pressure")
+        result = dataset_service.delete_column(df, registry, channel_id)
+        self.assertTrue(result.ok)
+        self.assertNotIn("Pressure", df.columns)
+        self.assertIsNone(registry.spec_for_id(channel_id))
+
+    def test_add_and_delete_rows(self) -> None:
+        df, _ = self._dataset()
+        added = dataset_service.add_row(df)
+        self.assertTrue(added.ok)
+        self.assertEqual(len(added.payload["df"]), 4)
+        deleted = dataset_service.delete_rows(added.payload["df"], [0, 1])
+        self.assertTrue(deleted.ok)
+        self.assertEqual(len(deleted.payload["df"]), 2)
+
+    def test_set_cell_numeric_and_invalid(self) -> None:
+        df, registry = self._dataset()
+        channel_id = registry.id_for_name("Pressure")
+        ok = dataset_service.set_cell(df, registry, channel_id, 0, "99.5")
+        self.assertTrue(ok.ok)
+        self.assertEqual(df.at[0, "Pressure"], 99.5)
+        invalid = dataset_service.set_cell(df, registry, channel_id, 1, "bad")
+        self.assertTrue(invalid.ok)
+        self.assertTrue(invalid.warnings)
+        self.assertEqual(df.at[1, "Pressure"], "bad")
+
+    def test_session_rows_round_trip(self) -> None:
+        df, registry = self._dataset()
+        rows = dataset_service.rows_from_dataframe(registry, df)
+        self.assertEqual(rows[0][registry.id_for_name("Time")], 0.0)
+        rebuilt = dataset_service.dataframe_from_rows(registry, rows)
+        self.assertEqual(list(rebuilt.columns), ["Time", "Pressure"])
+        self.assertEqual(list(rebuilt["Pressure"]), [10.0, 11.0, 12.0])
+
+    def test_session_rows_preserve_blanks_as_none(self) -> None:
+        df = pd.DataFrame({"A": [1.0, np.nan]})
+        registry = dataset_service.build_registry_for_dataframe(df)
+        rows = dataset_service.rows_from_dataframe(registry, df)
+        self.assertIsNone(rows[1][registry.id_for_name("A")])
+        rebuilt = dataset_service.dataframe_from_rows(registry, rows)
+        self.assertTrue(np.isnan(rebuilt.at[1, "A"]))
+
+
+class MathsChannelFormulaRenameTests(unittest.TestCase):
+    def test_rename_backtick_reference(self) -> None:
+        out = maths_channel_service.rename_column_in_formula(
+            "`Inlet Pressure` / `Outlet Pressure`", "Inlet Pressure", "Supply Pressure"
+        )
+        self.assertEqual(out, "`Supply Pressure` / `Outlet Pressure`")
+
+    def test_rename_bare_identifier(self) -> None:
+        out = maths_channel_service.rename_column_in_formula("A + B", "A", "Alpha")
+        self.assertEqual(out, "Alpha + B")
+
+    def test_rename_bare_to_spaced_name_uses_backticks(self) -> None:
+        out = maths_channel_service.rename_column_in_formula("A + B", "A", "Alpha One")
+        self.assertEqual(out, "`Alpha One` + B")
+
+    def test_rename_leaves_functions_and_substrings_untouched(self) -> None:
+        out = maths_channel_service.rename_column_in_formula("abs(AB) + A", "A", "X")
+        self.assertEqual(out, "abs(AB) + X")
+
+    def test_rename_noop_when_absent(self) -> None:
+        out = maths_channel_service.rename_column_in_formula("A + B", "C", "Z")
+        self.assertEqual(out, "A + B")
 
 
 if __name__ == "__main__":

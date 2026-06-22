@@ -90,6 +90,8 @@ class DataLoadingViewModelTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.payload, ["Time", "Sig"])
         self.assertIsNotNone(state.df)
+        self.assertEqual(state.root_file_directory, str(csv_path.resolve().parent))
+        self.assertTrue(state.is_dirty)
         self.assertEqual(state.sheet_name, "")
 
     def test_missing_file_fails(self) -> None:
@@ -589,6 +591,7 @@ class MainWindowViewModelTests(unittest.TestCase):
 
     def test_build_session_keys(self) -> None:
         session = self._populated_vm().build_session()
+        self.assertIn("root_file_directory", session)
         self.assertEqual(session["file_path"], "source.csv")
         self.assertEqual(session["sheet_name"], "Sheet1")
         self.assertIn("Sum", session["calculated_channels"])
@@ -615,6 +618,34 @@ class MainWindowViewModelTests(unittest.TestCase):
         self.assertEqual(vm.state.plot_profiles[0]["y_columns"], ["A"])
         self.assertEqual(vm.state.plot_profiles[1]["title"], "Second Plot")
         self.assertEqual(vm.state.plot_profiles[1]["y_label"], "Current")
+
+    def test_capture_working_state_persists_active_profile_annotations(self) -> None:
+        vm = MainWindowViewModel()
+        annotation = {"id": "ann_001", "type": "text", "text": "Pressure dip", "x": 1.0, "y": 2.0}
+
+        vm.capture_working_state(x_column="Time", y_columns=["A"], annotations=[annotation])
+
+        self.assertEqual(vm.state.plot_profiles[0]["annotations"][0]["text"], "Pressure dip")
+
+        vm.capture_working_state(x_column="Time", y_columns=["A"], annotations=[])
+
+        self.assertEqual(vm.state.plot_profiles[0]["annotations"], [])
+
+    def test_new_plot_profile_uses_current_x_axis_or_default(self) -> None:
+        vm = MainWindowViewModel()
+        vm.state.df = pd.DataFrame({"Time": [0.0, 1.0], "Flow": [5.0, 6.0], "A": [1.0, 2.0]})
+
+        vm.capture_working_state(x_column="Flow", y_columns=["A"])
+        result = vm.add_plot_profile()
+
+        self.assertTrue(result.ok, result.message)
+        self.assertEqual(vm.state.plot_profiles[1]["x_column"], "Flow")
+
+        vm.state.current_x_axis = "Removed Channel"
+        result = vm.add_plot_profile()
+
+        self.assertTrue(result.ok, result.message)
+        self.assertEqual(vm.state.plot_profiles[2]["x_column"], "Time")
 
     def test_persistent_plot_channel_colours_use_active_selection_for_repeats(self) -> None:
         vm = MainWindowViewModel()
@@ -894,6 +925,72 @@ class MainWindowViewModelTests(unittest.TestCase):
             self.assertEqual(len(target.state.runs), 1)
             self.assertIn("Sum", target.state.df.columns)
 
+    def test_restore_session_reloads_modified_excel_from_disk(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_path = Path(tmp) / "data.xlsx"
+            with pd.ExcelWriter(data_path, engine="openpyxl") as writer:
+                pd.DataFrame({"Time": [0.0, 1.0], "A": [1.0, 2.0]}).to_excel(
+                    writer,
+                    sheet_name="Data",
+                    index=False,
+                )
+
+            source = MainWindowViewModel()
+            self.assertTrue(source.data_loading.load_file(data_path, "Data").ok)
+            source.capture_working_state(x_column="Time", y_columns=["A"], secondary_y_columns=[])
+            session_path = Path(tmp) / "s.json"
+            self.assertTrue(source.save_session(session_path).ok)
+
+            with pd.ExcelWriter(data_path, engine="openpyxl") as writer:
+                pd.DataFrame({"Time": [0.0, 1.0], "A": [10.0, 20.0], "B": [5.0, 6.0]}).to_excel(
+                    writer,
+                    sheet_name="Data",
+                    index=False,
+                )
+
+            target = MainWindowViewModel()
+            result = target.restore_session(session_path)
+
+            self.assertTrue(result.ok, result.message)
+            self.assertEqual(result.warnings, [])
+            self.assertEqual(list(target.state.df["A"]), [10.0, 20.0])
+            self.assertIn("B", target.state.column_names())
+
+    def test_restore_session_warns_for_plot_channels_missing_after_excel_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_path = Path(tmp) / "data.xlsx"
+            with pd.ExcelWriter(data_path, engine="openpyxl") as writer:
+                pd.DataFrame({"Time": [0.0, 1.0], "Outlet Pressure": [1.0, 2.0]}).to_excel(
+                    writer,
+                    sheet_name="Data",
+                    index=False,
+                )
+
+            source = MainWindowViewModel()
+            self.assertTrue(source.data_loading.load_file(data_path, "Data").ok)
+            source.capture_working_state(x_column="Time", y_columns=["Outlet Pressure"], secondary_y_columns=[])
+            session_path = Path(tmp) / "s.json"
+            self.assertTrue(source.save_session(session_path).ok)
+
+            with pd.ExcelWriter(data_path, engine="openpyxl") as writer:
+                pd.DataFrame({"Time": [0.0, 1.0], "Inlet Pressure": [3.0, 4.0]}).to_excel(
+                    writer,
+                    sheet_name="Data",
+                    index=False,
+                )
+
+            target = MainWindowViewModel()
+            result = target.restore_session(session_path)
+
+            self.assertTrue(result.ok, result.message)
+            self.assertIn("Inlet Pressure", target.state.column_names())
+            self.assertNotIn("Outlet Pressure", target.state.column_names())
+            self.assertTrue(
+                any("Outlet Pressure" in warning and "not found" in warning for warning in result.warnings),
+                result.warnings,
+            )
+            self.assertEqual(result.payload["y_columns"], ["Outlet Pressure"])
+
     def test_restore_session_reuses_main_dataframe_for_matching_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             data_path = Path(tmp) / "data.xlsx"
@@ -996,8 +1093,74 @@ class MainWindowViewModelTests(unittest.TestCase):
             self.assertTrue(result.ok, result.message)
             self.assertEqual(result.warnings, [])
             self.assertTrue(result.payload["main_data_loaded"])
+            self.assertEqual(target.state.root_file_directory, str(moved_path.resolve().parent))
+            self.assertTrue(target.state.is_dirty)
             self.assertEqual(target.state.filepath, moved_path)
             self.assertEqual(target.state.column_names(), ["Time", "A"])
+
+    def test_restore_session_uses_saved_root_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            old_dir = Path(tmp) / "old"
+            new_dir = Path(tmp) / "new"
+            old_dir.mkdir()
+            new_dir.mkdir()
+            stale_path = old_dir / "data.csv"
+            current_path = new_dir / "data.csv"
+            pd.DataFrame({"Time": [0.0, 1.0], "A": [2.0, 3.0]}).to_csv(current_path, index=False)
+            session_path = Path(tmp) / "s.json"
+            from test_data_analyser.services import session_service
+
+            session_service.save_session_dict(
+                session_path,
+                {
+                    "version": "test",
+                    "root_file_directory": str(new_dir),
+                    "file_path": str(stale_path),
+                    "sheet_name": "",
+                    "runs": [],
+                    "active_plot_profile_index": 0,
+                    "plot_profiles": [{"name": "Plot 1", "x_column": "Time", "y_columns": ["A"]}],
+                    "calculated_channels": {},
+                },
+            )
+
+            target = MainWindowViewModel()
+            result = target.restore_session(session_path)
+
+            self.assertTrue(result.ok, result.message)
+            self.assertEqual(result.warnings, [])
+            self.assertEqual(result.payload["source_file_path"], str(current_path))
+            self.assertEqual(target.state.root_file_directory, str(new_dir))
+            self.assertEqual(target.state.filepath, current_path)
+            self.assertEqual(target.state.column_names(), ["Time", "A"])
+
+    def test_save_session_writes_updated_root_directory_after_relink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            old_dir = Path(tmp) / "old"
+            new_dir = Path(tmp) / "new"
+            old_dir.mkdir()
+            new_dir.mkdir()
+            original_path = old_dir / "data.csv"
+            moved_path = new_dir / "data.csv"
+            pd.DataFrame({"Time": [0.0, 1.0], "A": [2.0, 3.0]}).to_csv(original_path, index=False)
+
+            source = MainWindowViewModel()
+            self.assertTrue(source.data_loading.load_file(original_path, None).ok)
+            source.capture_working_state(x_column="Time", y_columns=["A"], secondary_y_columns=[])
+            session_path = Path(tmp) / "s.json"
+            self.assertTrue(source.save_session(session_path).ok)
+            original_path.replace(moved_path)
+
+            target = MainWindowViewModel()
+            self.assertTrue(target.restore_session(session_path, data_file_override=moved_path).ok)
+            self.assertTrue(target.state.is_dirty)
+            relinked_session_path = Path(tmp) / "relinked.json"
+            self.assertTrue(target.save_session(relinked_session_path).ok)
+            self.assertFalse(target.state.is_dirty)
+
+            reloaded = session_service.load_session_dict(relinked_session_path)
+            self.assertEqual(reloaded["root_file_directory"], str(new_dir))
+            self.assertEqual(reloaded["file_path"], str(moved_path))
 
     def test_restore_missing_main_file_clears_previous_dataframe(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1021,6 +1184,192 @@ class MainWindowViewModelTests(unittest.TestCase):
             self.assertTrue(result.ok)
             self.assertIsNone(target.state.df)
             self.assertIsNone(target.state.filepath)
+
+    def test_create_manual_session_sets_manual_source(self) -> None:
+        vm = MainWindowViewModel()
+        result = vm.create_manual_session(columns=["A", "B"], rows=3)
+        self.assertTrue(result.ok, result.message)
+        self.assertTrue(vm.state.is_manual_source)
+        self.assertEqual(vm.state.column_names(), ["A", "B"])
+        self.assertEqual(len(vm.state.df), 3)
+        self.assertEqual(vm.state.channel_registry.ids(), ["ch_001", "ch_002"])
+        self.assertIsNone(vm.state.filepath)
+        self.assertTrue(vm.state.is_dirty)
+
+    def test_manual_session_save_and_restore_round_trip(self) -> None:
+        source = MainWindowViewModel()
+        self.assertTrue(source.create_manual_session(columns=["Time", "Pressure"], rows=2).ok)
+        time_id = source.state.channel_registry.id_for_name("Time")
+        pressure_id = source.state.channel_registry.id_for_name("Pressure")
+        source.state.df.at[0, "Time"] = 0.0
+        source.state.df.at[1, "Time"] = 1.0
+        source.state.df.at[0, "Pressure"] = 10.0
+        source.state.df.at[1, "Pressure"] = 11.0
+        source.capture_working_state(x_column="Time", y_columns=["Pressure"], secondary_y_columns=[])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "manual.json"
+            self.assertTrue(source.save_session(path).ok)
+
+            target = MainWindowViewModel()
+            result = target.restore_session(path)
+            self.assertTrue(result.ok, result.message)
+            self.assertEqual(result.warnings, [])
+            self.assertTrue(target.state.is_manual_source)
+            self.assertIsNone(target.state.filepath)
+            self.assertEqual(target.state.column_names(), ["Time", "Pressure"])
+            self.assertEqual(list(target.state.df["Pressure"]), [10.0, 11.0])
+            self.assertEqual(target.state.channel_registry.id_for_name("Time"), time_id)
+            self.assertEqual(target.state.channel_registry.id_for_name("Pressure"), pressure_id)
+
+    def test_excel_restore_preserves_channel_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_path = Path(tmp) / "data.csv"
+            pd.DataFrame({"Time": [0.0, 1.0], "A": [1.0, 2.0]}).to_csv(data_path, index=False)
+
+            source = MainWindowViewModel()
+            self.assertTrue(source.data_loading.load_file(data_path, None).ok)
+            original_ids = dict(
+                zip(source.state.channel_registry.display_names(), source.state.channel_registry.ids())
+            )
+            source.capture_working_state(x_column="Time", y_columns=["A"], secondary_y_columns=[])
+            session_path = Path(tmp) / "s.json"
+            self.assertTrue(source.save_session(session_path).ok)
+
+            target = MainWindowViewModel()
+            self.assertTrue(target.restore_session(session_path).ok)
+            restored_ids = dict(
+                zip(target.state.channel_registry.display_names(), target.state.channel_registry.ids())
+            )
+            self.assertEqual(restored_ids, original_ids)
+            self.assertEqual(target.state.data_source_type, "excel")
+
+    def test_legacy_session_without_registry_restores_and_builds_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_path = Path(tmp) / "data.csv"
+            pd.DataFrame({"Time": [0.0, 1.0], "A": [1.0, 2.0]}).to_csv(data_path, index=False)
+            session_path = Path(tmp) / "s.json"
+            session_service.save_session_dict(
+                session_path,
+                {
+                    "version": "old",
+                    "file_path": str(data_path),
+                    "sheet_name": "",
+                    "runs": [],
+                    "active_plot_profile_index": 0,
+                    "plot_profiles": [{"name": "Plot 1", "x_column": "Time", "y_columns": ["A"]}],
+                    "calculated_channels": {},
+                },
+            )
+
+            target = MainWindowViewModel()
+            result = target.restore_session(session_path)
+            self.assertTrue(result.ok, result.message)
+            self.assertEqual(target.state.data_source_type, "excel")
+            self.assertEqual(target.state.channel_registry.display_names(), ["Time", "A"])
+            self.assertTrue(target.state.channel_registry.ids())
+
+
+class DatasetViewModelTests(unittest.TestCase):
+    def _manual_vm(self) -> MainWindowViewModel:
+        vm = MainWindowViewModel()
+        vm.create_manual_session(columns=["Time", "Pressure"], rows=2)
+        return vm
+
+    def test_add_column_and_duplicate_block(self) -> None:
+        vm = self._manual_vm()
+        self.assertTrue(vm.dataset.add_column("Flow").ok)
+        self.assertIn("Flow", vm.state.column_names())
+        self.assertEqual(vm.state.channel_registry.id_for_name("Flow"), "ch_003")
+        self.assertFalse(vm.dataset.add_column("Flow").ok)
+
+    def test_rename_column_propagates_to_profile(self) -> None:
+        vm = self._manual_vm()
+        key = plot_render_service.normalise_channel_name("Pressure")
+        vm.state.plot_profiles = [
+            {
+                "name": "Plot 1",
+                "x_column": "Time",
+                "y_columns": ["Pressure"],
+                "secondary_y_columns": [],
+                "best_fit_lines": [{"channel": "Pressure", "fit_type": "Linear", "order": 1}],
+                "legend": {"channel_overrides": {key: {"channel": "Pressure", "colour": "#111111"}}},
+                "limit_lines": [{"name": "L", "applies_to": "Pressure", "points": []}],
+            }
+        ]
+        channel_id = vm.state.channel_registry.id_for_name("Pressure")
+        result = vm.dataset.rename_column(channel_id, "Outlet Pressure")
+        self.assertTrue(result.ok, result.message)
+        profile = vm.state.plot_profiles[0]
+        self.assertEqual(profile["y_columns"], ["Outlet Pressure"])
+        self.assertEqual(profile["best_fit_lines"][0]["channel"], "Outlet Pressure")
+        self.assertEqual(profile["limit_lines"][0]["applies_to"], "Outlet Pressure")
+        new_key = plot_render_service.normalise_channel_name("Outlet Pressure")
+        self.assertEqual(profile["legend"]["channel_overrides"][new_key]["channel"], "Outlet Pressure")
+        self.assertIn("Outlet Pressure", vm.state.column_names())
+
+    def test_rename_column_updates_current_x_axis(self) -> None:
+        vm = self._manual_vm()
+        vm.state.current_x_axis = "Time"
+        channel_id = vm.state.channel_registry.id_for_name("Time")
+        self.assertTrue(vm.dataset.rename_column(channel_id, "Seconds").ok)
+        self.assertEqual(vm.state.current_x_axis, "Seconds")
+
+    def test_rename_column_rewrites_maths_formula(self) -> None:
+        vm = self._manual_vm()
+        vm.state.calculated_channels = {
+            "Doubled": {
+                "name": "Doubled",
+                "formula": "`Pressure` * 2",
+                "description": "",
+                "enabled": True,
+                "created_from_columns": ["Pressure"],
+            }
+        }
+        channel_id = vm.state.channel_registry.id_for_name("Pressure")
+        self.assertTrue(vm.dataset.rename_column(channel_id, "Outlet Pressure").ok)
+        definition = vm.state.calculated_channels["Doubled"]
+        self.assertEqual(definition["formula"], "`Outlet Pressure` * 2")
+        self.assertEqual(definition["created_from_columns"], ["Outlet Pressure"])
+
+    def test_rename_column_blocks_duplicate(self) -> None:
+        vm = self._manual_vm()
+        channel_id = vm.state.channel_registry.id_for_name("Pressure")
+        result = vm.dataset.rename_column(channel_id, "Time")
+        self.assertFalse(result.ok)
+        self.assertIn("already exists", result.message)
+
+    def test_delete_column_warns_dependents(self) -> None:
+        vm = self._manual_vm()
+        vm.state.plot_profiles = [
+            {"name": "Plot 1", "x_column": "Time", "y_columns": ["Pressure"], "secondary_y_columns": []}
+        ]
+        vm.state.calculated_channels = {
+            "Doubled": {
+                "name": "Doubled",
+                "formula": "`Pressure` * 2",
+                "description": "",
+                "enabled": True,
+                "created_from_columns": ["Pressure"],
+            }
+        }
+        channel_id = vm.state.channel_registry.id_for_name("Pressure")
+        result = vm.dataset.delete_column(channel_id)
+        self.assertTrue(result.ok, result.message)
+        self.assertNotIn("Pressure", vm.state.column_names())
+        self.assertEqual(vm.state.plot_profiles[0]["y_columns"], [])
+        self.assertTrue(any("Plot 1" in warning for warning in result.warnings))
+        self.assertTrue(any("Doubled" in warning for warning in result.warnings))
+
+    def test_row_and_cell_operations(self) -> None:
+        vm = self._manual_vm()
+        self.assertTrue(vm.dataset.add_row().ok)
+        self.assertEqual(len(vm.state.df), 3)
+        channel_id = vm.state.channel_registry.id_for_name("Pressure")
+        self.assertTrue(vm.dataset.set_cell(channel_id, 0, "42").ok)
+        self.assertEqual(vm.state.df.at[0, "Pressure"], 42.0)
+        self.assertTrue(vm.dataset.delete_rows([0]).ok)
+        self.assertEqual(len(vm.state.df), 2)
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -37,14 +38,16 @@ from ...viewmodels.maths_channels_vm import MathsChannelsViewModel
 from ..adapters import qt_message_service
 from ..adapters.pandas_table_model import PandasTableModel
 
-_EXAMPLES = (
-    "Examples:\n"
-    "`Outlet Pressure` - `Inlet Pressure`\n"
-    "`Voltage` * `Current`\n"
-    "rolling_mean(`Current`, 25)\n"
-    "sqrt(abs(`Signal A`))\n"
-    "clip(`Pressure`, 0, 500)\n"
-    "Tip: wrap exact column names in backticks."
+_FORMULA_BUTTONS = (
+    ("+", " + ", 0),
+    ("−", " - ", 0),
+    ("×", " * ", 0),
+    ("÷", " / ", 0),
+    ("√x", "sqrt()", -1),
+    ("x²", "**2", 0),
+    ("x^n", "**", 0),
+    ("1/x", "1 / ()", -1),
+    ("( )", "()", -1),
 )
 
 
@@ -57,6 +60,7 @@ class MathsChannelsPanel(QWidget):
         self.vm = view_model
         self._selected_name: str | None = None
         self._channel_order: list[str] = []
+        self.formula_buttons: dict[str, QPushButton] = {}
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -131,17 +135,37 @@ class MathsChannelsPanel(QWidget):
         self.formula_edit.setMinimumHeight(90)
         self.formula_edit.setPlaceholderText("`Channel A` - `Channel B`")
         form.addRow("Formula:", self.formula_edit)
+        form.addRow("Builder:", self._build_formula_buttons())
+
+        self.validation_status_label = QLabel("Formula status will appear here after validation.")
+        self.validation_status_label.setObjectName("PlaceholderText")
+        self.validation_status_label.setWordWrap(True)
+        form.addRow("Status:", self.validation_status_label)
 
         self.description_edit = QLineEdit()
         form.addRow("Description:", self.description_edit)
         outer.addLayout(form)
-
-        examples = QLabel(_EXAMPLES)
-        examples.setObjectName("PlaceholderText")
-        examples.setWordWrap(True)
-        outer.addWidget(examples)
         outer.addStretch(1)
         return frame
+
+    def _build_formula_buttons(self) -> QWidget:
+        panel = QWidget()
+        layout = QGridLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setHorizontalSpacing(4)
+        layout.setVerticalSpacing(4)
+        for index, (label, syntax, cursor_offset) in enumerate(_FORMULA_BUTTONS):
+            button = QPushButton(label)
+            button.setToolTip(f"Insert {syntax.strip() or label} into the formula.")
+            button.clicked.connect(
+                lambda _checked=False, syntax=syntax, cursor_offset=cursor_offset: self._insert_formula_text(
+                    syntax,
+                    cursor_offset,
+                )
+            )
+            self.formula_buttons[label] = button
+            layout.addWidget(button, index // 5, index % 5)
+        return panel
 
     def _build_table(self) -> QWidget:
         self.model = PandasTableModel()
@@ -188,6 +212,7 @@ class MathsChannelsPanel(QWidget):
         self.name_edit.clear()
         self.description_edit.clear()
         self.formula_edit.clear()
+        self.validation_status_label.setText("Formula status will appear here after validation.")
         self.table.clearSelection()
 
     # ------------------------------------------------------------------
@@ -222,15 +247,26 @@ class MathsChannelsPanel(QWidget):
         if not column:
             qt_message_service.warning(self, "Maths Channels", "Select an existing column to insert.")
             return
-        if "`" in column:
-            qt_message_service.error(self, "Maths Channels", "Columns containing backticks cannot be inserted into formulas.")
-            return
-        self.formula_edit.insertPlainText(f"`{column}`")
+        self._insert_formula_text(self._column_formula_reference(column))
+
+    def _insert_formula_text(self, text: str, cursor_offset: int = 0) -> None:
+        self.formula_edit.insertPlainText(text)
+        if cursor_offset:
+            cursor = self.formula_edit.textCursor()
+            steps = abs(cursor_offset)
+            operation = cursor.MoveOperation.Left if cursor_offset < 0 else cursor.MoveOperation.Right
+            cursor.movePosition(operation, cursor.MoveMode.MoveAnchor, steps)
+            self.formula_edit.setTextCursor(cursor)
         self.formula_edit.setFocus()
+
+    @staticmethod
+    def _column_formula_reference(column: str) -> str:
+        return repr(column) if "`" in column else f"`{column}`"
 
     def _validate(self) -> None:
         result = self.vm.validate_formula(self.formula_edit.toPlainText().strip())
         if not result.ok:
+            self.validation_status_label.setText(f"Invalid formula: {result.message}")
             qt_message_service.error(self, "Maths Channels", result.message)
             return
         payload = result.payload or {}
@@ -243,6 +279,7 @@ class MathsChannelsPanel(QWidget):
             )
         else:
             message = result.message
+        self.validation_status_label.setText(message)
         qt_message_service.info(self, "Maths Channels", message)
 
     def _apply(self) -> None:
@@ -253,9 +290,11 @@ class MathsChannelsPanel(QWidget):
             selected_name=self._selected_name,
         )
         if not result.ok:
+            self.validation_status_label.setText(f"Invalid formula: {result.message}")
             qt_message_service.error(self, "Maths Channels", result.message)
             self.statusMessage.emit(result.message)
             return
+        self.validation_status_label.setText(result.message)
         applied_name = (result.payload or {}).get("name", self.name_edit.text().strip())
         self.refresh()
         self._select_channel(applied_name)

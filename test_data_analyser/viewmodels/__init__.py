@@ -10,6 +10,7 @@ from __future__ import annotations
 from .app_state import AppState
 from .cursor_compare_vm import CursorCompareViewModel
 from .data_loading_vm import DataLoadingViewModel
+from .dataset_vm import DatasetViewModel
 from .engineering_notes_vm import EngineeringNotesViewModel
 from .limits_vm import LimitsViewModel
 from .main_window_vm import MainWindowViewModel
@@ -23,6 +24,7 @@ __all__ = [
     "AppState",
     "CursorCompareViewModel",
     "DataLoadingViewModel",
+    "DatasetViewModel",
     "EngineeringNotesViewModel",
     "LimitsViewModel",
     "MainWindowViewModel",

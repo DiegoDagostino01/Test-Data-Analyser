@@ -22,6 +22,7 @@ def normalise_session(raw: Any) -> SessionState:
 def build_session_dict(
     *,
     version: str,
+    root_file_directory: str,
     file_path: str,
     sheet_name: str,
     runs: list[dict[str, Any]],
@@ -29,6 +30,9 @@ def build_session_dict(
     active_plot_profile_index: int,
     plot_profiles: list[dict[str, Any]],
     calculated_channels: dict[str, Any],
+    data_source_type: str = "excel",
+    channel_registry: dict[str, Any] | None = None,
+    dataset_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Assemble and normalise a session dictionary from its parts.
 
@@ -38,8 +42,12 @@ def build_session_dict(
     """
     raw: dict[str, Any] = {
         "version": version,
+        "root_file_directory": root_file_directory,
         "file_path": file_path,
         "sheet_name": sheet_name,
+        "data_source_type": data_source_type,
+        "channel_registry": channel_registry or {},
+        "dataset_rows": dataset_rows or [],
         "runs": runs,
         "active_plot_profile_index": active_plot_profile_index,
         "plot_profiles": plot_profiles,
