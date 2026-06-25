@@ -12,7 +12,8 @@ from typing import Any, Callable, Optional
 import numpy as np
 import pandas as pd
 
-from ..core.utils import _matching_x_column_for_y, natural_sort_key
+from ..core.column_matching import matching_x_column_for_y
+from ..core.naming import natural_sort_key
 
 
 def parse_row_limit(raw: str) -> Optional[int]:
@@ -51,7 +52,7 @@ def select_raw_data_frame(
         cols.append(x_col)
     for col in sorted(selected_y, key=natural_sort_key):
         if x_col:
-            paired_x_col = _matching_x_column_for_y(x_col, col, df.columns)
+            paired_x_col = matching_x_column_for_y(x_col, col, df.columns)
             if paired_x_col in df.columns and paired_x_col not in cols:
                 cols.append(paired_x_col)
         if col in df.columns and col not in cols:
@@ -76,6 +77,88 @@ def select_raw_data_frame(
         raw_df = raw_df.replace(r"^\s*$", np.nan, regex=True).dropna(axis=0, how="any")
         removed = before - len(raw_df)
     return raw_df, removed
+
+
+def sort_display_frame(
+    frame: pd.DataFrame,
+    column: Optional[str],
+    ascending: bool = True,
+) -> pd.DataFrame:
+    """Return ``frame`` sorted by ``column`` for display only.
+
+    Numeric columns sort numerically; other columns sort using the shared
+    natural-sort key so e.g. ``TC2`` precedes ``TC10``. NaN/blank values always
+    sink to the bottom regardless of direction. The original index is preserved
+    so edits still map back to the source dataframe row.
+    """
+    if not column or frame.empty or column not in frame.columns:
+        return frame
+    series = frame[column]
+    if pd.api.types.is_numeric_dtype(series):
+        return frame.sort_values(by=column, ascending=ascending, na_position="last", kind="stable")
+
+    str_series = series.astype(str)
+    blank = (series.isna() | (str_series.str.strip() == "")).to_numpy()
+    keys = [natural_sort_key(value) for value in str_series]
+    present = [i for i in range(len(frame)) if not blank[i]]
+    present.sort(key=lambda i: keys[i])
+    if not ascending:
+        present.reverse()
+    missing = [i for i in range(len(frame)) if blank[i]]
+    return frame.iloc[present + missing]
+
+
+def filter_display_frame(frame: pd.DataFrame, filters: dict[str, str]) -> pd.DataFrame:
+    """Return ``frame`` with per-column quick filters applied (display only).
+
+    Each filter string is one of ``>N``, ``<N``, ``>=N``, ``<=N``, ``=N``,
+    ``a..b`` (inclusive numeric range), or otherwise a case-insensitive substring
+    match on the stringified cell value. Blank filters are ignored. The original
+    index is preserved.
+    """
+    if frame.empty or not filters:
+        return frame
+    mask = pd.Series(True, index=frame.index)
+    for column, raw in filters.items():
+        if column not in frame.columns:
+            continue
+        spec = (raw or "").strip()
+        if not spec:
+            continue
+        mask &= _column_filter_mask(frame[column], spec)
+    return frame.loc[mask]
+
+
+def _column_filter_mask(series: pd.Series, spec: str) -> pd.Series:
+    numeric = pd.to_numeric(series, errors="coerce")
+    if ".." in spec:
+        low_text, high_text = spec.split("..", 1)
+        low = _filter_to_float(low_text)
+        high = _filter_to_float(high_text)
+        if low is not None and high is not None:
+            return numeric.between(low, high)
+    for op in (">=", "<=", ">", "<", "="):
+        if spec.startswith(op):
+            value = _filter_to_float(spec[len(op):])
+            if value is None:
+                break
+            if op == ">=":
+                return numeric >= value
+            if op == "<=":
+                return numeric <= value
+            if op == ">":
+                return numeric > value
+            if op == "<":
+                return numeric < value
+            return numeric == value
+    return series.astype(str).str.contains(spec, case=False, regex=False, na=False)
+
+
+def _filter_to_float(text: str) -> Optional[float]:
+    try:
+        return float(str(text).strip().replace(",", ""))
+    except (TypeError, ValueError):
+        return None
 
 
 def coerce_raw_edit_value(df: Optional[pd.DataFrame], column_name: str, text: str) -> Any:

@@ -33,7 +33,8 @@ from PySide6.QtWidgets import (
 )
 
 from ...core.config import MATHS_CHANNEL_GROUP
-from ...core.utils import channel_group_options, classify_channel_name, natural_sort_key
+from ...core.channel_classification import channel_group_options, classify_channel_name
+from ...core.naming import natural_sort_key
 from ...viewmodels.maths_channels_vm import MathsChannelsViewModel
 from ..adapters import qt_message_service
 from ..adapters.pandas_table_model import PandasTableModel

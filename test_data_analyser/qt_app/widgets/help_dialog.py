@@ -70,6 +70,26 @@ HELP_PAGE_BODIES: dict[str, str] = {
         <h2>Step 8 - Save or Export</h2>
         <p>Use <b>Save Plot</b>, <b>Save Session</b>, <b>Load Session</b>, and <b>Export Data</b> as required.</p>
     """,
+    "Keyboard Shortcuts": """
+        <h2>File</h2>
+        <ul>
+            <li><b>Ctrl+O</b> - Open an Excel or CSV data file.</li>
+            <li><b>Ctrl+N</b> - Create a blank manual session.</li>
+            <li><b>Ctrl+S</b> - Save the current session.</li>
+            <li><b>Ctrl+L</b> - Load a saved session.</li>
+        </ul>
+        <h2>Raw Data editing</h2>
+        <ul>
+            <li><b>Enter</b> - Commit the current cell edit.</li>
+            <li><b>Esc</b> - Cancel the current cell edit.</li>
+            <li><b>Ctrl+C</b> / <b>Ctrl+V</b> / <b>Ctrl+X</b> - Copy, paste, and cut cell ranges
+            (Excel-compatible). Paste and cut require <b>Edit dataset</b> mode; copy works in either mode.</li>
+            <li><b>Ctrl+F</b> - Find within the Raw Data table.</li>
+            <li><b>Ctrl+H</b> - Find and replace within the Raw Data table.</li>
+        </ul>
+        <div class="tip">You can also drag a supported file (CSV, Excel, or a .json session)
+        onto the window to open it.</div>
+    """,
     "File Ribbon": """
         <h2>Open Excel</h2>
         <p>Loads a new CSV or Excel test data file into the application (shortcut <b>Ctrl+O</b>). Load data before
@@ -102,10 +122,15 @@ HELP_PAGE_BODIES: dict[str, str] = {
         <p>Tick <b>Edit dataset</b> on the Raw Data tab to edit the whole dataset. This works for both manual and
         Excel sessions. In this mode you can:</p>
         <ul>
-            <li>Use <b>Add Column</b>, <b>Rename Column</b>, and <b>Delete Column</b> to change the dataset structure.</li>
-            <li>Use <b>Add Row</b> and <b>Delete Row(s)</b> to add or remove data points.</li>
-            <li>Double-click a cell to edit its value.</li>
+            <li>Use the blue <b>+</b> column header at the far right to add a column.</li>
+            <li>Use the blue <b>+</b> row header below the final row to add a row.</li>
+            <li>Double-click a column header to rename that column.</li>
+            <li>Right-click selected row or column headers to delete rows or columns. If multiple column headers are selected, delete removes all selected columns.</li>
+            <li>Select a cell and type directly, or double-click it, to edit its value.</li>
         </ul>
+        <p>Press <b>Enter</b> after editing a cell to commit the value and move down to the next row. Press
+        <b>Esc</b> to cancel the active edit. Column widths expand to fit header titles, and <b>Undo Edit</b>
+        restores the most recent cell edit, row/column addition, deletion, or column rename.</p>
         <p>Edits affect the current session only and never change the original Excel file on disk.</p>
         <h2>Channel IDs and renaming</h2>
         <p>Every column keeps a stable internal channel ID, so renaming a column header does not break plots, Maths
@@ -143,9 +168,10 @@ HELP_PAGE_BODIES: dict[str, str] = {
         <p>Displays summary statistics for selected channels, such as count, minimum, maximum, mean, and
         standard deviation where available.</p>
         <h2>Raw Data</h2>
-        <p>Shows the loaded data in table form for inspection and export. Tick <b>Edit dataset</b> to add, rename,
-        or delete columns and rows and edit cells for the current session; see the <b>Manual Sessions and Dataset
-        Editing</b> topic for details.</p>
+        <p>Shows the loaded data in table form for inspection and export. Select a cell and type to edit it,
+        then press <b>Enter</b> to commit and move down. Tick <b>Edit dataset</b> to use header <b>+</b> controls,
+        header double-click renaming, and row/column context menus for full-dataset edits; see the
+        <b>Manual Sessions and Dataset Editing</b> topic for details.</p>
         <h2>Maths Channels</h2>
         <p>Provides access to calculated or derived channels. Use the column dropdown and formula-builder buttons
         to insert valid formula text, then validate and save through the existing Maths Channel engine.</p>
@@ -278,6 +304,9 @@ HELP_PAGE_BODIES: dict[str, str] = {
         correct any non-numeric values if it should be plottable.</p>
         <h2>Duplicate column name rejected</h2>
         <p>Column headers must be unique. Choose a different name when adding or renaming a column in Edit dataset mode.</p>
+        <h2>Only one column was deleted</h2>
+        <p>In Edit dataset mode, select the column headers for every column you want to remove, then right-click a selected
+        header and choose the delete action. Selecting body cells alone deletes the clicked column, not every column with a selected cell.</p>
         <h2>Export does not show expected data</h2>
         <p>Confirm that the correct run, channels, and plot configuration are active before exporting.</p>
     """,

@@ -12,7 +12,7 @@ from typing import Any, Optional, Tuple
 import numpy as np
 
 from ..core.config import EATON_DARK_BLUE
-from ..core.utils import natural_sort_key
+from ..core.naming import natural_sort_key
 from ..domain import PlotData
 
 WARNING_MARGIN_PERCENT = 5.0
@@ -30,16 +30,27 @@ MARGIN_TABLE_COLUMNS = [
 ]
 
 
+def _point_xy(point: Any) -> Optional[Tuple[float, float]]:
+    """Return a limit point's ``(x, y)`` as floats, or ``None`` when malformed.
+
+    Tolerates missing keys, non-dict entries, and non-numeric values so a single
+    bad point never aborts limit normalisation or range computation.
+    """
+    try:
+        return float(point.get("x")), float(point.get("y"))
+    except Exception:
+        return None
+
+
 def normalise_limit_lines(limit_lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Return limit lines with numeric, X-sorted points and defaulted metadata."""
     normalised: list[dict[str, Any]] = []
     for line in limit_lines:
         points: list[dict[str, float]] = []
         for point in line.get("points", []):
-            try:
-                points.append({"x": float(point.get("x")), "y": float(point.get("y"))})
-            except Exception:
-                continue
+            xy = _point_xy(point)
+            if xy is not None:
+                points.append({"x": xy[0], "y": xy[1]})
         points = sorted(points, key=lambda p: p["x"])
         normalised.append(
             {
@@ -75,11 +86,10 @@ def active_limit_ranges(
         if not limit_line_applies_to_selection(line, selected_y):
             continue
         for point in points:
-            try:
-                x_values.append(float(point["x"]))
-                y_values.append(float(point["y"]))
-            except Exception:
-                continue
+            xy = _point_xy(point)
+            if xy is not None:
+                x_values.append(xy[0])
+                y_values.append(xy[1])
     x_range = (min(x_values), max(x_values)) if x_values else None
     y_range = (min(y_values), max(y_values)) if y_values else None
     return x_range, y_range

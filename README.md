@@ -37,6 +37,16 @@ python -m test_data_analyser.qt_app.main_qt
 > that only resolve when the code is imported as part of the `test_data_analyser`
 > package. Always launch via `run_qt_app.py` or `python -m test_data_analyser`.
 
+## Opening files
+
+Open data with **Open Excel** (`Ctrl+O`) or start a blank manual session with
+**Create Session** (`Ctrl+N`). The **File** ribbon's **Recent** menu lists the
+most recently opened data files and sessions, and you can drag a `.csv`,
+`.xlsx`, `.xls`, or `.json` session file onto the window to open it. When
+**auto-save** is enabled in Settings, the active session is saved automatically
+at the configured interval while there are unsaved changes (falling back to an
+`autosave.json` beside the data file).
+
 ## Requirements
 
 Install dependencies with:
@@ -73,10 +83,13 @@ platform and are skipped automatically if PySide6 is not installed.
 
 The **Runs / Comparison** tab lets you load multiple CSV/XLSX/XLS test runs and
 overlay the enabled ones on a single plot. Use **Add Run…** to load each file
-(you are prompted for a sheet on multi-sheet workbooks), then **Set Active**,
-**Rename**, **Duplicate**, **Remove**, or **Toggle Enabled** (double-clicking a
-row also toggles it). Click **Generate Comparison Plot** to overlay the selected
-Y channels for every enabled run on the shared plot canvas.
+(you are prompted for a sheet on multi-sheet workbooks), or **Batch Import…** to
+import every matching data file in a folder at once (semicolon-separated globs,
+optional subfolder recursion, and an optional regex to derive each run name from
+its filename). Then use **Set Active**, **Rename**, **Duplicate**, **Remove**, or
+**Toggle Enabled** (double-clicking a row also toggles it). Click **Generate
+Comparison Plot** to overlay the selected Y channels for every enabled run on the
+shared plot canvas.
 
 **Prefix legend labels with run name** renders legend entries as
 `Run Name | Channel`, and **Use common X range only** restricts plotting to the
@@ -89,14 +102,34 @@ original files when the session is opened.
 
 ## Editable Raw Data
 
-The **Raw Data** tab supports direct editing of visible cells. Double-click a
-cell, type the replacement value, then press **Enter** or move focus away to
-apply it. Press **Esc** to cancel the edit. Use **Undo Edit** to restore the
-most recent Raw Data edit.
+The **Raw Data** tab supports spreadsheet-style editing of visible cells: select
+a cell and type a numeric value directly, or double-click to edit. Press
+**Enter** to commit the edit and move to the next row in the same column; press
+**Esc** to cancel. Use **Undo Edit** to restore the most recent Raw Data or
+dataset edit.
+
+Tick **Edit dataset** to work with the full dataset. In this mode, double-click
+a column header to rename it, use the blue **+** header at the far right to add
+a column, and use the blue **+** row header below the final row to add a row.
+Right-click selected row or column headers to delete them; selecting multiple
+column headers and choosing delete removes every selected column in one action.
+Column widths expand to fit header titles, while the **+** controls stay compact.
 
 Edits update the in-memory dataframe used by statistics, plotting, raw data
 export, and other analysis views. The original CSV/Excel file is not
 modified automatically; export the selected data if you need a saved copy.
+
+The Raw Data view also supports power-user workflows. Click a column header to
+sort the displayed rows (ascending, then descending, then unsorted; text channels
+use natural order), and toggle **Filter** for a per-column filter row that accepts
+substrings or numeric expressions (`>n`, `<n`, `>=n`, `<=n`, `a..b`, `=n`). Sort
+and filter are display-only and never change the underlying data. Copy, cut, and
+paste rectangular cell ranges with **Ctrl+C** / **Ctrl+X** / **Ctrl+V**
+(Excel-compatible; paste auto-grows the dataset and coerces values to each
+column's type). **Ctrl+F** finds and **Ctrl+H** finds-and-replaces across the
+view or the full dataset, and a right-click **Fill Down** copies the top selected
+row down a range. Copy works in either mode; cut, paste, and fill require
+**Edit dataset** mode and each counts as a single undo step.
 
 ## Maths Channels
 
@@ -145,24 +178,28 @@ analysis sessions, and channel colour overrides carry across matching channels
 on other plots.
 
 Use the toolbar's **Figure Options** to fine-tune the plot: edit axis titles and
-limits with **auto-label** / **auto-fit** helpers, set per-axis major-tick
-spacing (and optionally align the secondary-Y grid to the primary), and switch
-the legend between the right-side **Legend** panel and an in-graph Matplotlib
-legend. Curve styling is handled by the Legend panel channel editor rather than
-the Figure Options dialog. Configurable axis padding (Settings > Axis Padding)
-keeps a margin around auto-fitted data, and saved figure exports include the
-legend.
+limits with **auto-label** / **auto-fit** helpers, **Reset Axis** to clear the
+active plot's manual title/labels/limits/ticks and re-render with auto defaults,
+set per-axis major-tick spacing (and optionally align the secondary-Y grid to the
+primary), and switch the legend between the right-side **Legend** panel and an
+in-graph Matplotlib legend. Curve styling is handled by the Legend panel channel
+editor rather than the Figure Options dialog. Configurable axis padding (Settings
+> Axis Padding) keeps a margin around auto-fitted data, and saved figure exports
+include the legend.
 
 Use the **Annotations** controls in the plot toolbar to select, add text boxes,
-draw arrows, or draw boxes directly on the active plot. Annotations are stored
-with the plot tab in data coordinates, can be moved/edited/deleted, and are
-included in saved PNG exports.
+draw arrows, or draw boxes directly on the active plot. Right-click the plot and
+choose **Mark Peaks…** to detect peaks (and optionally troughs) for a plotted
+channel with a prominence control, which drops a text annotation at each.
+Annotations are stored with the plot tab in data coordinates, can be
+moved/edited/deleted, and are included in saved PNG exports.
 
 Use the **+** tab beside the plot tabs above the canvas to create additional
 plots. New plot tabs inherit the currently selected X-axis when that channel is
 still available, falling back to the suggested/default X column only when
-needed. Each plot tab keeps its own X-axis selection, Y-axis selections, plot
-title, axis labels, limits, ticks, legend mode, legend channel overrides, notes,
+needed. Drag a plot tab to reorder it (the trailing **+** tab stays last). Each
+plot tab keeps its own X-axis selection, Y-axis selections, plot title, axis
+labels, limits, ticks, legend mode, legend channel overrides, notes,
 annotations, and requirement overlays.
 Right-click a plot tab to duplicate, rename, or delete it; all plot tabs are
 saved and restored with analysis sessions. Re-generating a plot preserves manual
@@ -181,7 +218,9 @@ status, margin, margin percentage, worst point, first failure point, and detail
 message against the active selection. Limit margins are evaluated by
 interpolating the limit line over the channel's X data, and a PASS within 5%
 margin is highlighted as WARN. The X/Y point table expands vertically when the
-Limits tab has spare space, making larger point sets easier to review.
+Limits tab has spare space, making larger point sets easier to review. Use
+**Save Template…** / **Load Template…** to store the current limit lines as a
+JSON template and reload them into another session (choosing replace or merge).
 
 ## Engineering Notes
 
@@ -228,12 +267,12 @@ services/    pure engineering/data logic (no UI toolkit)
    │
 domain/      framework-independent dataclasses (no UI toolkit)
    │
-core/        shared infrastructure (config, data I/O, filters, settings, utils)
+core/        shared infrastructure (config, data I/O, filters, settings, focused helpers)
 ```
 
 | Package / module | Responsibility |
 | --- | --- |
-| `core/` | Shared infrastructure: `config.py` (Eaton brand colours, version, domain keyword config, theme palettes), `data_io.py` (file/sheet loading, numeric coercion), `filters.py` (sampling-rate estimate, low-pass filter), `settings_manager.py` (persisted settings), `utils.py` (column-name helpers and engineering channel grouping). |
+| `core/` | Shared infrastructure: `config.py` (Eaton brand colours, version, domain keyword config, theme palettes), `data_io.py` (file/sheet loading, numeric coercion), `filters.py` (sampling-rate estimate, low-pass filter), `settings_manager.py` (persisted settings), focused helper modules for naming, indexing, grouped-column matching, and engineering channel classification, plus `utils.py` as a compatibility facade. |
 | `domain/` | Framework-independent dataclasses (plot/profile/session state, requirement limits, engineering notes, runs, calculated channels) with JSON-compatible `from_dict`/`to_dict`. Import directly, e.g. `from test_data_analyser.domain import PlotData`. |
 | `services/` | Pure engineering/data logic (statistics, limits, maths channels, plotting data, plot-render colours, raw data, run comparison, cursor compare, settings, session). No UI imports; returns values or `OperationResult`. |
 | `viewmodels/` | UI-independent coordinators over `AppState` (data-loading, plot-workspace, raw-data, maths-channels, runs-comparison, limits, engineering-notes, cursor-compare, settings, and the aggregating main-window VM). Return `OperationResult`; never open dialogs or import Qt. |
@@ -244,7 +283,9 @@ core/        shared infrastructure (config, data I/O, filters, settings, utils)
 ```
 test_data_analyser/
 ├─ __init__.py  __main__.py     # package marker + `python -m` entry point
-├─ core/        config.py  data_io.py  filters.py  settings_manager.py  utils.py
+├─ core/        config.py  data_io.py  filters.py  settings_manager.py
+│               naming.py  indexing.py  column_matching.py
+│               channel_classification.py  utils.py
 ├─ domain/      conversions.py  models.py  settings.py  engineering_notes.py
 │               limits.py  plot_profile.py  run_model.py  session.py
 ├─ services/    statistics_service.py  limits_service.py  maths_channel_service.py

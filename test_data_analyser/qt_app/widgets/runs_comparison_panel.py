@@ -71,6 +71,8 @@ class RunsComparisonPanel(QWidget):
         add_button = QPushButton("Add Run…")
         add_button.setObjectName("PrimaryButton")
         add_button.clicked.connect(self._add_run)
+        batch_button = QPushButton("Batch Import…")
+        batch_button.clicked.connect(self._batch_import)
         remove_button = QPushButton("Remove Run")
         remove_button.clicked.connect(self._remove_run)
         duplicate_button = QPushButton("Duplicate Run")
@@ -83,7 +85,7 @@ class RunsComparisonPanel(QWidget):
         toggle_button.clicked.connect(self._toggle_enabled)
         plot_button = QPushButton("Generate Comparison Plot")
         plot_button.clicked.connect(self.comparisonRequested)
-        for button in (add_button, remove_button, duplicate_button, rename_button, active_button, toggle_button, plot_button):
+        for button in (add_button, batch_button, remove_button, duplicate_button, rename_button, active_button, toggle_button, plot_button):
             toolbar.addWidget(button)
         toolbar.addStretch(1)
         return toolbar
@@ -178,6 +180,32 @@ class RunsComparisonPanel(QWidget):
             qt_message_service.error(self, "Add Run", result.message)
             return
         self.refresh()
+        self.statusMessage.emit(result.message)
+
+    def _batch_import(self) -> None:
+        from .batch_import_dialog import BatchImportDialog
+
+        manager = getattr(getattr(self.vm, "state", None), "settings_manager", None)
+        dialog = BatchImportDialog(self, initial_dir=qt_widget_helpers.last_data_directory(manager))
+        if not dialog.exec():
+            return
+        settings = dialog.settings()
+        if not settings["folder"]:
+            qt_message_service.warning(self, "Batch Import", "Choose a folder to import from.")
+            return
+        result = self.vm.add_runs_from_folder(
+            settings["folder"],
+            glob=settings["glob"],
+            recursive=settings["recursive"],
+            name_regex=settings["name_regex"],
+            sheet_name=settings["sheet_name"],
+        )
+        self.refresh()
+        if result.warnings:
+            qt_message_service.warning(self, "Batch Import", "\n".join(result.warnings))
+        if not result.ok:
+            qt_message_service.error(self, "Batch Import", result.message)
+            return
         self.statusMessage.emit(result.message)
 
     def _remove_run(self) -> None:

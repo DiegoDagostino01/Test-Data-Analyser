@@ -5,7 +5,7 @@ embedding and event handling remain in Qt adapters.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from ..core.config import EATON_PLOT_COLORS
@@ -15,9 +15,40 @@ COLOURBLIND_SAFE_COLORS = [
     "#0072B2", "#D55E00", "#009E73", "#CC79A7", "#F0E442",
     "#56B4E9", "#E69F00", "#000000",
 ]
+PLOT_KINDS = ("Line", "Scatter", "Line + Markers")
+CURVE_STYLE_KEYS = {
+    "line_style",
+    "draw_style",
+    "line_width",
+    "marker_style",
+    "marker_size",
+    "marker_face_colour",
+    "marker_edge_colour",
+}
 BEST_FIT_TYPES = ("Linear", "Squared", "Polynomial")
 MAX_BEST_FIT_CHANNELS = 5
 MAX_BEST_FIT_ORDER = 6
+ColourCycleFactory = Callable[[], Iterable[object]]
+_COLOUR_CYCLE_FACTORIES: dict[str, ColourCycleFactory] = {}
+
+
+def _normalise_registry_name(name: object) -> str:
+    return str(name or "").strip().casefold()
+
+
+def register_colour_cycle(name: str, factory: ColourCycleFactory, *, replace: bool = False) -> None:
+    """Register a named plot colour-cycle provider."""
+    key = _normalise_registry_name(name)
+    if not key:
+        raise ValueError("Colour cycle name cannot be empty.")
+    if key in _COLOUR_CYCLE_FACTORIES and not replace:
+        raise ValueError(f"Colour cycle '{name}' is already registered.")
+    _COLOUR_CYCLE_FACTORIES[key] = factory
+
+
+def available_colour_cycles() -> list[str]:
+    """Return registered colour-cycle names in registration order."""
+    return list(_COLOUR_CYCLE_FACTORIES)
 
 
 def _fit_order(fit_type: str, order: object) -> int:
@@ -65,13 +96,11 @@ def normalise_best_fit_settings(settings: object) -> list[dict[str, object]]:
 
 def resolve_plot_colours(cycle_name: str) -> list[str]:
     """Return the plot colour cycle for the configured ``cycle_name``."""
-    if cycle_name == "matplotlib":
-        from matplotlib import rcParams
-
-        return [item["color"] for item in rcParams["axes.prop_cycle"]]
-    if cycle_name == "colourblind_safe":
-        return COLOURBLIND_SAFE_COLORS
-    return list(EATON_PLOT_COLORS)
+    factory = _COLOUR_CYCLE_FACTORIES.get(_normalise_registry_name(cycle_name))
+    if factory is None:
+        factory = _COLOUR_CYCLE_FACTORIES["eaton"]
+    colours = [str(colour).strip() for colour in factory() if str(colour).strip()]
+    return colours or list(EATON_PLOT_COLORS)
 
 
 def secondary_colour_cycle(colours: list[str]) -> list[str]:
@@ -80,6 +109,114 @@ def secondary_colour_cycle(colours: list[str]) -> list[str]:
     Offsetting keeps right-axis series visually distinct from left-axis series.
     """
     return colours[5:] + colours[:5] if len(colours) > 5 else colours
+
+
+def apply_channel_style_overrides(
+    series_items: list[dict[str, Any]],
+    channel_styles: dict[str, dict[str, str]] | None,
+    default_plot_kind: str,
+) -> list[dict[str, Any]]:
+    """Return series items with per-channel legend/style overrides applied."""
+    styles = normalised_channel_styles(channel_styles or {})
+    fallback_plot_kind = normalise_plot_kind(default_plot_kind) or "Line"
+    styled_items: list[dict[str, Any]] = []
+    for item in series_items:
+        styled = dict(item)
+        style = styles.get(series_channel_key(item), {})
+        label = series_label_with_override(item, style)
+        if label:
+            styled["label"] = label
+        plot_kind = normalise_plot_kind(style.get("plot_kind")) or fallback_plot_kind
+        styled["plot_kind"] = plot_kind
+        colour = str(style.get("colour", "")).strip()
+        if colour:
+            styled["colour"] = colour
+        for key in CURVE_STYLE_KEYS:
+            value = str(style.get(key, "")).strip()
+            if value:
+                styled[key] = value
+        if "hidden" in style:
+            styled["hidden"] = style_bool(style.get("hidden"))
+        styled["label_overridden"] = bool(style.get("label"))
+        styled["plot_kind_overridden"] = bool(style.get("plot_kind"))
+        styled_items.append(styled)
+    return styled_items
+
+
+def normalised_channel_styles(channel_styles: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
+    """Return channel style overrides keyed by normalised channel name."""
+    normalised: dict[str, dict[str, str]] = {}
+    for raw_key, raw_style in channel_styles.items():
+        if not isinstance(raw_style, dict):
+            continue
+        style: dict[str, str] = {}
+        for raw_name, raw_value in raw_style.items():
+            value = str(raw_value).strip()
+            if not value:
+                continue
+            name = "label" if raw_name == "name" else "colour" if raw_name == "color" else str(raw_name)
+            if name == "plot_kind":
+                value = normalise_plot_kind(value)
+                if not value:
+                    continue
+            if name in {"channel", "label", "colour", "plot_kind", *CURVE_STYLE_KEYS}:
+                style[name] = value
+        if "hidden" in raw_style:
+            style["hidden"] = "true" if style_bool(raw_style.get("hidden")) else "false"
+        channel_key = normalise_channel_name(style.get("channel") or raw_key)
+        if channel_key and style:
+            normalised[channel_key] = style
+    return normalised
+
+
+def style_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def series_label_with_override(item: dict[str, Any], style: dict[str, str]) -> str:
+    custom_label = str(style.get("label", "")).strip()
+    if not custom_label:
+        return str(item.get("label", ""))
+    label = without_right_y_suffix(custom_label)
+    return f"{label} [Right Y]" if item.get("secondary") else label
+
+
+def normalise_plot_kind(plot_kind: object) -> str:
+    text = str(plot_kind or "").strip()
+    if text == "Line + Marker":
+        text = "Line + Markers"
+    return text if text in PLOT_KINDS else ""
+
+
+def series_channel_key(item: dict[str, Any]) -> str:
+    return normalise_channel_name(item.get("channel", item.get("label", "")))
+
+
+def without_right_y_suffix(label: object) -> str:
+    return str(label).replace(" [Right Y]", "").strip()
+
+
+def resolve_axis_range(
+    current_range: tuple[Any, Any],
+    minimum: Any | None,
+    maximum: Any | None,
+) -> tuple[Any, Any] | None:
+    """Return the axis range to apply, or ``None`` when it should stay unchanged.
+
+    ``minimum`` and ``maximum`` are optional manual limits. Missing sides keep
+    the current rendered range so callers can set only one side of an axis.
+    Inverted or equal limits are ignored, matching the previous widget logic.
+    """
+    if minimum is None and maximum is None:
+        return None
+    current_min, current_max = current_range
+    lower = current_min if minimum is None else minimum
+    upper = current_max if maximum is None else maximum
+    if lower < upper:
+        return lower, upper
+    return None
 
 
 def polynomial_best_fit(
@@ -199,3 +336,22 @@ def persistent_channel_colour_map(
 
     repeated = [key for key in first_seen_order if counts.get(key, 0) > 1]
     return {key: colours[index % len(colours)] for index, key in enumerate(repeated)}
+
+
+def _eaton_colour_cycle() -> list[str]:
+    return list(EATON_PLOT_COLORS)
+
+
+def _matplotlib_colour_cycle() -> list[str]:
+    from matplotlib import rcParams
+
+    return [item["color"] for item in rcParams["axes.prop_cycle"]]
+
+
+def _colourblind_safe_cycle() -> list[str]:
+    return list(COLOURBLIND_SAFE_COLORS)
+
+
+register_colour_cycle("eaton", _eaton_colour_cycle)
+register_colour_cycle("matplotlib", _matplotlib_colour_cycle)
+register_colour_cycle("colourblind_safe", _colourblind_safe_cycle)

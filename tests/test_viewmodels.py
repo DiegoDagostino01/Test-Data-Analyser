@@ -10,20 +10,26 @@ Run with:
 """
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import numpy as np
 import pandas as pd
 
 from test_data_analyser.core.settings_manager import SettingsManager
 from test_data_analyser.domain import PlotData
-from test_data_analyser.services import plot_render_service, session_service
+from test_data_analyser.services import dataset_service, plot_render_service, session_service
 import test_data_analyser.viewmodels.data_loading_vm as data_loading_module
 import test_data_analyser.viewmodels.runs_comparison_vm as runs_comparison_module
 from test_data_analyser.viewmodels import (
     AppState,
+    AppStateController,
     CursorCompareViewModel,
     DataLoadingViewModel,
     EngineeringNotesViewModel,
@@ -77,6 +83,53 @@ class AppStateTests(unittest.TestCase):
     def test_active_run_none_when_out_of_range(self) -> None:
         state = AppState(runs=[{"name": "R1"}], active_run_index=-1)
         self.assertIsNone(state.active_run())
+
+    def test_state_controller_restores_dataset_snapshot(self) -> None:
+        state = AppState(df=_sample_df(), plot_profiles=[{"name": "P1"}], current_x_axis="Time")
+        controller = AppStateController(state)
+        snapshot = controller.capture_dataset_snapshot("edit")
+
+        state.df = pd.DataFrame({"Other": [99.0]})
+        state.plot_profiles = [{"name": "Changed"}]
+        state.current_x_axis = "Other"
+        state.is_dirty = True
+
+        controller.restore_dataset_snapshot(snapshot)
+
+        self.assertEqual(state.column_names(), ["Time", "A", "B"])
+        self.assertEqual(state.plot_profiles[0]["name"], "P1")
+        self.assertEqual(state.current_x_axis, "Time")
+        self.assertFalse(state.is_dirty)
+
+    def test_state_controller_applies_dataframe_payload_and_dirty_flag(self) -> None:
+        state = AppState(df=_sample_df())
+        controller = AppStateController(state)
+        replacement = pd.DataFrame({"X": [1.0]})
+
+        self.assertTrue(controller.apply_dataframe_payload({"df": replacement}))
+        controller.mark_dirty()
+
+        self.assertEqual(state.column_names(), ["X"])
+        self.assertTrue(state.is_dirty)
+
+    def test_state_controller_applies_plot_profile_updates(self) -> None:
+        state = AppState(
+            plot_profiles=[{"name": "Old"}],
+            active_plot_profile_index=0,
+            current_x_axis="Time",
+            limit_lines=[{"name": "L"}],
+            engineering_notes={"objective": "Old"},
+        )
+        controller = AppStateController(state)
+
+        controller.reset_plot_workspace([{"name": "Plot 1"}], 0)
+        controller.set_active_plot_profile(0, {"name": "Updated"})
+
+        self.assertEqual(state.plot_profiles[0]["name"], "Updated")
+        self.assertEqual(state.active_plot_profile_index, 0)
+        self.assertEqual(state.current_x_axis, "")
+        self.assertEqual(state.limit_lines, [])
+        self.assertEqual(state.engineering_notes, {})
 
 
 class DataLoadingViewModelTests(unittest.TestCase):
@@ -297,6 +350,36 @@ class RawDataViewModelTests(unittest.TestCase):
 
         self.assertEqual(list(frame.columns), ["Time", "B", "TC2", "TC10"])
 
+    def test_display_frame_applies_sort(self) -> None:
+        result = self.vm.display_frame(
+            "Time", ["A"], row_limit_text="All", apply_window=False,
+            xmin=None, xmax=None, drop_blank=False,
+            sort_column="A", sort_ascending=False,
+        )
+        self.assertTrue(result.ok)
+        self.assertEqual(list(result.payload["frame"]["A"]), [40.0, 30.0, 20.0, 10.0])
+
+    def test_display_frame_applies_column_filter(self) -> None:
+        result = self.vm.display_frame(
+            "Time", ["A"], row_limit_text="All", apply_window=False,
+            xmin=None, xmax=None, drop_blank=False,
+            column_filters={"A": ">20"},
+        )
+        self.assertTrue(result.ok)
+        self.assertEqual(list(result.payload["frame"]["A"]), [30.0, 40.0])
+
+    def test_display_frame_sorted_edit_maps_to_source_row(self) -> None:
+        result = self.vm.display_frame(
+            "Time", ["A"], row_limit_text="All", apply_window=False,
+            xmin=None, xmax=None, drop_blank=False,
+            sort_column="A", sort_ascending=False,
+        )
+        frame = result.payload["frame"]
+        top_index = frame.index[0]
+        self.assertEqual(top_index, 3)
+        self.vm.apply_edit(top_index, "A", 999.0)
+        self.assertEqual(self.state.df.at[3, "A"], 999.0)
+
     def test_coerce_edit_value(self) -> None:
         self.assertEqual(self.vm.coerce_edit_value("A", "99").payload, 99.0)
         self.assertFalse(self.vm.coerce_edit_value("A", "abc").ok)
@@ -319,7 +402,9 @@ class RawDataViewModelTests(unittest.TestCase):
         self.assertFalse(self.vm.can_undo)
 
     def test_undo_without_edits(self) -> None:
-        self.assertFalse(self.vm.undo_last_edit().ok)
+        result = self.vm.undo_last_edit()
+        self.assertFalse(result.ok)
+        self.assertEqual(result.message, "Nothing to undo")
 
     def test_export_selected_frame_csv(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -330,6 +415,18 @@ class RawDataViewModelTests(unittest.TestCase):
             self.assertTrue(result.ok)
             self.assertTrue(target.exists())
             exported = pd.read_csv(target)
+            self.assertEqual(list(exported.columns), ["Time", "A"])
+            self.assertEqual(len(exported), 4)
+
+    def test_export_selected_frame_xlsx(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "selected.xlsx"
+            result = self.vm.export_selected_frame(
+                target, "Time", ["A"], apply_window=False, xmin=None, xmax=None, drop_blank=False
+            )
+            self.assertTrue(result.ok)
+            self.assertTrue(target.exists())
+            exported = pd.read_excel(target, engine="openpyxl")
             self.assertEqual(list(exported.columns), ["Time", "A"])
             self.assertEqual(len(exported), 4)
 
@@ -575,6 +672,83 @@ class EngineeringNotesViewModelTests(unittest.TestCase):
     def test_set_notes_from_legacy_string(self) -> None:
         self.vm.set_notes("freeform text")
         self.assertEqual(self.vm.get_notes()["observations"], "freeform text")
+
+
+class RecentItemsTests(unittest.TestCase):
+    def _vm(self) -> MainWindowViewModel:
+        return MainWindowViewModel(_FakeSettings())
+
+    def _paths(self, count: int) -> list[str]:
+        directory = Path(tempfile.mkdtemp())
+        return [str(directory / f"file{index}.csv") for index in range(count)]
+
+    def test_recent_files_cap_and_order(self) -> None:
+        vm = self._vm()
+        paths = self._paths(12)
+        for path in paths:
+            vm.register_recent_file(path)
+
+        recent = vm.recent_files()
+        self.assertEqual(len(recent), 10)
+        self.assertEqual(recent[0], str(Path(paths[11]).resolve()))
+        self.assertEqual(recent[-1], str(Path(paths[2]).resolve()))
+        self.assertNotIn(str(Path(paths[0]).resolve()), recent)
+        self.assertNotIn(str(Path(paths[1]).resolve()), recent)
+
+    def test_registering_existing_entry_moves_to_front(self) -> None:
+        vm = self._vm()
+        first, second, third = self._paths(3)
+        for path in (first, second, third):
+            vm.register_recent_file(path)
+
+        vm.register_recent_file(first)
+
+        recent = vm.recent_files()
+        self.assertEqual(len(recent), 3)
+        self.assertEqual(recent[0], str(Path(first).resolve()))
+        self.assertEqual(recent.count(str(Path(first).resolve())), 1)
+
+    def test_register_recent_persists_via_settings_save(self) -> None:
+        manager = _FakeSettings()
+        vm = MainWindowViewModel(manager)
+        vm.register_recent_file(self._paths(1)[0])
+        self.assertTrue(manager.saved)
+
+    def test_files_and_sessions_tracked_separately(self) -> None:
+        vm = self._vm()
+        directory = Path(tempfile.mkdtemp())
+        vm.register_recent_session(str(directory / "session.json"))
+        self.assertEqual(len(vm.recent_sessions()), 1)
+        self.assertEqual(vm.recent_files(), [])
+
+    def test_recent_lists_empty_without_settings_manager(self) -> None:
+        vm = MainWindowViewModel()
+        self.assertEqual(vm.recent_files(), [])
+        self.assertEqual(vm.register_recent_file("anything.csv"), [])
+
+
+class AutoSaveSchedulingTests(unittest.TestCase):
+    def test_auto_save_due_respects_interval(self) -> None:
+        vm = MainWindowViewModel()
+        self.assertTrue(vm.auto_save_due(None, 1000.0, 10))
+        self.assertFalse(vm.auto_save_due(1000.0, 1000.0 + 5 * 60, 10))
+        self.assertTrue(vm.auto_save_due(1000.0, 1000.0 + 10 * 60, 10))
+
+    def test_auto_save_due_disabled_for_non_positive_interval(self) -> None:
+        vm = MainWindowViewModel()
+        self.assertFalse(vm.auto_save_due(None, 1000.0, 0))
+        self.assertFalse(vm.auto_save_due(1000.0, 1_000_000.0, -5))
+
+    def test_auto_save_target_prefers_session_path(self) -> None:
+        vm = MainWindowViewModel()
+        self.assertEqual(vm.auto_save_target_path("session.json"), "session.json")
+
+    def test_auto_save_target_falls_back_to_autosave_json(self) -> None:
+        vm = MainWindowViewModel()
+        vm.state.root_file_directory = str(Path(tempfile.mkdtemp()))
+        target = vm.auto_save_target_path(None)
+        self.assertTrue(target.endswith("autosave.json"))
+        self.assertTrue(target.startswith(vm.state.root_file_directory))
 
 
 class MainWindowViewModelTests(unittest.TestCase):
@@ -1270,12 +1444,301 @@ class MainWindowViewModelTests(unittest.TestCase):
             self.assertTrue(target.state.channel_registry.ids())
 
 
+class DatasetClipboardTests(unittest.TestCase):
+    def _vm(self) -> MainWindowViewModel:
+        vm = MainWindowViewModel()
+        vm.state.df = pd.DataFrame({"A": [1.0, 2.0, 3.0], "B": [4.0, 5.0, 6.0]})
+        vm.state.channel_registry = dataset_service.build_registry_for_dataframe(vm.state.df)
+        return vm
+
+    def test_copy_block_returns_tsv(self) -> None:
+        vm = self._vm()
+        ids = vm.state.channel_registry.ids()
+        self.assertEqual(vm.dataset.copy_block([0, 1], ids), "1.0\t4.0\n2.0\t5.0")
+
+    def test_cut_block_clears_cells_and_returns_tsv(self) -> None:
+        vm = self._vm()
+        ids = vm.state.channel_registry.ids()
+        result = vm.dataset.cut_block([0], ids)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.payload, "1.0\t4.0")
+        self.assertTrue(pd.isna(vm.state.df.at[0, "A"]))
+        self.assertTrue(pd.isna(vm.state.df.at[0, "B"]))
+
+    def test_paste_block_writes_values(self) -> None:
+        vm = self._vm()
+        anchor = vm.state.channel_registry.ids()[0]
+        result = vm.dataset.paste_block(0, anchor, "7\t8\n9\t10")
+        self.assertTrue(result.ok)
+        self.assertEqual(vm.state.df.at[0, "A"], 7.0)
+        self.assertEqual(vm.state.df.at[0, "B"], 8.0)
+        self.assertEqual(vm.state.df.at[1, "A"], 9.0)
+        self.assertEqual(vm.state.df.at[1, "B"], 10.0)
+
+    def test_paste_block_expands_df_when_needed(self) -> None:
+        vm = self._vm()
+        rightmost = vm.state.channel_registry.ids()[1]
+        result = vm.dataset.paste_block(0, rightmost, "1\t2\n3\t4\n5\t6\n7\t8")
+        self.assertTrue(result.ok)
+        self.assertEqual(len(vm.state.df), 4)
+        self.assertEqual(len(vm.state.channel_registry.ids()), 3)
+        new_name = vm.state.channel_registry.display_names()[2]
+        self.assertEqual(new_name, "Column 3")
+        self.assertEqual(vm.state.df.at[0, new_name], 2.0)
+        self.assertEqual(vm.state.df.at[3, new_name], 8.0)
+
+    def test_paste_block_single_undo_step(self) -> None:
+        vm = self._vm()
+        anchor = vm.state.channel_registry.ids()[0]
+        vm.dataset.paste_block(0, anchor, "100\t200\n300\t400")
+        self.assertTrue(vm.dataset.can_undo)
+        vm.dataset.undo_last_edit()
+        self.assertEqual(vm.state.df.at[0, "A"], 1.0)
+        self.assertEqual(vm.state.df.at[0, "B"], 4.0)
+        self.assertFalse(vm.dataset.can_undo)
+
+    def test_paste_block_warns_on_invalid_numeric_text(self) -> None:
+        vm = self._vm()
+        anchor = vm.state.channel_registry.ids()[0]
+        result = vm.dataset.paste_block(0, anchor, "abc")
+        self.assertTrue(result.ok)
+        self.assertTrue(result.warnings)
+        self.assertEqual(vm.state.df.at[0, "A"], "abc")
+
+
+class FindReplaceVMTests(unittest.TestCase):
+    def _vm(self) -> MainWindowViewModel:
+        vm = MainWindowViewModel()
+        vm.state.df = pd.DataFrame({"A": [1.0, 2.0, 3.0], "Name": ["x1", "x2", "y1"]})
+        vm.state.channel_registry = dataset_service.build_registry_for_dataframe(vm.state.df)
+        return vm
+    def test_find_full_dataset(self) -> None:
+        vm = self._vm()
+        result = vm.raw_data.find("x")
+        self.assertTrue(result.ok)
+        self.assertEqual(len(result.payload), 2)
+
+    def test_find_displayed_frame_scope(self) -> None:
+        vm = self._vm()
+        display = vm.state.df.iloc[:1]
+        result = vm.raw_data.find("x", search_full_dataset=False, display_frame=display)
+        self.assertEqual(len(result.payload), 1)
+
+    def test_replace_all_single_undo_step(self) -> None:
+        vm = self._vm()
+        result = vm.raw_data.replace_all("x", "z")
+        self.assertTrue(result.ok)
+        self.assertEqual(result.payload["replaced"], 2)
+        self.assertEqual(vm.state.df.at[0, "Name"], "z1")
+        self.assertTrue(vm.raw_data.can_undo)
+
+        vm.raw_data.undo_last_edit()
+        self.assertEqual(vm.state.df.at[0, "Name"], "x1")
+        self.assertFalse(vm.raw_data.can_undo)
+
+    def test_replace_all_regex_round_trip(self) -> None:
+        vm = self._vm()
+        result = vm.raw_data.replace_all(r"x(\d)", r"a\1", regex=True, columns=["Name"])
+        self.assertTrue(result.ok)
+        self.assertEqual(vm.state.df.at[0, "Name"], "a1")
+        self.assertEqual(vm.state.df.at[1, "Name"], "a2")
+
+    def test_replace_all_invalid_regex_fails(self) -> None:
+        vm = self._vm()
+        self.assertFalse(vm.raw_data.replace_all("(", "x", regex=True).ok)
+
+    def test_replace_all_numeric_column_keeps_text_with_warning(self) -> None:
+        vm = self._vm()
+        result = vm.raw_data.replace_all("1.0", "abc", columns=["A"])
+        self.assertTrue(result.ok)
+        self.assertEqual(vm.state.df.at[0, "A"], "abc")
+        self.assertTrue(result.warnings)
+
+
+class FillVMTests(unittest.TestCase):
+    def _vm(self) -> MainWindowViewModel:
+        vm = MainWindowViewModel()
+        vm.state.df = pd.DataFrame({"A": [1.0, 2.0, 0.0, 0.0, 0.0], "B": [9.0, 0.0, 0.0, 0.0, 0.0]})
+        vm.state.channel_registry = dataset_service.build_registry_for_dataframe(vm.state.df)
+        return vm
+    def test_fill_down_copies_top_value(self) -> None:
+        vm = self._vm()
+        ids = vm.state.channel_registry.ids()
+        result = vm.dataset.fill_down([0, 1, 2, 3, 4], [ids[1]])
+        self.assertTrue(result.ok)
+        self.assertEqual(list(vm.state.df["B"]), [9.0, 9.0, 9.0, 9.0, 9.0])
+
+    def test_fill_drag_linear(self) -> None:
+        vm = self._vm()
+        ids = vm.state.channel_registry.ids()
+        result = vm.dataset.fill_drag([0, 1], [2, 3, 4], [ids[0]])
+        self.assertTrue(result.ok)
+        self.assertEqual(list(vm.state.df["A"]), [1.0, 2.0, 3.0, 4.0, 5.0])
+
+    def test_fill_drag_undo_restores_values(self) -> None:
+        vm = self._vm()
+        ids = vm.state.channel_registry.ids()
+        vm.dataset.fill_drag([0, 1], [2, 3, 4], [ids[0]])
+        self.assertTrue(vm.dataset.can_undo)
+        vm.dataset.undo_last_edit()
+        self.assertEqual(list(vm.state.df["A"]), [1.0, 2.0, 0.0, 0.0, 0.0])
+        self.assertFalse(vm.dataset.can_undo)
+
+
+class RunsComparisonBatchTests(unittest.TestCase):
+    def test_imports_multiple_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            for index in range(3):
+                frame = pd.DataFrame({"Time": [0.0, 1.0], "A": [float(index), float(index + 1)]})
+                frame.to_csv(Path(directory, f"Run{index}.csv"), index=False)
+            vm = MainWindowViewModel()
+
+            result = vm.runs_comparison.add_runs_from_folder(directory, glob="*.csv")
+
+            self.assertTrue(result.ok)
+            self.assertEqual(result.payload["added"], 3)
+            self.assertEqual(len(vm.state.runs), 3)
+
+    def test_applies_name_regex(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pd.DataFrame({"Time": [0.0], "A": [1.0]}).to_csv(Path(directory, "Run_SN42.csv"), index=False)
+            vm = MainWindowViewModel()
+
+            vm.runs_comparison.add_runs_from_folder(directory, glob="*.csv", name_regex=r"SN(\d+)")
+
+            self.assertEqual(vm.state.runs[0]["name"], "42")
+
+    def test_skips_corrupt_file_with_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pd.DataFrame({"Time": [0.0], "A": [1.0]}).to_csv(Path(directory, "good.csv"), index=False)
+            Path(directory, "bad.xlsx").write_text("not an excel file", encoding="utf-8")
+            vm = MainWindowViewModel()
+
+            result = vm.runs_comparison.add_runs_from_folder(directory, glob="*.csv;*.xlsx")
+
+            self.assertTrue(result.ok)
+            self.assertEqual(result.payload["added"], 1)
+            self.assertTrue(result.warnings)
+            self.assertIn("bad.xlsx", result.warnings[0])
+
+
+class LimitTemplateImportTests(unittest.TestCase):
+    def _template_path(self, directory: str) -> str:
+        source = LimitsViewModel(AppState())
+        source.state.limit_lines = [source._blank_line("L1")]
+        path = str(Path(directory, "template.json"))
+        self.assertTrue(source.export_template(path).ok)
+        return path
+
+    def test_replace_clears_then_imports(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._template_path(directory)
+            vm = LimitsViewModel(AppState())
+            vm.state.limit_lines = [vm._blank_line("Existing")]
+
+            result = vm.import_template(path, replace=True)
+
+            self.assertTrue(result.ok)
+            self.assertEqual([line["name"] for line in vm.state.limit_lines], ["L1"])
+
+    def test_merge_appends(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._template_path(directory)
+            vm = LimitsViewModel(AppState())
+            vm.state.limit_lines = [vm._blank_line("Existing")]
+
+            result = vm.import_template(path, replace=False)
+
+            self.assertTrue(result.ok)
+            self.assertEqual([line["name"] for line in vm.state.limit_lines], ["Existing", "L1"])
+
+
+class PeakDetectionVMTests(unittest.TestCase):
+    def _vm(self) -> MainWindowViewModel:
+        vm = MainWindowViewModel()
+        x = np.linspace(0, 4 * np.pi, 400)
+        vm.state.df = pd.DataFrame({"Time": x, "A": np.sin(x)})
+        vm.state.current_x_axis = "Time"
+        vm.state.channel_registry = dataset_service.build_registry_for_dataframe(vm.state.df)
+        return vm
+
+    def test_returns_peak_points_and_annotations(self) -> None:
+        vm = self._vm()
+        result = vm.plot_workspace.detect_peaks("A")
+        self.assertTrue(result.ok)
+        self.assertEqual(len(result.payload["points"]), 2)
+        annotations = result.payload["annotations"]
+        self.assertEqual(len(annotations), 2)
+        self.assertEqual(annotations[0]["type"], "text")
+        self.assertIn("text", annotations[0])
+
+    def test_unknown_channel_fails(self) -> None:
+        vm = self._vm()
+        self.assertFalse(vm.plot_workspace.detect_peaks("Missing").ok)
+
+
+class PlotProfileReorderTests(unittest.TestCase):
+    def test_reorder_moves_active_index(self) -> None:
+        vm = MainWindowViewModel()
+        vm.state.plot_profiles = [{"name": "P1"}, {"name": "P2"}, {"name": "P3"}]
+        vm.state.active_plot_profile_index = 0
+
+        result = vm.reorder_plot_profile(0, 2)
+
+        self.assertTrue(result.ok)
+        self.assertEqual([profile["name"] for profile in vm.state.plot_profiles], ["P2", "P3", "P1"])
+        self.assertEqual(vm.state.active_plot_profile_index, 2)
+
+    def test_reorder_shifts_active_when_other_tab_moves(self) -> None:
+        vm = MainWindowViewModel()
+        vm.state.plot_profiles = [{"name": "P1"}, {"name": "P2"}, {"name": "P3"}]
+        vm.state.active_plot_profile_index = 1
+
+        vm.reorder_plot_profile(0, 2)
+
+        self.assertEqual(vm.state.active_plot_profile_index, 0)
+
+    def test_reorder_invalid_index_fails(self) -> None:
+        vm = MainWindowViewModel()
+        vm.state.plot_profiles = [{"name": "P1"}]
+        self.assertFalse(vm.reorder_plot_profile(0, 5).ok)
+
+
+class ResetAxisAppearanceTests(unittest.TestCase):
+    def test_reset_active_axis_appearance_clears_manual_state(self) -> None:
+        vm = MainWindowViewModel()
+        vm.state.plot_profiles = [
+            {
+                "name": "P1",
+                "x_column": "Time",
+                "y_columns": ["A"],
+                "title": "Custom Title",
+                "axis_limits": {"xmin": 0.0, "xmax": 10.0, "ymin": -1.0, "ymax": 1.0},
+                "manual_labels": {"title": True, "x_label": True},
+            }
+        ]
+        vm.state.active_plot_profile_index = 0
+
+        result = vm.reset_active_axis_appearance()
+
+        self.assertTrue(result.ok)
+        profile = vm.state.plot_profiles[0]
+        self.assertEqual(profile["x_column"], "Time")
+        self.assertEqual(profile["y_columns"], ["A"])
+        self.assertNotEqual(profile.get("title"), "Custom Title")
+        self.assertFalse(any(bool(value) for value in (profile.get("manual_labels") or {}).values()))
+
+    def test_reset_active_axis_appearance_without_profiles_fails(self) -> None:
+        vm = MainWindowViewModel()
+        vm.state.plot_profiles = []
+        self.assertFalse(vm.reset_active_axis_appearance().ok)
+
+
 class DatasetViewModelTests(unittest.TestCase):
     def _manual_vm(self) -> MainWindowViewModel:
         vm = MainWindowViewModel()
         vm.create_manual_session(columns=["Time", "Pressure"], rows=2)
         return vm
-
     def test_add_column_and_duplicate_block(self) -> None:
         vm = self._manual_vm()
         self.assertTrue(vm.dataset.add_column("Flow").ok)
@@ -1370,6 +1833,69 @@ class DatasetViewModelTests(unittest.TestCase):
         self.assertEqual(vm.state.df.at[0, "Pressure"], 42.0)
         self.assertTrue(vm.dataset.delete_rows([0]).ok)
         self.assertEqual(len(vm.state.df), 2)
+
+    def test_undo_dataset_cell_edit(self) -> None:
+        vm = self._manual_vm()
+        channel_id = vm.state.channel_registry.id_for_name("Pressure")
+
+        self.assertFalse(vm.dataset.can_undo)
+        self.assertTrue(vm.dataset.set_cell(channel_id, 0, "42").ok)
+        self.assertEqual(vm.state.df.at[0, "Pressure"], 42.0)
+        self.assertTrue(vm.dataset.can_undo)
+
+        undo = vm.dataset.undo_last_edit()
+        self.assertTrue(undo.ok, undo.message)
+        self.assertTrue(pd.isna(vm.state.df.at[0, "Pressure"]))
+        self.assertFalse(vm.dataset.can_undo)
+
+    def test_undo_dataset_structural_edits(self) -> None:
+        vm = self._manual_vm()
+        original_columns = list(vm.state.df.columns)
+        original_rows = len(vm.state.df)
+
+        self.assertTrue(vm.dataset.add_column("Flow").ok)
+        self.assertIn("Flow", vm.state.column_names())
+        self.assertTrue(vm.dataset.undo_last_edit().ok)
+        self.assertEqual(list(vm.state.df.columns), original_columns)
+
+        self.assertTrue(vm.dataset.add_row().ok)
+        self.assertEqual(len(vm.state.df), original_rows + 1)
+        self.assertTrue(vm.dataset.undo_last_edit().ok)
+        self.assertEqual(len(vm.state.df), original_rows)
+
+        self.assertTrue(vm.dataset.delete_rows([0]).ok)
+        self.assertEqual(len(vm.state.df), original_rows - 1)
+        self.assertTrue(vm.dataset.undo_last_edit().ok)
+        self.assertEqual(len(vm.state.df), original_rows)
+
+        pressure_id = vm.state.channel_registry.id_for_name("Pressure")
+        self.assertTrue(vm.dataset.rename_column(pressure_id, "Outlet Pressure").ok)
+        self.assertIn("Outlet Pressure", vm.state.column_names())
+        self.assertTrue(vm.dataset.undo_last_edit().ok)
+        self.assertEqual(list(vm.state.df.columns), original_columns)
+
+        pressure_id = vm.state.channel_registry.id_for_name("Pressure")
+        self.assertTrue(vm.dataset.delete_column(pressure_id).ok)
+        self.assertNotIn("Pressure", vm.state.column_names())
+        self.assertTrue(vm.dataset.undo_last_edit().ok)
+        self.assertEqual(list(vm.state.df.columns), original_columns)
+
+    def test_delete_multiple_columns_and_undo(self) -> None:
+        vm = MainWindowViewModel()
+        vm.create_manual_session(columns=["Time", "Pressure", "Flow"], rows=2)
+        original_columns = list(vm.state.df.columns)
+        pressure_id = vm.state.channel_registry.id_for_name("Pressure")
+        flow_id = vm.state.channel_registry.id_for_name("Flow")
+
+        result = vm.dataset.delete_columns([pressure_id, flow_id])
+
+        self.assertTrue(result.ok, result.message)
+        self.assertEqual(vm.state.column_names(), ["Time"])
+        self.assertTrue(vm.dataset.can_undo)
+
+        undo = vm.dataset.undo_last_edit()
+        self.assertTrue(undo.ok, undo.message)
+        self.assertEqual(list(vm.state.df.columns), original_columns)
 
 
 if __name__ == "__main__":

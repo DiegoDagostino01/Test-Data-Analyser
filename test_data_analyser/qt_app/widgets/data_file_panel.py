@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -41,13 +42,21 @@ class DataFilePanel(QFrame):
         self.file_label = QLabel("No file loaded.")
         self.file_label.setObjectName("PlaceholderText")
         self.file_label.setWordWrap(True)
+        self.file_label.setMinimumWidth(0)
+        self.file_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         layout.addWidget(self.file_label)
 
         self.sheet_row = QWidget()
+        self.sheet_row.setMinimumWidth(0)
+        self.sheet_row.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         sheet_layout = QHBoxLayout(self.sheet_row)
         sheet_layout.setContentsMargins(0, 0, 0, 0)
         sheet_layout.addWidget(QLabel("Sheet:"))
         self.sheet_combo = QComboBox()
+        self.sheet_combo.setMinimumWidth(0)
+        self.sheet_combo.setMinimumContentsLength(0)
+        self.sheet_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.sheet_combo.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.sheet_combo.activated.connect(self._on_sheet_selected)
         sheet_layout.addWidget(self.sheet_combo, stretch=1)
         self.sheet_row.setVisible(False)
@@ -62,19 +71,34 @@ class DataFilePanel(QFrame):
         if not filename:
             return
         qt_widget_helpers.remember_data_directory(manager, filename)
-        self._current_path = filename
-        sheets = self.vm.get_sheets(filename)
+        self.load_path(filename)
+
+    def load_path(self, path: str, sheet_name: str | None = None) -> None:
+        """Load ``path`` programmatically without showing a file dialog.
+
+        Mirrors :meth:`open_file` sheet handling so recent-files, drag-and-drop,
+        and batch import can reuse one load path. For Excel workbooks the sheet
+        selector is populated and ``sheet_name`` (when valid) or the first sheet
+        is loaded; for CSV files the sheet row stays hidden.
+        """
+        self._current_path = path
+        sheets = self.vm.get_sheets(path)
         if sheets:
+            target_sheet = sheet_name if sheet_name in sheets else sheets[0]
             self.sheet_combo.blockSignals(True)
             self.sheet_combo.clear()
             self.sheet_combo.addItems(sheets)
-            self.sheet_combo.setCurrentIndex(0)
+            self.sheet_combo.setCurrentText(target_sheet)
             self.sheet_combo.blockSignals(False)
             self.sheet_row.setVisible(True)
-            self._load(filename, sheets[0])
+            self._load(path, target_sheet)
         else:
             self.sheet_row.setVisible(False)
-            self._load(filename, None)
+            self._load(path, None)
+
+    def current_path(self) -> str | None:
+        """Return the path of the currently loaded data file, if any."""
+        return self._current_path
 
     def _on_sheet_selected(self, _index: int) -> None:
         if self._current_path:

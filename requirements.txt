@@ -14,37 +14,16 @@ scipy
 # ----------------------------
 openpyxl
 xlrd
-xlsxwriter
 
 # ----------------------------
 # Plotting and visualisation
 # ----------------------------
 matplotlib
-seaborn
-pyqtgraph
 
 # ----------------------------
 # PySide6 GUI framework
 # ----------------------------
 PySide6
-
-# ----------------------------
-# Table / data handling helpers
-# ----------------------------
-pyarrow
-tabulate
-
-# ----------------------------
-# Configuration / validation
-# ----------------------------
-pydantic
-platformdirs
-
-# ----------------------------
-# File export / reporting
-# ----------------------------
-reportlab
-python-docx
 
 # ----------------------------
 # Image handling

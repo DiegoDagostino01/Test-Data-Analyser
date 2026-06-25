@@ -25,3 +25,12 @@ class OperationResult:
     @classmethod
     def failure(cls, message: str = "", *, errors: list[str] | None = None, payload: object | None = None) -> "OperationResult":
         return cls(ok=False, message=message, errors=list(errors or ([message] if message else [])), payload=payload)
+
+
+def payload_dict(result: OperationResult) -> dict[str, object]:
+    """Return ``result.payload`` as a dict, or an empty dict when it is not one.
+
+    This keeps existing ``OperationResult`` contracts stable while giving
+    callers one explicit compatibility adapter for legacy dict payloads.
+    """
+    return result.payload if isinstance(result.payload, dict) else {}

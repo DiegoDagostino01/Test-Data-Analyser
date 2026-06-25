@@ -7,7 +7,7 @@ and opens no dialogs; the UI supplies an explicit path for session I/O.
 """
 from __future__ import annotations
 
-from copy import deepcopy
+import os
 from pathlib import Path
 import re
 from difflib import SequenceMatcher
@@ -16,9 +16,10 @@ from typing import Any, Optional, cast
 import pandas as pd
 
 from ..core.config import __version__
-from ..core.utils import classify_channel_name
+from ..core.channel_classification import classify_channel_name
+from ..core.indexing import clamp_index
 from ..domain import SOURCE_EXCEL, SOURCE_MANUAL, ComparisonSettings, normalise_plot_profile
-from ..services import dataset_service, plot_render_service, session_service
+from ..services import dataset_service, plot_profile_service, plot_render_service, session_service
 from ..services.results import OperationResult
 from .app_state import AppState
 from .cursor_compare_vm import CursorCompareViewModel
@@ -31,11 +32,13 @@ from .plot_workspace_vm import PlotWorkspaceViewModel
 from .raw_data_vm import RawDataViewModel
 from .runs_comparison_vm import RunsComparisonViewModel
 from .settings_vm import SettingsViewModel
+from .state_controller import AppStateController
 
 
 class MainWindowViewModel:
     def __init__(self, settings_manager: Any = None) -> None:
         self.state = AppState(settings_manager=settings_manager)
+        self._state_controller = AppStateController(self.state)
         self.settings = SettingsViewModel(settings_manager)
         self.data_loading = DataLoadingViewModel(self.state)
         self.dataset = DatasetViewModel(self.state)
@@ -48,24 +51,99 @@ class MainWindowViewModel:
         self.cursor_compare = CursorCompareViewModel()
 
     # ------------------------------------------------------------------
+    # Recent files / sessions
+    # ------------------------------------------------------------------
+    RECENT_LIMIT = 10
+
+    def recent_files(self) -> list[str]:
+        """Return the stored recent data-file paths, most recent first."""
+        return self._recent_list("recent_files")
+
+    def recent_sessions(self) -> list[str]:
+        """Return the stored recent session paths, most recent first."""
+        return self._recent_list("recent_sessions")
+
+    def register_recent_file(self, path: str) -> list[str]:
+        """Record ``path`` as the most recently opened data file."""
+        return self._register_recent("recent_files", path)
+
+    def register_recent_session(self, path: str) -> list[str]:
+        """Record ``path`` as the most recently used session."""
+        return self._register_recent("recent_sessions", path)
+
+    def _recent_list(self, key: str) -> list[str]:
+        manager = getattr(self.state, "settings_manager", None)
+        if manager is None:
+            return []
+        try:
+            values = manager.get("recent", key)
+        except (KeyError, AttributeError):
+            return []
+        if not isinstance(values, list):
+            return []
+        return [str(item) for item in values if isinstance(item, str) and item]
+
+    def _register_recent(self, key: str, path: str) -> list[str]:
+        manager = getattr(self.state, "settings_manager", None)
+        if manager is None or not path:
+            return self._recent_list(key)
+        resolved = str(Path(path).resolve())
+        target = os.path.normcase(resolved)
+        deduped = [item for item in self._recent_list(key) if os.path.normcase(item) != target]
+        updated = [resolved, *deduped][: self.RECENT_LIMIT]
+        try:
+            manager.set("recent", key, updated)
+            manager.save()
+        except (KeyError, ValueError, AttributeError):
+            return self._recent_list(key)
+        return updated
+
+    # ------------------------------------------------------------------
+    # Auto-save scheduling
+    # ------------------------------------------------------------------
+    @staticmethod
+    def auto_save_due(last_saved_epoch: Optional[float], now_epoch: float, interval_minutes: int) -> bool:
+        """Return whether an auto-save is due given the last-save time.
+
+        Pure timing policy with no side effects: never due for a non-positive
+        interval, always due when nothing has been saved yet, otherwise due once
+        ``interval_minutes`` have elapsed since ``last_saved_epoch``.
+        """
+        if interval_minutes <= 0:
+            return False
+        if last_saved_epoch is None:
+            return True
+        return (now_epoch - last_saved_epoch) >= interval_minutes * 60
+
+    def auto_save_target_path(self, current_session_path: Optional[str] = None) -> str:
+        """Resolve where an auto-save should be written.
+
+        Prefers the active session path so auto-save keeps the user's own file
+        current; otherwise falls back to ``autosave.json`` beside the loaded data
+        file, or in the working directory when no data file is linked.
+        """
+        if current_session_path:
+            return current_session_path
+        root = self.state.root_file_directory or self._root_directory_for_file(self.state.filepath)
+        if root:
+            return str(Path(root) / "autosave.json")
+        return "autosave.json"
+
+    # ------------------------------------------------------------------
     # Plot-profile list management
     # ------------------------------------------------------------------
     def ensure_plot_profiles(self) -> None:
         """Ensure the state has at least one normalised plot profile."""
-        if not self.state.plot_profiles:
-            self.state.plot_profiles = [normalise_plot_profile({"name": "Plot 1"})]
-        else:
-            self.state.plot_profiles = [normalise_plot_profile(profile) for profile in self.state.plot_profiles]
-        self.state.active_plot_profile_index = self._clamped_profile_index(self.state.active_plot_profile_index)
+        profiles, active_index = plot_profile_service.ensure_profiles(
+            self.state.plot_profiles,
+            self.state.active_plot_profile_index,
+        )
+        self._state_controller.set_plot_profiles(profiles, active_index)
 
     def reset_plot_profiles(self) -> None:
         """Start a fresh one-plot workspace for a newly opened data file."""
-        self.state.plot_profiles = [normalise_plot_profile({"name": "Plot 1"})]
-        self.state.active_plot_profile_index = 0
-        self.state.current_x_axis = ""
-        self.state.limit_lines = []
-        self.state.active_limit_line_index = 0
-        self.state.engineering_notes = {}
+        profiles, active_index = plot_profile_service.reset_profiles()
+        self._state_controller.reset_plot_workspace(profiles, active_index)
 
     def create_manual_session(
         self, *, columns: list[str] | None = None, rows: int = 8
@@ -102,64 +180,98 @@ class MainWindowViewModel:
         )
 
     def add_plot_profile(self, name: str = "") -> OperationResult:
-        self.ensure_plot_profiles()
-        profile_name = name.strip() or self._next_plot_name()
-        profile_name = self._unique_profile_name(profile_name)
-        self.state.plot_profiles.append(
-            normalise_plot_profile({"name": profile_name, "x_column": self._current_x_axis_or_default()})
+        update = plot_profile_service.add_profile(
+            self.state.plot_profiles,
+            self.state.active_plot_profile_index,
+            name=name,
+            x_column=self._current_x_axis_or_default(),
         )
-        self.state.active_plot_profile_index = len(self.state.plot_profiles) - 1
-        return OperationResult.success(f"Created plot '{profile_name}'.", payload=self.state.active_plot_profile_index)
+        self._apply_plot_profile_update(update)
+        return update.result
 
     def duplicate_plot_profile(self, index: int | None = None) -> OperationResult:
-        self.ensure_plot_profiles()
-        source_index = self._clamped_profile_index(self.state.active_plot_profile_index if index is None else index)
-        source = deepcopy(self.state.plot_profiles[source_index])
-        source_name = str(source.get("name", f"Plot {source_index + 1}")).strip() or f"Plot {source_index + 1}"
-        source["name"] = self._unique_profile_name(f"{source_name} Copy")
-        insert_index = source_index + 1
-        self.state.plot_profiles.insert(insert_index, normalise_plot_profile(source))
-        self.state.active_plot_profile_index = insert_index
-        return OperationResult.success(f"Duplicated plot '{source_name}'.", payload=insert_index)
+        update = plot_profile_service.duplicate_profile(
+            self.state.plot_profiles,
+            self.state.active_plot_profile_index,
+            index=index,
+        )
+        self._apply_plot_profile_update(update)
+        return update.result
 
     def rename_plot_profile(self, index: int, name: str) -> OperationResult:
-        self.ensure_plot_profiles()
-        target_index = self._clamped_profile_index(index)
-        new_name = name.strip()
-        if not new_name:
-            return OperationResult.failure("Enter a plot name.")
-        existing_names = {
-            str(profile.get("name", "")).strip()
-            for current, profile in enumerate(self.state.plot_profiles)
-            if current != target_index
-        }
-        if new_name in existing_names:
-            return OperationResult.failure(f"A plot named '{new_name}' already exists.")
-        self.state.plot_profiles[target_index]["name"] = new_name
-        return OperationResult.success(f"Renamed plot to '{new_name}'.", payload=target_index)
+        update = plot_profile_service.rename_profile(
+            self.state.plot_profiles,
+            self.state.active_plot_profile_index,
+            index,
+            name,
+        )
+        self._apply_plot_profile_update(update)
+        return update.result
 
     def delete_plot_profile(self, index: int | None = None) -> OperationResult:
-        self.ensure_plot_profiles()
-        if len(self.state.plot_profiles) <= 1:
-            return OperationResult.failure("At least one plot must remain in the session.")
-        target_index = self._clamped_profile_index(self.state.active_plot_profile_index if index is None else index)
-        deleted = self.state.plot_profiles.pop(target_index)
-        active = self.state.active_plot_profile_index
-        if active > target_index:
-            active -= 1
-        elif active == target_index:
-            active = min(target_index, len(self.state.plot_profiles) - 1)
-        self.state.active_plot_profile_index = self._clamped_profile_index(active)
-        name = str(deleted.get("name", f"Plot {target_index + 1}"))
-        return OperationResult.success(f"Deleted plot '{name}'.", payload=self.state.active_plot_profile_index)
+        update = plot_profile_service.delete_profile(
+            self.state.plot_profiles,
+            self.state.active_plot_profile_index,
+            index=index,
+        )
+        self._apply_plot_profile_update(update)
+        return update.result
 
     def select_plot_profile(self, index: int) -> OperationResult:
-        self.ensure_plot_profiles()
-        if not 0 <= index < len(self.state.plot_profiles):
-            return OperationResult.failure("Plot tab is out of range.")
-        self.state.active_plot_profile_index = index
-        profile = self.state.active_plot_profile() or {}
-        return OperationResult.success(f"Selected plot '{profile.get('name', index + 1)}'.", payload=index)
+        update = plot_profile_service.select_profile(
+            self.state.plot_profiles,
+            self.state.active_plot_profile_index,
+            index,
+        )
+        self._apply_plot_profile_update(update)
+        return update.result
+
+    def reorder_plot_profile(self, from_index: int, to_index: int) -> OperationResult:
+        """Move a plot profile from ``from_index`` to ``to_index``.
+
+        Pure list manipulation that keeps the active profile selected as it moves.
+        """
+        profiles = self.state.plot_profiles
+        count = len(profiles)
+        if not (0 <= from_index < count) or not (0 <= to_index < count):
+            return OperationResult.failure("Invalid plot tab positions.")
+        if from_index == to_index:
+            return OperationResult.success("No change.")
+        active = self.state.active_plot_profile_index
+        moved = profiles.pop(from_index)
+        profiles.insert(to_index, moved)
+        if active == from_index:
+            active = to_index
+        elif from_index < active <= to_index:
+            active -= 1
+        elif to_index <= active < from_index:
+            active += 1
+        self.state.active_plot_profile_index = clamp_index(active, len(profiles))
+        return OperationResult.success("Reordered plots.")
+
+    def reset_active_axis_appearance(self) -> OperationResult:
+        """Clear manual title/labels/axis limits/ticks for the active plot.
+
+        Plotted data, channel selection, and best-fit settings are preserved; the
+        cleared appearance fields fall back to their normalised defaults so the
+        next render auto-labels and auto-fits.
+        """
+        index = self.state.active_plot_profile_index
+        if not (0 <= index < len(self.state.plot_profiles)):
+            return OperationResult.failure("There is no active plot to reset.")
+        profile = self.state.plot_profiles[index]
+        for key in (
+            "axis_limits",
+            "axis_ticks",
+            "manual_labels",
+            "title",
+            "x_label",
+            "y_label",
+            "secondary_y_label",
+        ):
+            profile.pop(key, None)
+        self.state.plot_profiles[index] = normalise_plot_profile(profile)
+        return OperationResult.success("Reset axis title, labels, limits, and ticks.")
 
     def set_current_x_axis(self, x_column: str) -> str:
         """Remember the current X-axis selection if it is available in the active data."""
@@ -168,22 +280,10 @@ class MainWindowViewModel:
         return self.state.current_x_axis
 
     def _clamped_profile_index(self, index: int) -> int:
-        if not self.state.plot_profiles:
-            return 0
-        return max(0, min(index, len(self.state.plot_profiles) - 1))
+        return clamp_index(index, len(self.state.plot_profiles))
 
-    def _next_plot_name(self) -> str:
-        return self._unique_profile_name(f"Plot {len(self.state.plot_profiles) + 1}")
-
-    def _unique_profile_name(self, base_name: str) -> str:
-        existing = {str(profile.get("name", "")).strip() for profile in self.state.plot_profiles}
-        candidate = base_name.strip() or "Plot"
-        if candidate not in existing:
-            return candidate
-        counter = 2
-        while f"{candidate} {counter}" in existing:
-            counter += 1
-        return f"{candidate} {counter}"
+    def _apply_plot_profile_update(self, update: plot_profile_service.PlotProfileListUpdate) -> None:
+        self._state_controller.set_plot_profiles(update.profiles, update.active_index)
 
     def _current_x_axis_or_default(self) -> str:
         current = str(self.state.current_x_axis).strip()
@@ -224,121 +324,21 @@ class MainWindowViewModel:
     def active_legend_channel_overrides(self) -> dict[str, dict[str, str]]:
         """Return the active profile's per-channel legend style overrides."""
         self.ensure_plot_profiles()
-        return self._profile_legend_channel_overrides(self.state.active_plot_profile() or {})
+        return plot_profile_service.profile_legend_channel_overrides(self.state.active_plot_profile() or {})
 
     def update_active_legend_channel_override(self, channel: str, style: dict[str, Any]) -> OperationResult:
         """Store a legend-row style override for the active profile."""
         self.ensure_plot_profiles()
-        channel_name = str(channel).strip()
-        channel_key = plot_render_service.normalise_channel_name(channel_name)
-        if not channel_key:
-            return OperationResult.failure("Select a plotted channel to edit.")
-
-        index = self._clamped_profile_index(self.state.active_plot_profile_index)
-        profile = self.state.plot_profiles[index]
-        overrides = self._profile_legend_channel_overrides(profile)
-        current = dict(overrides.get(channel_key, {}))
-        updated = self._normalise_legend_channel_style(style)
-        updated.setdefault("channel", channel_name or current.get("channel", ""))
-        overrides[channel_key] = {**current, **updated}
-        self._set_profile_legend_channel_overrides(profile, overrides)
-
-        colour = overrides[channel_key].get("colour", "")
-        if colour:
-            self._propagate_channel_colour_override(channel_key, overrides[channel_key].get("channel", channel_name), colour)
-        label = overrides[channel_key].get("label") or channel_name
-        return OperationResult.success(f"Updated legend style for '{label}'.")
+        return plot_profile_service.update_legend_channel_override(
+            self.state.plot_profiles,
+            self.state.active_plot_profile_index,
+            channel,
+            style,
+        )
 
     def _legend_channel_colour_overrides(self) -> dict[str, str]:
         self.ensure_plot_profiles()
-        colours: dict[str, str] = {}
-        for profile in self.state.plot_profiles:
-            for channel_key, style in self._profile_legend_channel_overrides(profile).items():
-                colour = str(style.get("colour", "")).strip()
-                if colour:
-                    colours[channel_key] = colour
-        return colours
-
-    def _propagate_channel_colour_override(self, channel_key: str, channel: str, colour: str) -> None:
-        colour_text = str(colour).strip()
-        if not colour_text:
-            return
-        for profile in self.state.plot_profiles:
-            overrides = self._profile_legend_channel_overrides(profile)
-            if channel_key not in overrides and not self._profile_references_channel(profile, channel_key):
-                continue
-            style = dict(overrides.get(channel_key, {}))
-            style.setdefault("channel", str(channel).strip())
-            style["colour"] = colour_text
-            overrides[channel_key] = style
-            self._set_profile_legend_channel_overrides(profile, overrides)
-
-    @staticmethod
-    def _profile_references_channel(profile: dict[str, Any], channel_key: str) -> bool:
-        channels = [*profile.get("y_columns", []), *profile.get("secondary_y_columns", [])]
-        return any(plot_render_service.normalise_channel_name(channel) == channel_key for channel in channels)
-
-    @classmethod
-    def _profile_legend_channel_overrides(cls, profile: dict[str, Any]) -> dict[str, dict[str, str]]:
-        legend = profile.get("legend", {}) if isinstance(profile, dict) else {}
-        raw_overrides = legend.get("channel_overrides", {}) if isinstance(legend, dict) else {}
-        if not isinstance(raw_overrides, dict):
-            return {}
-        overrides: dict[str, dict[str, str]] = {}
-        for raw_key, raw_style in raw_overrides.items():
-            if not isinstance(raw_style, dict):
-                continue
-            style = cls._normalise_legend_channel_style(raw_style)
-            channel_key = plot_render_service.normalise_channel_name(style.get("channel") or raw_key)
-            if channel_key and style:
-                overrides[channel_key] = style
-        return overrides
-
-    @staticmethod
-    def _set_profile_legend_channel_overrides(profile: dict[str, Any], overrides: dict[str, dict[str, str]]) -> None:
-        legend = profile.get("legend", {}) if isinstance(profile.get("legend", {}), dict) else {}
-        profile["legend"] = {**legend, "channel_overrides": dict(overrides)}
-
-    @staticmethod
-    def _normalise_legend_channel_style(style: dict[str, Any]) -> dict[str, str]:
-        if not isinstance(style, dict):
-            return {}
-        normalised: dict[str, str] = {}
-        for key in (
-            "channel",
-            "label",
-            "colour",
-            "plot_kind",
-            "line_style",
-            "draw_style",
-            "line_width",
-            "marker_style",
-            "marker_size",
-            "marker_face_colour",
-            "marker_edge_colour",
-        ):
-            value = str(style.get(key, "")).strip()
-            if not value:
-                continue
-            normalised[key] = "Line + Markers" if key == "plot_kind" and value == "Line + Marker" else value
-        if not normalised.get("label"):
-            label = str(style.get("name", "")).strip()
-            if label:
-                normalised["label"] = label
-        if not normalised.get("colour"):
-            colour = str(style.get("color", "")).strip()
-            if colour:
-                normalised["colour"] = colour
-        for source, target in (("marker_face_color", "marker_face_colour"), ("marker_edge_color", "marker_edge_colour")):
-            if not normalised.get(target):
-                value = str(style.get(source, "")).strip()
-                if value:
-                    normalised[target] = value
-        if "hidden" in style:
-            value = style.get("hidden")
-            hidden = value if isinstance(value, bool) else str(value).strip().casefold() in {"1", "true", "yes", "on"}
-            normalised["hidden"] = "true" if hidden else "false"
-        return normalised
+        return plot_profile_service.legend_channel_colour_overrides(self.state.plot_profiles)
 
     def plot_selection_preserves_appearance(self, previous: dict[str, Any], current: dict[str, Any]) -> bool:
         """Return whether a new Generate Plot request can keep live axis appearance.
@@ -494,13 +494,7 @@ class MainWindowViewModel:
     # ------------------------------------------------------------------
     def build_session(self) -> dict[str, Any]:
         """Assemble a normalised session dictionary from the current state."""
-        manual = self.state.data_source_type == SOURCE_MANUAL
-        dataset_rows = (
-            dataset_service.rows_from_dataframe(self.state.channel_registry, self.state.df)
-            if manual
-            else []
-        )
-        return session_service.build_session_dict(
+        return session_service.build_runtime_session_dict(
             version=__version__,
             root_file_directory=self.state.root_file_directory or self._root_directory_for_file(self.state.filepath),
             file_path=str(self.state.filepath) if self.state.filepath else "",
@@ -508,11 +502,11 @@ class MainWindowViewModel:
             runs=self.runs_comparison.serialise_runs(),
             comparison=self.state.comparison.to_dict(),
             active_plot_profile_index=self.state.active_plot_profile_index,
-            plot_profiles=[normalise_plot_profile(profile) for profile in self.state.plot_profiles],
-            calculated_channels=self.maths_channels.normalise_definitions(self.state.calculated_channels),
+            plot_profiles=self.state.plot_profiles,
+            calculated_channels=self.state.calculated_channels,
             data_source_type=self.state.data_source_type,
-            channel_registry=self.state.channel_registry.to_dict(),
-            dataset_rows=dataset_rows,
+            channel_registry=self.state.channel_registry,
+            df=self.state.df,
         )
 
     def save_session(self, path: str | Path) -> OperationResult:
@@ -590,42 +584,30 @@ class MainWindowViewModel:
         self.ensure_plot_profiles()
         self.set_current_x_axis(x_column)
         index = self._clamped_profile_index(self.state.active_plot_profile_index)
-        existing = dict(self.state.plot_profiles[index])
-        existing_legend = existing.get("legend", {}) if isinstance(existing.get("legend", {}), dict) else {}
-        merged_legend = {**existing_legend, **dict(legend_settings or {})}
-        profile = normalise_plot_profile(
-            {
-                **existing,
-                "name": existing.get("name", f"Plot {index + 1}"),
-                "x_column": x_column,
-                "y_columns": list(y_columns or []),
-                "secondary_y_columns": list(secondary_y_columns or []),
-                "title": title.strip() or "Engineering Test Data",
-                "x_label": x_label.strip(),
-                "y_label": y_label.strip() or "Selected Signals",
-                "secondary_y_label": secondary_y_label.strip(),
-                "plot_kind": plot_kind or "Line",
-                "auto_fit_axes": auto_fit_axes,
-                "axis_limits": dict(axis_limits or {}),
-                "axis_ticks": dict(axis_ticks or {}),
-                "legend": merged_legend,
-                "best_fit_lines": [dict(line) for line in best_fit_lines or []],
-                "annotations": [dict(annotation) for annotation in (annotations if annotations is not None else existing.get("annotations", []))],
-                "analysis_window": dict(analysis_window or {}),
-                "filter": dict(filter_settings or {}),
-                "generated": bool(generated),
-                "manual_labels": {
-                    "title": bool(title.strip()),
-                    "x_label": bool(x_label.strip()),
-                    "y_label": bool(y_label.strip()),
-                    "secondary_y_label": bool(secondary_y_label.strip()),
-                },
-                "limit_lines": [dict(line) for line in self.state.limit_lines],
-                "engineering_notes": dict(self.state.engineering_notes),
-            }
+        profile = plot_profile_service.capture_working_profile(
+            self.state.plot_profiles[index],
+            index,
+            x_column=x_column,
+            y_columns=y_columns,
+            secondary_y_columns=secondary_y_columns,
+            title=title,
+            x_label=x_label,
+            y_label=y_label,
+            secondary_y_label=secondary_y_label,
+            plot_kind=plot_kind,
+            auto_fit_axes=auto_fit_axes,
+            axis_limits=axis_limits,
+            axis_ticks=axis_ticks,
+            legend_settings=legend_settings,
+            best_fit_lines=best_fit_lines,
+            annotations=annotations,
+            analysis_window=analysis_window,
+            filter_settings=filter_settings,
+            generated=generated,
+            limit_lines=self.state.limit_lines,
+            engineering_notes=self.state.engineering_notes,
         )
-        self.state.plot_profiles[index] = profile
-        self.state.active_plot_profile_index = index
+        self._state_controller.set_active_plot_profile(index, profile)
 
     def restore_session(
         self,

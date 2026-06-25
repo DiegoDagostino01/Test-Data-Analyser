@@ -5,10 +5,9 @@ remain JSON-friendly and independent from the Qt/Matplotlib rendering layer.
 """
 from __future__ import annotations
 
-import math
 from typing import Any
 
-from .conversions import _mapping, _string
+from .conversions import _finite_float, _mapping, _string
 
 
 ANNOTATION_TEXT = "text"
@@ -163,14 +162,6 @@ def _normalise_axis(value: object) -> str:
     if axis in {"right", "secondary", "y2"}:
         return "secondary"
     return axis if axis in ANNOTATION_AXES else "primary"
-
-
-def _finite_float(value: object, *, default: float | None = None) -> float | None:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return default
-    return number if math.isfinite(number) else default
 
 
 def _unique_annotation_id(annotation_id: str, seen_ids: set[str]) -> str:

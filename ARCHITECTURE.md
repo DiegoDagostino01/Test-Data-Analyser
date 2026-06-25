@@ -48,10 +48,15 @@ Low-level, cross-cutting modules every other layer can use:
   (now also carrying axis-padding defaults and the remembered data/session
   import directories), stored by default at `config/settings.json` with a
   one-time migration from the legacy root `settings.json` path.
-- `utils.py` — column-name helpers (natural sort, grouped-column matching,
-  keyword inference) plus `classify_channel_name`/`channel_group_options`, the
-  deterministic engineering channel grouping used by the axis panel's channel
-  filter.
+- `naming.py` — safe names and natural sorting for engineering channel labels.
+- `indexing.py` — shared active-index clamping helpers.
+- `column_matching.py` — grouped-column X/Y pairing and keyword-based column
+  inference.
+- `channel_classification.py` — deterministic engineering channel grouping
+  (`classify_channel_name`, `channel_group_options`) used by the axis panel and
+  plotting helpers.
+- `utils.py` — a compatibility facade that re-exports the focused helpers above
+  for older imports during the refactor.
 
 ### `domain/` — framework-independent models
 
@@ -110,16 +115,38 @@ must not embed in a canvas or show dialogs; they return values or an
   filtering, and secondary-axis labelling), returned as plain arrays so Qt
   widgets only render — no Matplotlib canvas work.
 - `plot_render_service.py` — Matplotlib-aware colour-cycle resolution, the
-  secondary-axis cycle, and persistent per-channel colour mapping
-  (`normalise_channel_name`, `y_axis_channel_set`,
+  internal colour-cycle registry (`register_colour_cycle`,
+  `available_colour_cycles`), the secondary-axis cycle, and persistent
+  per-channel colour mapping (`normalise_channel_name`, `y_axis_channel_set`,
   `persistent_channel_colour_map`) so a channel that recurs across plots keeps
   a stable colour (no Qt).
 - `raw_data_service.py` — selected-data framing/filtering, blank-row removal,
-  row-limit parsing, and edit coercion.
+  row-limit parsing, display sort/per-column filter, and edit coercion.
 - `dataset_service.py` — source-agnostic dataset edits over a
   `(DataFrame, ChannelRegistry)` pair: build/reconcile the registry with stable
-  channel IDs, add/rename/delete columns, add/delete rows, coerce cell edits,
-  and serialise/rebuild manual rows for session embedding (no Qt).
+  channel IDs, add/rename/delete columns, add/delete rows, coerce cell edits
+  (`set_cell`/`set_cell_value`), and serialise/rebuild manual rows for session
+  embedding (no Qt).
+- `clipboard_service.py` — Excel-compatible TSV conversion for Raw Data cell
+  ranges (`selection_to_tsv`/`tsv_to_values`), pasted-block coercion to target
+  column types, and new-column type inference (no Qt; the panel reads/writes the
+  system clipboard).
+- `find_replace_service.py` — dataframe find & replace for the Raw Data view:
+  `find_matches` (string-representation search, plain/regex, case and column
+  scoping) and `apply_replacements`/`replace_in_text` that delegate cell writes
+  back through an injected callable so coercion and undo stay with the caller.
+- `fill_series_service.py` — Excel-style fill: `infer_fill_pattern` detects a
+  constant, arithmetic (linear), or repeat seed and `generate_fill` extends it by
+  N values (text/non-linear seeds repeat verbatim).
+- `batch_import_service.py` — folder data-file discovery (`discover_data_files`
+  with `;`-separated globs and optional recursion) and regex/stem run-naming
+  (`extract_run_name`) for batch run import.
+- `limit_templates_service.py` — save/load requirement limit lines as JSON
+  templates via the `LimitLine` domain model (round-trips name, type, applies-to,
+  colour, and points).
+- `peak_detection_service.py` — peak/trough detection wrapping
+  `scipy.signal.find_peaks` behind a lazy import (mirroring `core/filters.py`);
+  drops non-finite samples and keeps each result's source index.
 - `run_comparison_service.py` — enabled-run filtering, common-X range,
   per-channel comparison framing, comparison statistics, and run serialisation.
 - `cursor_service.py` — nearest plotted sample and the locked-point/delta
@@ -139,6 +166,10 @@ message boxes.
   current X-axis default, plot profiles, runs + active index, calculated
   channels, limit lines + active index, engineering notes, comparison settings,
   settings manager).
+- `state_controller.py` — `AppStateController`, the viewmodel-layer mutation
+  boundary for multi-field runtime state changes such as dataset undo snapshots,
+  dataframe payload application, dirty-state marking, and plot-profile list or
+  active-profile replacement.
 - `data_loading_vm.py` — file/sheet loading into the state.
 - `dataset_vm.py` — coordinates full-dataset editing (add/rename/delete columns
   and rows, cell edits) and propagates a column rename/delete across plot
@@ -269,12 +300,15 @@ tracked in `VERSION_HISTORY.md`.
 ## Recent enhancements
 
 Recent usability and feature refinements built on the Qt-only architecture
-above. Historical step-by-step migration notes are archived under
-[Archive/](Archive/). Highlights:
+above. Highlights:
 
 - **Multiple plot profiles.** Each plot is a named, switchable tab whose full
   state (channels, labels, axis limits/ticks, legend mode, generated flag)
-  round-trips through `PlotProfile`, managed by `MainWindowViewModel`.
+  round-trips through `PlotProfile`, managed by `MainWindowViewModel`. Tabs can
+  be dragged to reorder (the trailing "+" tab stays last, via
+  `reorder_plot_profile`), and a Figure Options **Reset Axis** button clears the
+  active plot's manual title/labels/limits/ticks (`reset_active_axis_appearance`)
+  while preserving data and best-fit settings.
 - **Figure Options & legends.** A `LegendAwareNavigationToolbar` adds legend,
   axis-tick, and auto-label/auto-fit controls to Matplotlib Figure Options, with
   a Qt-panel vs in-graph legend switch (`LegendSettings.display_mode`) and
@@ -295,11 +329,28 @@ above. Historical step-by-step migration notes are archived under
   and secondary-grid alignment) plus configurable axis padding applied during
   rendering.
 - **Channel grouping & persistent colours.** Deterministic engineering channel
-  classification (`core/utils`) drives the axis panel's channel filter, and
-  `plot_render_service` keeps recurring channels on stable colours across plots.
+  classification (`core/channel_classification.py`) drives the axis panel's
+  channel filter, and `plot_render_service` keeps recurring channels on stable
+  colours across plots. Plot colour cycles are registered internally, so future
+  palettes can be added without changing the resolver's branching logic.
 - **Session data refresh.** Sessions persist configuration plus source paths;
   on load, source CSV/XLSX/XLS data is re-read from disk and Maths Channels are
   recalculated from the refreshed dataframe.
+- **Recent files, drag-and-drop & auto-save.** The File ribbon exposes a
+  **Recent** drop-down (recent data files and sessions, capped and
+  most-recent-first) backed by a `recent` settings section; files can also be
+  opened by dropping them on the window, and an optional background auto-save
+  writes the active session or an `autosave.json` fallback at the configured
+  interval. Recent/auto-save policy (capping, dedupe, due-time, target path)
+  lives in `MainWindowViewModel`; the poll timer, drag-and-drop events, and menu
+  wiring stay in `MainWindow`.
+- **Raw Data sort & filter.** The Raw Data read view supports header-click sort
+  cycling (numeric or natural-order, NaN last) and an optional per-column filter
+  row (substring, or `>`, `<`, `>=`, `<=`, `a..b`, `=` numeric matches). Sorting
+  and filtering live in `raw_data_service` and apply through
+  `RawDataViewModel.display_frame` after blank-row removal and the analysis
+  window but before the row limit; both preserve the source dataframe index so
+  edits map back to the correct row, and both are disabled in edit mode.
 - **Maths Channel builder.** The Qt Maths Channels panel provides formula
   insertion buttons and safe channel insertion while keeping formula parsing and
   evaluation inside the framework-independent Maths Channel service.

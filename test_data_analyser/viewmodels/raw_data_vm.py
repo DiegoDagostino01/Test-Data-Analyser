@@ -8,21 +8,24 @@ responsibility.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import pandas as pd
 
 from ..core.data_io import numeric_series
-from ..services import raw_data_service
-from ..services.results import OperationResult
+from ..services import dataset_service, find_replace_service, raw_data_service
+from ..services.results import OperationResult, payload_dict
 from .app_state import AppState
+from .state_controller import AppStateController
 
 
 class RawDataViewModel:
     def __init__(self, state: AppState) -> None:
         self.state = state
-        self._undo_stack: list[tuple[Any, str, Any]] = []
+        self._controller = AppStateController(state)
+        self._undo_stack: list[tuple] = []
 
     def _numeric(self, column: str) -> pd.Series:
         if self.state.df is None or column not in self.state.df.columns:
@@ -72,8 +75,17 @@ class RawDataViewModel:
         xmin: Optional[float],
         xmax: Optional[float],
         drop_blank: bool,
+        column_filters: Optional[dict[str, str]] = None,
+        sort_column: Optional[str] = None,
+        sort_ascending: bool = True,
     ) -> OperationResult:
-        """Return the DataFrame and status text for the Raw Data table."""
+        """Return the DataFrame and status text for the Raw Data table.
+
+        ``column_filters`` and ``sort_column``/``sort_ascending`` are display-only:
+        they are applied after blank-row removal and the analysis window, before
+        the row limit, and they preserve the source dataframe index so cell edits
+        still map back to the correct row.
+        """
         limit_result = self.parse_row_limit(row_limit_text)
         limit: Optional[int] = None
         warnings: list[str] = []
@@ -98,10 +110,15 @@ class RawDataViewModel:
                 payload={"frame": self.empty_frame(), "row_limit_valid": row_limit_valid},
             )
 
+        if column_filters:
+            frame = raw_data_service.filter_display_frame(frame, column_filters)
+        if sort_column:
+            frame = raw_data_service.sort_display_frame(frame, sort_column, sort_ascending)
+
         display = frame if limit is None else frame.head(limit)
         message = (
             f"Selected raw data: {len(display):,} / {len(frame):,} rows, {display.shape[1]:,} columns. "
-            f"Removed {removed:,} row(s) with blank cells. Double-click a cell to edit it."
+            f"Removed {removed:,} row(s) with blank cells."
         )
         return OperationResult.success(
             message,
@@ -142,14 +159,18 @@ class RawDataViewModel:
         if pd.api.types.is_integer_dtype(df[column_name]) and pd.isna(value):
             df[column_name] = df[column_name].astype(float)
         df.at[df_index, column_name] = value
-        self._undo_stack.append((df_index, column_name, old_value))
+        self._undo_stack.append(("cell", df_index, column_name, old_value))
         return OperationResult.success("Cell updated.", payload=old_value)
 
     def undo_last_edit(self) -> OperationResult:
-        """Revert the most recent cell edit. Payload is ``(index, column)``."""
+        """Revert the most recent cell edit or replace-all run."""
         if not self._undo_stack:
-            return OperationResult.failure("There are no Raw Data edits to undo.")
-        df_index, column_name, old_value = self._undo_stack.pop()
+            return OperationResult.failure("Nothing to undo")
+        entry = self._undo_stack.pop()
+        if entry[0] == "snapshot":
+            self._controller.restore_dataset_snapshot(entry[1])
+            return OperationResult.success("Reverted the last replace.")
+        _tag, df_index, column_name, old_value = entry
         df = self.state.df
         if df is None or column_name not in df.columns:
             return OperationResult.failure("The edited dataframe or column is no longer available.")
@@ -157,6 +178,131 @@ class RawDataViewModel:
             df[column_name] = df[column_name].astype(float)
         df.at[df_index, column_name] = old_value
         return OperationResult.success(f"Reverted the last edit to '{column_name}'.", payload=(df_index, column_name))
+
+    # ------------------------------------------------------------------
+    # Find & replace
+    # ------------------------------------------------------------------
+    def find(
+        self,
+        query: str,
+        *,
+        regex: bool = False,
+        case_sensitive: bool = False,
+        columns: Optional[Sequence[str]] = None,
+        search_full_dataset: bool = True,
+        display_frame: Optional[pd.DataFrame] = None,
+    ) -> OperationResult:
+        """Find matches in the full dataset or the supplied displayed frame.
+
+        Payload is the list of ``find_replace_service.Match`` (row label, column,
+        matched text). Read-only; no undo.
+        """
+        frame = self.state.df if (search_full_dataset or display_frame is None) else display_frame
+        try:
+            matches = find_replace_service.find_matches(
+                frame, query, regex=regex, case_sensitive=case_sensitive, columns=columns
+            )
+        except re.error as exc:
+            return OperationResult.failure(f"Invalid regular expression: {exc}")
+        return OperationResult.success(f"{len(matches)} match(es).", payload=matches)
+
+    def replace_all(
+        self,
+        query: str,
+        replacement: str,
+        *,
+        regex: bool = False,
+        case_sensitive: bool = False,
+        columns: Optional[Sequence[str]] = None,
+        search_full_dataset: bool = True,
+        display_frame: Optional[pd.DataFrame] = None,
+    ) -> OperationResult:
+        """Replace every match in one undo step (snapshot of the dataset).
+
+        Each write goes through ``dataset_service.set_cell`` so values are coerced
+        to the target column type and non-numeric text is kept (with a warning)
+        rather than zeroed.
+        """
+        if not query:
+            return OperationResult.failure("Enter text to find.")
+        frame = self.state.df if (search_full_dataset or display_frame is None) else display_frame
+        if frame is None:
+            return OperationResult.failure("There is no data to search.")
+        try:
+            matches = find_replace_service.find_matches(
+                frame, query, regex=regex, case_sensitive=case_sensitive, columns=columns
+            )
+        except re.error as exc:
+            return OperationResult.failure(f"Invalid regular expression: {exc}")
+        if not matches:
+            return OperationResult.success("No matches found.", payload={"replaced": 0})
+
+        snapshot = self._controller.capture_dataset_snapshot("replace all")
+
+        def _write(row: Any, column: str, new_text: str) -> OperationResult:
+            channel_id = self.state.channel_id_for_name(column)
+            if channel_id is None:
+                return OperationResult.failure("Column is no longer available.")
+            result = dataset_service.set_cell(
+                self.state.df, self.state.channel_registry, channel_id, int(row), new_text
+            )
+            if result.ok:
+                self._controller.apply_dataframe_payload(payload_dict(result))
+            return result
+
+        summary = find_replace_service.apply_replacements(
+            frame, matches, replacement, query=query, regex=regex, case_sensitive=case_sensitive, write=_write
+        )
+        if summary.replaced == 0:
+            return OperationResult.success("No occurrences replaced.", payload={"replaced": 0})
+        self._controller.mark_dirty()
+        self._undo_stack.append(("snapshot", snapshot))
+        return OperationResult.success(
+            f"Replaced {summary.replaced} occurrence(s).",
+            warnings=summary.warnings,
+            payload={"replaced": summary.replaced},
+        )
+
+    def replace_match(
+        self,
+        row: Any,
+        column: str,
+        query: str,
+        replacement: str,
+        *,
+        regex: bool = False,
+        case_sensitive: bool = False,
+    ) -> OperationResult:
+        """Replace ``query`` in a single cell as one undo step."""
+        df = self.state.df
+        if df is None or column not in df.columns:
+            return OperationResult.failure("The cell is no longer available.")
+        channel_id = self.state.channel_id_for_name(column)
+        if channel_id is None:
+            return OperationResult.failure("The column is no longer available.")
+        try:
+            current = df.at[int(row), column]
+        except (KeyError, ValueError):
+            return OperationResult.failure("The cell is no longer available.")
+        text = "" if pd.isna(current) else str(current)
+        try:
+            new_text = find_replace_service.replace_in_text(
+                text, query, replacement, regex=regex, case_sensitive=case_sensitive
+            )
+        except re.error as exc:
+            return OperationResult.failure(f"Invalid regular expression: {exc}")
+        if new_text == text:
+            return OperationResult.success("No change.", payload={"replaced": 0})
+        snapshot = self._controller.capture_dataset_snapshot("replace")
+        result = dataset_service.set_cell(
+            self.state.df, self.state.channel_registry, channel_id, int(row), new_text
+        )
+        if not result.ok:
+            return result
+        self._controller.apply_dataframe_payload(payload_dict(result))
+        self._controller.mark_dirty()
+        self._undo_stack.append(("snapshot", snapshot))
+        return OperationResult.success("Replaced 1 occurrence.", warnings=result.warnings, payload={"replaced": 1})
 
     # ------------------------------------------------------------------
     # Export

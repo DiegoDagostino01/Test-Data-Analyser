@@ -11,7 +11,7 @@ from typing import Mapping, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from ..core.utils import natural_sort_key
+from ..core.naming import natural_sort_key
 from ..domain import PlotData
 
 # Canonical order of the statistics produced for the statistics table.

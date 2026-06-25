@@ -10,9 +10,18 @@ Run with:
 """
 from __future__ import annotations
 
+import sys
 import unittest
+from pathlib import Path
 
-from test_data_analyser.core.utils import classify_channel_name
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from test_data_analyser.core.channel_classification import classify_channel_name
+from test_data_analyser.core.indexing import clamp_index
+from test_data_analyser.core.utils import classify_channel_name as legacy_classify_channel_name
+from test_data_analyser.core.utils import clamp_index as legacy_clamp_index
 from test_data_analyser.domain import (
     AxisLimits,
     AxisTickSettings,
@@ -38,6 +47,22 @@ class ChannelClassificationTests(unittest.TestCase):
         self.assertEqual(classify_channel_name("Voltage"), "Voltage")
         self.assertEqual(classify_channel_name("Main Pump RPM"), "Speed")
         self.assertEqual(classify_channel_name("Mystery Signal"), "Other Numeric")
+
+
+class ClampIndexTests(unittest.TestCase):
+    def test_clamps_into_valid_range(self) -> None:
+        self.assertEqual(clamp_index(3, 5), 3)
+        self.assertEqual(clamp_index(9, 5), 4)  # past the end -> last index
+        self.assertEqual(clamp_index(-2, 5), 0)  # negative -> first index
+
+    def test_empty_collection_returns_zero(self) -> None:
+        # Matches the long-standing active-profile / active-limit selection idiom.
+        self.assertEqual(clamp_index(0, 0), 0)
+        self.assertEqual(clamp_index(7, 0), 0)
+
+    def test_utils_facade_preserves_legacy_imports(self) -> None:
+        self.assertIs(legacy_clamp_index, clamp_index)
+        self.assertIs(legacy_classify_channel_name, classify_channel_name)
 
 
 class AxisLimitsTests(unittest.TestCase):

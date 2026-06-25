@@ -13,7 +13,7 @@ import pandas as pd
 from ..core.config import EATON_PLOT_COLORS
 from ..core.data_io import numeric_series
 from ..domain import RunMetadata
-from ..core.utils import _matching_x_column_for_y
+from ..core.column_matching import matching_x_column_for_y
 
 
 def enabled_runs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -74,7 +74,7 @@ def comparison_channel_frame(
 
 def matching_x_column(selected_x: str, y_column: str, columns: Any) -> str:
     """Return the X column matching ``y_column`` for wide grouped files."""
-    return _matching_x_column_for_y(selected_x, y_column, columns)
+    return matching_x_column_for_y(selected_x, y_column, columns)
 
 
 def run_channel_statistics(df: pd.DataFrame, channel: str) -> Optional[dict[str, float | int]]:

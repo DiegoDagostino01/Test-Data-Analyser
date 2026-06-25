@@ -18,9 +18,11 @@ from typing import Any, Optional, Tuple
 import pandas as pd
 
 from ..core.config import EATON_DARK_BLUE, LIMIT_COLOR_PRESETS
-from ..core.utils import natural_sort_key
+from ..core.indexing import clamp_index
+from ..core.naming import natural_sort_key
 from ..domain import PlotData
 from ..services import limits_service
+from ..services import limit_templates_service
 from ..services.limits_service import LimitMarginSummary
 from ..services.results import OperationResult
 from .app_state import AppState
@@ -28,6 +30,11 @@ from .app_state import AppState
 _LIMIT_TYPES = ("Upper Limit", "Lower Limit", "Reference Line")
 LIMIT_LINES_TABLE_COLUMNS = ["Name", "Type", "Pts", "Applies to"]
 LIMIT_POINTS_TABLE_COLUMNS = ["X", "Y Limit"]
+
+
+def _point_x(point: dict[str, Any]) -> float:
+    """Sort key: a limit point's numeric X (0.0 when missing/invalid)."""
+    return float(point.get("x", 0.0))
 
 
 class LimitsViewModel:
@@ -92,8 +99,8 @@ class LimitsViewModel:
     def active_index(self) -> int:
         if self.state is None or not self.state.limit_lines:
             return -1
-        self.state.active_limit_line_index = max(
-            0, min(self.state.active_limit_line_index, len(self.state.limit_lines) - 1)
+        self.state.active_limit_line_index = clamp_index(
+            self.state.active_limit_line_index, len(self.state.limit_lines)
         )
         return self.state.active_limit_line_index
 
@@ -130,6 +137,38 @@ class LimitsViewModel:
         self.state.active_limit_line_index = len(self.state.limit_lines) - 1
         return OperationResult.success(f"Added '{name}'.", payload=self.state.active_limit_line_index)
 
+    def export_template(self, path: str) -> OperationResult:
+        """Save the current limit lines to a JSON template file."""
+        if self.state is None:
+            return OperationResult.failure("No application state is available.")
+        try:
+            limit_templates_service.save_limit_template(path, self.state.limit_lines)
+        except OSError as exc:
+            return OperationResult.failure(f"Could not save the limit template:\n{exc}")
+        return OperationResult.success(f"Saved {len(self.state.limit_lines)} limit line(s).")
+
+    def import_template(self, path: str, *, replace: bool = False) -> OperationResult:
+        """Load limit lines from a JSON template.
+
+        ``replace`` clears existing limit lines before importing; otherwise the
+        imported lines are appended (merge). Payload is the number imported.
+        """
+        if self.state is None:
+            return OperationResult.failure("No application state is available.")
+        try:
+            lines = limit_templates_service.load_limit_template(path)
+        except (OSError, ValueError) as exc:
+            return OperationResult.failure(f"Could not load the limit template:\n{exc}")
+        if not lines:
+            return OperationResult.failure("The template contains no limit lines.")
+        if replace:
+            self.state.limit_lines = list(lines)
+        else:
+            self.state.limit_lines.extend(lines)
+        self.state.active_limit_line_index = len(self.state.limit_lines) - 1
+        verb = "Replaced limits with" if replace else "Added"
+        return OperationResult.success(f"{verb} {len(lines)} limit line(s).", payload=len(lines))
+
     def duplicate_line(self) -> OperationResult:
         if self.state is None:
             return OperationResult.failure("No application state is available.")
@@ -149,7 +188,7 @@ class LimitsViewModel:
             return OperationResult.failure("Select a limit line to delete.")
         index = self.active_index()
         removed = self.state.limit_lines.pop(index)
-        self.state.active_limit_line_index = max(0, min(index, len(self.state.limit_lines) - 1))
+        self.state.active_limit_line_index = clamp_index(index, len(self.state.limit_lines))
         return OperationResult.success(f"Deleted '{removed.get('name', 'Limit')}'.")
 
     def update_active_metadata(
@@ -179,7 +218,7 @@ class LimitsViewModel:
 
     @staticmethod
     def _sorted_points(line: dict[str, Any]) -> list[dict[str, float]]:
-        return sorted(line.get("points", []), key=lambda p: float(p.get("x", 0.0)))
+        return sorted(line.get("points", []), key=_point_x)
 
     def add_point(self, x_text: str, y_text: str) -> OperationResult:
         if self.active_line() is None:
@@ -193,7 +232,7 @@ class LimitsViewModel:
             return OperationResult.failure("Please enter numeric X and Y values for the limit point.")
         points = line.setdefault("points", [])
         points.append({"x": x, "y": y})
-        points.sort(key=lambda p: float(p.get("x", 0.0)))
+        points.sort(key=_point_x)
         return OperationResult.success("Added limit point.")
 
     def update_point(self, index: int, x_text: str, y_text: str) -> OperationResult:
@@ -208,7 +247,7 @@ class LimitsViewModel:
         if not (0 <= index < len(points)):
             return OperationResult.failure("Select a limit point to update.")
         points[index] = {"x": x, "y": y}
-        line["points"] = sorted(points, key=lambda p: float(p.get("x", 0.0)))
+        line["points"] = sorted(points, key=_point_x)
         return OperationResult.success("Updated limit point.")
 
     def delete_point(self, index: int) -> OperationResult:

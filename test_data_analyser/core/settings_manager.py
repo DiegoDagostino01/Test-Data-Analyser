@@ -76,6 +76,10 @@ DEFAULT_SETTINGS: dict[str, dict[str, Any]] = {
         ],
         "significant_figures_maths": 6,
     },
+    "recent": {
+        "recent_files": [],
+        "recent_sessions": [],
+    },
 }
 
 SettingsCallback = Callable[[dict[str, dict[str, Any]]], None]

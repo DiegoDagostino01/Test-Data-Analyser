@@ -19,6 +19,123 @@ current release format.
 When releasing an update, change `__version__` and add a new entry at the top of
 this file.
 
+## 1.02.01 - 2026-06-23
+
+Performance, Raw Data usability, productivity, architecture refactor, packaging,
+and layout maintenance update.
+
+**Fixes and Improvements**
+
+- Improved `.xlsx` workbook opening by reading sheet names from workbook
+  metadata and using a direct XML fast path for standard numeric worksheets,
+  with fallback to `openpyxl` for date-formatted or unusual workbook features.
+- Preserved numeric dtypes during fast `.xlsx` loading so channel-registry type
+  detection no longer repeats expensive full-column numeric coercion for native
+  numeric data.
+- Fixed left rail resizing for workbooks with long engineering channel names:
+  the axis controls, sheet selector, and loaded-file label now shrink cleanly,
+  and the left rail can expand wider when needed before capping at a practical
+  maximum.
+- Improved Raw Data table editing: selected cells accept direct typed numeric
+  entry, Enter commits and moves down, active editors have more vertical space,
+  and **Undo Edit** now restores recent Raw Data and dataset edits.
+- Updated Raw Data full-dataset editing controls: double-click column headers to
+  rename them, use blue header **+** controls to add columns or rows, and use
+  right-click context menus to delete selected rows or one or more selected
+  columns. Data columns now expand to fit header titles while the **+** controls
+  remain compact.
+- Deferred optional Help and Settings dialog imports until those dialogs are
+  opened, and kept Matplotlib editor integration behind lazy-compatible access
+  points.
+- Trimmed unused runtime dependencies and PyInstaller hidden imports that are no
+  longer referenced by the app source.
+- Consolidated small shared helpers for defensive float conversion, active-index
+  clamping, limit-point handling, legend override propagation, and plot-profile
+  capture to reduce duplication without changing workflows.
+- Added architecture boundary tests that verify PySide6 remains isolated to
+  `qt_app/` and internal imports continue to follow the documented layer order.
+- Moved plot-profile CRUD, legend override handling, plot-profile capture,
+  column-reference propagation, and session assembly into framework-independent
+  services so viewmodels remain thinner coordinators.
+- Split `core/utils.py` into focused helper modules for naming, indexing,
+  grouped-column matching, and channel classification, while keeping `utils.py`
+  as a compatibility facade for older imports.
+- Added strict validation for newly written session payloads while preserving
+  tolerant legacy session/profile loading.
+- Added `AppStateController` as the viewmodel-layer mutation boundary for
+  dataset undo snapshots, dataframe updates, dirty-state marking, and plot
+  profile state replacement.
+- Added an internal plot colour-cycle registry so future palettes can be
+  registered without adding branching to the plot colour resolver.
+- Removed obsolete archived migration/reference notes from `Archive/` and
+  refreshed active architecture/README documentation to match the current
+  source tree.
+
+**Productivity and workflow**
+
+- Added a **Recent** drop-down to the File ribbon listing up to ten most-recent
+  data files and sessions (most recent first); entries whose file no longer
+  exists are shown disabled rather than removed. Backed by a new `recent`
+  settings section and recent-list helpers on `MainWindowViewModel`.
+- Added drag-and-drop opening: dropping a `.csv`, `.xlsx`, `.xls`, or `.json`
+  session file onto the window loads it (the first supported file is used).
+- Added a public data-file panel load-by-path entry point and ribbon menu-button
+  support so recent files, drag-and-drop, and future batch import share one load
+  path and a consistent ribbon affordance.
+- Added a **Keyboard Shortcuts** Help topic covering file, Raw Data, and editing
+  shortcuts.
+- Wired **auto-save**: when enabled in Settings, a background poll saves the
+  session at the configured interval while there are unsaved changes, writing to
+  the active session path or an `autosave.json` fallback beside the data file,
+  reporting only on the status bar with no modal interruption.
+- Added Raw Data display **sorting** and per-column **filtering**: click a column
+  header to cycle ascending -> descending -> unsorted (natural order for text
+  channels, with NaN/blank sinking to the bottom), and toggle a per-column filter
+  row supporting substring and numeric (`>n`, `<n`, `>=n`, `<=n`, `a..b`, `=n`)
+  matches. Both are display-only and preserve the source dataframe index so cell
+  edits still map back to the correct row; both are disabled in **Edit dataset**
+  mode.
+- Added Excel-compatible **copy / cut / paste** for Raw Data cell ranges
+  (`Ctrl+C` / `Ctrl+X` / `Ctrl+V`): copy works in either mode, while cut and
+  paste require **Edit dataset** mode. Paste auto-expands the dataset with extra
+  rows and `Column N` columns when the pasted block runs past the current shape,
+  coerces values to each target column's type (keeping non-numeric text with a
+  warning), and records the whole paste or cut as a single undo step.
+- Added **Find & Replace** for the Raw Data table (`Ctrl+F` / `Ctrl+H`): a
+  non-modal dialog with optional regex, case sensitivity, and a full-dataset vs
+  displayed-view scope. Searches match each cell's displayed text (so numeric
+  values match by their shown form); Replace All applies as a single undo step,
+  and replacements into a numeric column keep non-numeric text with a warning
+  rather than discarding it.
+- Added Excel-style **fill** for the dataset editor: a right-click **Fill Down**
+  copies the top selected row down a range, and the fill engine infers a
+  constant, linear, or repeat series from the seed cells (text repeats verbatim).
+  Each fill is a single undo step.
+- Added **batch run import**: a Runs / Comparison **Batch Import…** dialog imports
+  every matching data file in a folder as a run (semicolon-separated globs,
+  optional recursion, optional regex run-naming), skipping and reporting files
+  that fail to load.
+- Added **limit templates**: save the current requirement limit lines to a JSON
+  template and reload them later, choosing replace or merge.
+- Added **peak detection**: right-click the plot and choose **Mark Peaks…** to
+  detect peaks (and optionally troughs) for a plotted channel with a prominence
+  control, dropping a text annotation at each. Detection uses
+  `scipy.signal.find_peaks` behind a lazy import.
+- Added **plot tab drag-to-reorder**: drag a plot tab to reorder it (the trailing
+  "+" tab stays last) and the active plot follows the move.
+- Added a **Reset Axis** button to the plot Figure Options that clears the active
+  plot's manual title, labels, axis limits, and ticks and re-renders with
+  auto-generated defaults, keeping the plotted data and best-fit settings.
+
+**Compatibility**
+
+- CSV, XLSX, and XLS support is preserved. `.xlsx` export continues to use
+  `openpyxl`; `xlsxwriter` is not required by the current export path.
+- Existing sessions and plot profiles remain compatible; no session/file-format
+  changes were introduced.
+- Existing UI-facing `OperationResult` contracts are preserved; result payload
+  handling is now centralised through compatibility helpers where refactored.
+
 ## 1.02.00 - 2026-06-22
 
 Manual Raw Data Session Mode and a source-agnostic dataset abstraction with

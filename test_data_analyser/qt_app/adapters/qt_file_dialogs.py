@@ -13,6 +13,7 @@ DATA_FILE_FILTER = "Data files (*.csv *.xlsx *.xls);;CSV (*.csv);;Excel (*.xlsx 
 SESSION_FILTER = "JSON session (*.json);;All files (*.*)"
 EXPORT_FILTER = "Excel workbook (*.xlsx);;CSV (*.csv);;All files (*.*)"
 IMAGE_FILTER = "PNG image (*.png);;SVG image (*.svg);;PDF document (*.pdf);;All files (*.*)"
+LIMIT_TEMPLATE_FILTER = "Limit template (*.json);;All files (*.*)"
 
 
 def open_data_file(parent: QWidget | None = None, initial_dir: str = "") -> Optional[str]:
@@ -56,5 +57,24 @@ def save_export_file(parent: QWidget | None = None) -> Optional[str]:
 def save_image_file(parent: QWidget | None = None, initial_dir: str = "") -> Optional[str]:
     filename, _ = QFileDialog.getSaveFileName(
         parent, "Save plot image", initial_dir or "", IMAGE_FILTER
+    )
+    return filename or None
+
+
+def select_folder(parent: QWidget | None = None, initial_dir: str = "") -> Optional[str]:
+    folder = QFileDialog.getExistingDirectory(parent, "Select a folder of data files", initial_dir or "")
+    return folder or None
+
+
+def open_limit_template_file(parent: QWidget | None = None, initial_dir: str = "") -> Optional[str]:
+    filename, _ = QFileDialog.getOpenFileName(
+        parent, "Load limit template", initial_dir or "", LIMIT_TEMPLATE_FILTER
+    )
+    return filename or None
+
+
+def save_limit_template_file(parent: QWidget | None = None, initial_dir: str = "") -> Optional[str]:
+    filename, _ = QFileDialog.getSaveFileName(
+        parent, "Save limit template", initial_dir or "", LIMIT_TEMPLATE_FILTER
     )
     return filename or None

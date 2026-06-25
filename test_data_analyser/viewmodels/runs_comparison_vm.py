@@ -15,9 +15,10 @@ import pandas as pd
 
 from ..core.config import EATON_PLOT_COLORS
 from ..core.data_io import get_excel_sheets, load_data
-from ..services import run_comparison_service
+from ..services import batch_import_service, run_comparison_service
 from ..services.results import OperationResult
-from ..core.utils import _matching_x_column_for_y, natural_sort_key
+from ..core.column_matching import matching_x_column_for_y
+from ..core.naming import natural_sort_key
 from .app_state import AppState
 
 RUN_TABLE_COLUMNS = ["Name", "Enabled", "Active", "File", "Sheet", "Rows", "Columns"]
@@ -83,6 +84,45 @@ class RunsComparisonViewModel:
         if self.state.active_run_index < 0:
             self.state.active_run_index = index
         return OperationResult.success(f"Added {run['name']}.", payload=index)
+
+    def add_runs_from_folder(
+        self,
+        folder: str | Path,
+        *,
+        glob: str = batch_import_service.DEFAULT_GLOB,
+        recursive: bool = False,
+        name_regex: Optional[str] = None,
+        sheet_name: Optional[str] = None,
+    ) -> OperationResult:
+        """Import every matching data file in ``folder`` as a run.
+
+        Files that fail to load are skipped and reported in the result warnings;
+        each imported run is named via ``extract_run_name``. Payload is
+        ``{"added": int, "first_index": int | None}``.
+        """
+        paths = batch_import_service.discover_data_files(folder, glob=glob, recursive=recursive)
+        if not paths:
+            return OperationResult.failure(f"No matching data files found in {folder}.")
+        added = 0
+        first_index: Optional[int] = None
+        warnings: list[str] = []
+        for path in paths:
+            result = self.add_run(path, sheet_name)
+            if not result.ok:
+                warnings.append(f"{Path(path).name}: {result.message}")
+                continue
+            index = result.payload if isinstance(result.payload, int) else len(self.state.runs) - 1
+            self.state.runs[index]["name"] = batch_import_service.extract_run_name(path, regex=name_regex)
+            if first_index is None:
+                first_index = index
+            added += 1
+        if added == 0:
+            return OperationResult.failure(f"No runs could be imported from {folder}.", errors=warnings)
+        return OperationResult.success(
+            f"Imported {added} run(s) from {folder}.",
+            warnings=warnings,
+            payload={"added": added, "first_index": first_index},
+        )
 
     def add_loaded_run(self, path: str | Path, sheet_name: Optional[str], df: pd.DataFrame) -> OperationResult:
         """Append an already loaded dataframe as a run. Payload is the new index."""
@@ -215,7 +255,7 @@ class RunsComparisonViewModel:
                 if channel not in df.columns:
                     skipped.append(f"{name}: missing '{channel}'")
                     continue
-                x_column = _matching_x_column_for_y(selected_x, channel, df.columns)
+                x_column = matching_x_column_for_y(selected_x, channel, df.columns)
                 if x_column not in df.columns:
                     skipped.append(f"{name}: missing X column '{selected_x}' for '{channel}'")
                     continue

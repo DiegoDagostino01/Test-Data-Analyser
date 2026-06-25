@@ -11,7 +11,7 @@ from typing import Any
 
 import pandas as pd
 
-from ..core.utils import natural_sort_key
+from ..core.naming import natural_sort_key
 from ..services import maths_channel_service
 from ..services.maths_channel_service import MathsChannelEvaluator
 from ..services.results import OperationResult

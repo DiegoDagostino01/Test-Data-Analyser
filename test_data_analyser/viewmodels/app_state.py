@@ -15,6 +15,7 @@ from typing import Any, Optional
 
 import pandas as pd
 
+from ..core.indexing import clamp_index
 from ..domain import SOURCE_EXCEL, SOURCE_MANUAL, ChannelRegistry, ComparisonSettings
 
 
@@ -83,7 +84,7 @@ class AppState:
     def active_plot_profile(self) -> Optional[dict[str, Any]]:
         if not self.plot_profiles:
             return None
-        index = max(0, min(self.active_plot_profile_index, len(self.plot_profiles) - 1))
+        index = clamp_index(self.active_plot_profile_index, len(self.plot_profiles))
         return self.plot_profiles[index]
 
     def active_run(self) -> Optional[dict[str, Any]]:

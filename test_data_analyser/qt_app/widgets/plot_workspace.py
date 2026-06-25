@@ -14,7 +14,6 @@ from contextlib import contextmanager
 from typing import Any, Optional, cast
 
 from cycler import cycler
-from matplotlib.backends.qt_editor import figureoptions
 from matplotlib.colors import to_hex
 from matplotlib.patches import FancyArrowPatch, Rectangle
 from matplotlib.ticker import MultipleLocator
@@ -44,7 +43,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...core.config import EATON_DARK_BLUE
-from ...core.utils import natural_sort_key
+from ...core.naming import natural_sort_key
 from ...domain.annotations import normalise_annotations
 from ...services import plot_render_service
 from ...services.results import OperationResult
@@ -52,22 +51,11 @@ from ...viewmodels.cursor_compare_vm import CursorCompareViewModel
 from ...viewmodels.plot_workspace_vm import PlotWorkspaceViewModel
 from ...viewmodels.settings_vm import SettingsViewModel
 from ..adapters.matplotlib_qt_adapter import LEGEND_DISPLAY_GRAPH, LEGEND_DISPLAY_PANEL, MatplotlibCanvas
+from ..adapters import qt_message_service
 from .axis_selection_panel import PLOT_KINDS
 from .no_wheel_combo_box import NoWheelComboBox
 
-CURVE_STYLE_KEYS = {
-    "line_style",
-    "draw_style",
-    "line_width",
-    "marker_style",
-    "marker_size",
-    "marker_face_colour",
-    "marker_edge_colour",
-}
-
-LINE_STYLE_CHOICES = tuple(figureoptions.LINESTYLES.items())
-DRAW_STYLE_CHOICES = tuple(figureoptions.DRAWSTYLES.items())
-MARKER_STYLE_CHOICES = (("none", "None"), *tuple(figureoptions.MARKERS.items()))
+CURVE_STYLE_KEYS = plot_render_service.CURVE_STYLE_KEYS
 
 ANNOTATION_SELECT = "select"
 ANNOTATION_TEXT = "text"
@@ -81,6 +69,24 @@ ANNOTATION_TOOL_LABELS = {
 }
 ANNOTATION_HANDLE_SIZE = 42
 ANNOTATION_PICK_TOLERANCE = 8
+
+
+def _line_style_choices() -> tuple[tuple[object, str], ...]:
+    from matplotlib.backends.qt_editor import figureoptions
+
+    return tuple(figureoptions.LINESTYLES.items())
+
+
+def _draw_style_choices() -> tuple[tuple[object, str], ...]:
+    from matplotlib.backends.qt_editor import figureoptions
+
+    return tuple(figureoptions.DRAWSTYLES.items())
+
+
+def _marker_style_choices() -> tuple[tuple[object, str], ...]:
+    from matplotlib.backends.qt_editor import figureoptions
+
+    return (("none", "None"), *tuple(figureoptions.MARKERS.items()))
 
 
 class LegendChannelStyleDialog(QDialog):
@@ -116,15 +122,15 @@ class LegendChannelStyleDialog(QDialog):
         self.plot_kind_combo.setCurrentText(self._original_plot_kind)
         form.addRow("Plot Type:", self.plot_kind_combo)
 
-        self.line_style_combo = self._style_combo(LINE_STYLE_CHOICES, str(style.get("line_style", "-")))
+        self.line_style_combo = self._style_combo(_line_style_choices(), str(style.get("line_style", "-")))
         form.addRow("Line style:", self.line_style_combo)
-        self.draw_style_combo = self._style_combo(DRAW_STYLE_CHOICES, str(style.get("draw_style", "default")))
+        self.draw_style_combo = self._style_combo(_draw_style_choices(), str(style.get("draw_style", "default")))
         form.addRow("Draw style:", self.draw_style_combo)
         self.line_width_spin = self._number_spin(style.get("line_width", 1.5), default=1.5)
         form.addRow("Line width:", self.line_width_spin)
 
         marker_default = self._default_marker_for_plot_kind(self._original_plot_kind)
-        self.marker_style_combo = self._style_combo(MARKER_STYLE_CHOICES, str(style.get("marker_style", marker_default)))
+        self.marker_style_combo = self._style_combo(_marker_style_choices(), str(style.get("marker_style", marker_default)))
         form.addRow("Marker style:", self.marker_style_combo)
         self.marker_size_spin = self._number_spin(style.get("marker_size", 3.0), default=3.0)
         form.addRow("Marker size:", self.marker_size_spin)
@@ -731,6 +737,8 @@ class PlotWorkspace(QWidget):
         menu.addSeparator()
         edit_action = menu.addAction("Edit Selected Annotation")
         delete_action = menu.addAction("Delete Selected Annotation")
+        menu.addSeparator()
+        mark_peaks_action = menu.addAction("Mark Peaks…")
         selected = self._annotation_by_id(self._selected_annotation_id)
         edit_action.setEnabled(selected is not None and selected.get("type") == ANNOTATION_TEXT)
         delete_action.setEnabled(selected is not None)
@@ -745,6 +753,44 @@ class PlotWorkspace(QWidget):
             self.edit_selected_annotation()
         elif chosen == delete_action:
             self.delete_selected_annotation()
+        elif chosen == mark_peaks_action:
+            self.mark_peaks()
+
+    def _peak_channel(self) -> str | None:
+        df = self.plot_vm.state.df
+        profile = self.plot_vm.state.active_plot_profile()
+        y_columns = profile.get("y_columns", []) if isinstance(profile, dict) else []
+        columns = [column for column in y_columns if df is not None and column in df.columns]
+        if not columns:
+            qt_message_service.warning(self, "Mark Peaks", "Generate a plot with at least one Y channel first.")
+            return None
+        if len(columns) == 1:
+            return columns[0]
+        choice, ok = QInputDialog.getItem(self, "Mark Peaks", "Channel:", columns, 0, False)
+        return choice if ok else None
+
+    def mark_peaks(self) -> None:
+        """Detect peaks for a plotted channel and add a text annotation at each."""
+        channel = self._peak_channel()
+        if channel is None:
+            return
+        prominence, ok = QInputDialog.getDouble(
+            self, "Mark Peaks", "Minimum prominence (0 = auto):", 0.0, 0.0, 1e12, 3
+        )
+        if not ok:
+            return
+        include_troughs = qt_message_service.confirm(self, "Mark Peaks", "Also mark troughs (minima)?")
+        result = self.plot_vm.detect_peaks(channel, prominence=prominence or None, find_troughs=include_troughs)
+        if not result.ok:
+            qt_message_service.warning(self, "Mark Peaks", result.message)
+            return
+        annotations = result.payload.get("annotations", []) if isinstance(result.payload, dict) else []
+        if not annotations:
+            qt_message_service.info(self, "Mark Peaks", result.message)
+            return
+        new_annotations = [dict(annotation, id=self._next_annotation_id()) for annotation in annotations]
+        self._annotations = normalise_annotations([*self._annotations, *new_annotations])
+        self._annotations_changed()
 
     def _add_default_arrow_annotation(self, event) -> None:
         x_span, y_span = self._axes_span(event.inaxes)
@@ -1505,76 +1551,23 @@ class PlotWorkspace(QWidget):
         channel_styles: Optional[dict[str, dict[str, str]]],
         default_plot_kind: str,
     ) -> list[dict[str, Any]]:
-        styles = cls._normalised_channel_styles(channel_styles or {})
-        fallback_plot_kind = cls._normalise_plot_kind(default_plot_kind) or "Line"
-        styled_items: list[dict[str, Any]] = []
-        for item in series_items:
-            styled = dict(item)
-            style = styles.get(cls._series_channel_key(item), {})
-            label = cls._series_label_with_override(item, style)
-            if label:
-                styled["label"] = label
-            plot_kind = cls._normalise_plot_kind(style.get("plot_kind")) or fallback_plot_kind
-            styled["plot_kind"] = plot_kind
-            colour = str(style.get("colour", "")).strip()
-            if colour:
-                styled["colour"] = colour
-            for key in CURVE_STYLE_KEYS:
-                value = str(style.get(key, "")).strip()
-                if value:
-                    styled[key] = value
-            if "hidden" in style:
-                styled["hidden"] = cls._style_bool(style.get("hidden"))
-            styled["label_overridden"] = bool(style.get("label"))
-            styled["plot_kind_overridden"] = bool(style.get("plot_kind"))
-            styled_items.append(styled)
-        return styled_items
+        return plot_render_service.apply_channel_style_overrides(series_items, channel_styles, default_plot_kind)
 
     @classmethod
     def _normalised_channel_styles(cls, channel_styles: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
-        normalised: dict[str, dict[str, str]] = {}
-        for raw_key, raw_style in channel_styles.items():
-            if not isinstance(raw_style, dict):
-                continue
-            style: dict[str, str] = {}
-            for raw_name, raw_value in raw_style.items():
-                value = str(raw_value).strip()
-                if not value:
-                    continue
-                name = "label" if raw_name == "name" else "colour" if raw_name == "color" else str(raw_name)
-                if name == "plot_kind":
-                    value = cls._normalise_plot_kind(value)
-                    if not value:
-                        continue
-                if name in {"channel", "label", "colour", "plot_kind", *CURVE_STYLE_KEYS}:
-                    style[name] = value
-            if "hidden" in raw_style:
-                style["hidden"] = "true" if cls._style_bool(raw_style.get("hidden")) else "false"
-            channel_key = plot_render_service.normalise_channel_name(style.get("channel") or raw_key)
-            if channel_key and style:
-                normalised[channel_key] = style
-        return normalised
+        return plot_render_service.normalised_channel_styles(channel_styles)
 
     @staticmethod
     def _style_bool(value: object) -> bool:
-        if isinstance(value, bool):
-            return value
-        return str(value).strip().casefold() in {"1", "true", "yes", "on"}
+        return plot_render_service.style_bool(value)
 
     @staticmethod
     def _series_label_with_override(item: dict[str, Any], style: dict[str, str]) -> str:
-        custom_label = str(style.get("label", "")).strip()
-        if not custom_label:
-            return str(item.get("label", ""))
-        label = PlotWorkspace._without_right_y_suffix(custom_label)
-        return f"{label} [Right Y]" if item.get("secondary") else label
+        return plot_render_service.series_label_with_override(item, style)
 
     @staticmethod
     def _normalise_plot_kind(plot_kind: object) -> str:
-        text = str(plot_kind or "").strip()
-        if text == "Line + Marker":
-            text = "Line + Markers"
-        return text if text in PLOT_KINDS else ""
+        return plot_render_service.normalise_plot_kind(plot_kind)
 
     @staticmethod
     def _style_float(value: object, default: float) -> float:
@@ -1642,7 +1635,7 @@ class PlotWorkspace(QWidget):
 
     @staticmethod
     def _series_channel_key(item: dict[str, Any]) -> str:
-        return plot_render_service.normalise_channel_name(item.get("channel", item.get("label", "")))
+        return plot_render_service.series_channel_key(item)
 
     def _draw_best_fit_lines(self, source_series: list[dict[str, Any]]) -> None:
         settings = plot_render_service.normalise_best_fit_settings(self._best_fit_settings)
@@ -2035,13 +2028,9 @@ class PlotWorkspace(QWidget):
 
     @staticmethod
     def _set_axis_range(setter, getter, minimum: Optional[float], maximum: Optional[float]) -> None:
-        if minimum is None and maximum is None:
-            return
-        current_min, current_max = getter()
-        lower = current_min if minimum is None else minimum
-        upper = current_max if maximum is None else maximum
-        if lower < upper:
-            setter(lower, upper)
+        resolved = plot_render_service.resolve_axis_range(getter(), minimum, maximum)
+        if resolved is not None:
+            setter(*resolved)
 
     @classmethod
     def _apply_axis_tick_settings(cls, axes, secondary_axes, settings: dict[str, object]) -> None:

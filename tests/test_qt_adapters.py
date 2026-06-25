@@ -11,16 +11,21 @@ Run with:
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import pandas as pd
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
-    from PySide6.QtCore import Qt
+    from PySide6.QtCore import QItemSelectionModel, Qt
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -29,6 +34,7 @@ try:
         QGroupBox,
         QHeaderView,
         QLabel,
+        QMenu,
         QPushButton,
         QScrollArea,
         QSizePolicy,
@@ -44,15 +50,18 @@ try:
     from test_data_analyser.core.settings_manager import SettingsManager
     from test_data_analyser.qt_app import theme
     from test_data_analyser.qt_app.adapters import matplotlib_qt_adapter, qt_file_dialogs, qt_message_service
+    from test_data_analyser.qt_app.adapters.editable_dataset_model import EditableDatasetModel
     from test_data_analyser.qt_app.adapters.editable_raw_data_model import EditableRawDataTableModel
     from test_data_analyser.qt_app.adapters.pandas_table_model import PandasTableModel
     from test_data_analyser.qt_app.main_qt import _app_icon_path
     from test_data_analyser.qt_app.main_window import MainWindow
     from test_data_analyser.qt_app.widgets.help_dialog import HelpDialog
     from test_data_analyser.qt_app.widgets.no_wheel_combo_box import NoWheelComboBox
-    from test_data_analyser.services import plot_render_service
+    from test_data_analyser.qt_app.widgets.raw_data_panel import RawDataPanel
+    from test_data_analyser.services import dataset_service, plot_render_service
     from test_data_analyser.viewmodels.app_state import AppState
     from test_data_analyser.viewmodels.cursor_compare_vm import CursorCompareViewModel
+    from test_data_analyser.viewmodels.dataset_vm import DatasetViewModel
     from test_data_analyser.viewmodels.engineering_notes_vm import EngineeringNotesViewModel
     from test_data_analyser.viewmodels.limits_vm import LimitsViewModel
     from test_data_analyser.viewmodels.maths_channels_vm import MathsChannelsViewModel
@@ -161,6 +170,334 @@ class EditableRawDataTableModelTests(unittest.TestCase):
         model.cellEdited.connect(lambda idx, col, val: edited.append((idx, col, val)))
         self.assertFalse(model.setData(model.index(0, 1), "10", Qt.ItemDataRole.EditRole))
         self.assertEqual(edited, [])
+
+
+@unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
+class EditableDatasetModelTests(unittest.TestCase):
+    def _model(self):
+        df = pd.DataFrame({"Time": [0.0, 1.0], "Pressure": [10.0, 20.0]})
+        state = AppState(df=df.copy())
+        state.channel_registry = dataset_service.build_registry_for_dataframe(state.df)
+        vm = DatasetViewModel(state)
+        model = EditableDatasetModel(vm)
+        model.refresh()
+        return model, state
+
+    def test_inline_add_row_and_column_are_exposed(self) -> None:
+        model, state = self._model()
+        add_row = len(state.df)
+        add_column = len(state.df.columns)
+
+        self.assertEqual(model.rowCount(), add_row + 1)
+        self.assertEqual(model.columnCount(), add_column + 1)
+        self.assertEqual(model.headerData(add_column, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole), "+")
+        self.assertEqual(model.headerData(add_row, Qt.Orientation.Vertical, Qt.ItemDataRole.DisplayRole), "+")
+        self.assertIsNone(model.data(model.index(add_row, 0), Qt.ItemDataRole.DisplayRole))
+        self.assertIsNone(model.data(model.index(0, add_column), Qt.ItemDataRole.DisplayRole))
+
+    def test_inline_add_controls_are_not_editable_cells(self) -> None:
+        model, state = self._model()
+        add_row = len(state.df)
+        add_column = len(state.df.columns)
+
+        self.assertTrue(model.flags(model.index(0, 0)) & Qt.ItemFlag.ItemIsEditable)
+        self.assertFalse(model.flags(model.index(add_row, 0)) & Qt.ItemFlag.ItemIsEditable)
+        self.assertFalse(model.flags(model.index(0, add_column)) & Qt.ItemFlag.ItemIsEditable)
+        self.assertFalse(model.flags(model.index(add_row, 0)) & Qt.ItemFlag.ItemIsSelectable)
+        self.assertFalse(model.flags(model.index(0, add_column)) & Qt.ItemFlag.ItemIsSelectable)
+        self.assertFalse(model.setData(model.index(add_row, 0), "99", Qt.ItemDataRole.EditRole))
+
+    def test_raw_data_panel_expands_columns_to_fit_headers(self) -> None:
+        long_title = "Pressure Sensor With Long Engineering Header"
+        df = pd.DataFrame({"Time": [0.0, 1.0], long_title: [10.0, 20.0]})
+        state = AppState(df=df.copy())
+        state.channel_registry = dataset_service.build_registry_for_dataframe(state.df)
+        panel = RawDataPanel(RawDataViewModel(state), DatasetViewModel(state))
+
+        panel.enter_edit_mode()
+        title_column = 1
+        expected_minimum = panel.table.horizontalHeader().fontMetrics().horizontalAdvance(long_title) + 34
+
+        self.assertGreaterEqual(panel.table.columnWidth(title_column), expected_minimum)
+        self.assertEqual(panel.table.columnWidth(panel.dataset_model.data_column_count()), 36)
+
+    def test_raw_data_panel_collects_multiple_selected_columns(self) -> None:
+        df = pd.DataFrame(
+            {"Time": [0.0, 1.0], "Pressure": [10.0, 20.0], "Flow": [1.0, 2.0]}
+        )
+        state = AppState(df=df.copy())
+        state.channel_registry = dataset_service.build_registry_for_dataframe(state.df)
+        panel = RawDataPanel(RawDataViewModel(state), DatasetViewModel(state))
+        panel.enter_edit_mode()
+
+        selection_model = panel.table.selectionModel()
+        selection_model.select(
+            panel.dataset_model.index(0, 1),
+            QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Columns,
+        )
+        selection_model.select(
+            panel.dataset_model.index(0, 2),
+            QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Columns,
+        )
+
+        selected_names = [state.name_for_channel_id(channel_id) for channel_id in panel._selected_column_ids(2)]
+        self.assertEqual(selected_names, ["Pressure", "Flow"])
+
+
+@unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
+class RawDataSortFilterPanelTests(unittest.TestCase):
+    def _panel(self, df: pd.DataFrame) -> "RawDataPanel":
+        state = AppState(df=df.copy())
+        state.channel_registry = dataset_service.build_registry_for_dataframe(state.df)
+        panel = RawDataPanel(RawDataViewModel(state), DatasetViewModel(state))
+        panel.set_selection_provider(lambda: ("Time", ["A"], None, None))
+        panel.refresh()
+        return panel
+
+    def test_clicking_column_header_cycles_sort(self) -> None:
+        panel = self._panel(pd.DataFrame({"Time": [0.0, 1.0, 2.0], "A": [30.0, 10.0, 20.0]}))
+        header = panel.table.horizontalHeader()
+        section = panel._section_for_column("A")
+        self.assertIsNotNone(section)
+        assert section is not None
+
+        panel._on_horizontal_header_clicked(section)
+        self.assertEqual(panel._sort_state, ("A", True))
+        self.assertTrue(header.isSortIndicatorShown())
+        self.assertEqual(header.sortIndicatorOrder(), Qt.SortOrder.AscendingOrder)
+
+        panel._on_horizontal_header_clicked(section)
+        self.assertEqual(panel._sort_state, ("A", False))
+        self.assertEqual(header.sortIndicatorOrder(), Qt.SortOrder.DescendingOrder)
+
+        panel._on_horizontal_header_clicked(section)
+        self.assertIsNone(panel._sort_state)
+        self.assertFalse(header.isSortIndicatorShown())
+
+    def test_sorting_disabled_in_edit_mode(self) -> None:
+        panel = self._panel(pd.DataFrame({"Time": [0.0, 1.0], "A": [2.0, 1.0]}))
+        panel.enter_edit_mode()
+        panel._on_horizontal_header_clicked(0)
+        self.assertIsNone(panel._sort_state)
+
+    def test_filter_row_visible_only_when_enabled(self) -> None:
+        panel = self._panel(pd.DataFrame({"Time": [0.0, 1.0], "A": [1.0, 2.0]}))
+        self.assertTrue(panel.filter_row.isHidden())
+
+        panel.filter_check.setChecked(True)
+        self.assertFalse(panel.filter_row.isHidden())
+
+        panel.filter_check.setChecked(False)
+        self.assertTrue(panel.filter_row.isHidden())
+
+    def test_filter_row_updates_table_rows(self) -> None:
+        panel = self._panel(pd.DataFrame({"Time": [0.0, 1.0, 2.0, 3.0], "A": [1.0, 5.0, 10.0, 50.0]}))
+        full_rows = panel.model.rowCount()
+
+        panel.filter_check.setChecked(True)
+        panel._filter_edits["A"].setText(">5")
+
+        self.assertEqual(full_rows, 4)
+        self.assertEqual(panel.model.rowCount(), 2)
+
+        panel._clear_filters()
+        self.assertEqual(panel.model.rowCount(), 4)
+
+
+@unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
+class RawDataClipboardTests(unittest.TestCase):
+    def _edit_panel(self, df: pd.DataFrame):
+        state = AppState(df=df.copy())
+        state.channel_registry = dataset_service.build_registry_for_dataframe(state.df)
+        panel = RawDataPanel(RawDataViewModel(state), DatasetViewModel(state))
+        panel.enter_edit_mode()
+        return panel, state
+
+    def _select(self, panel, model, cells) -> None:
+        selection = panel.table.selectionModel()
+        selection.clearSelection()
+        for row, col in cells:
+            selection.select(model.index(row, col), QItemSelectionModel.SelectionFlag.Select)
+
+    def test_copy_selection_writes_tsv_to_clipboard(self) -> None:
+        panel, _state = self._edit_panel(pd.DataFrame({"A": [1.0, 2.0], "B": [3.0, 4.0]}))
+        self._select(panel, panel.dataset_model, [(0, 0), (0, 1), (1, 0), (1, 1)])
+
+        QApplication.clipboard().setText("")
+        panel._on_copy()
+
+        self.assertEqual(QApplication.clipboard().text(), "1.0\t3.0\n2.0\t4.0")
+
+    def test_cut_selection_clears_and_pushes_undo(self) -> None:
+        panel, state = self._edit_panel(pd.DataFrame({"A": [1.0, 2.0], "B": [3.0, 4.0]}))
+        self._select(panel, panel.dataset_model, [(0, 0)])
+
+        panel._on_cut()
+
+        self.assertEqual(QApplication.clipboard().text(), "1.0")
+        self.assertTrue(pd.isna(state.df.at[0, "A"]))
+        self.assertTrue(panel.dataset_vm.can_undo)
+
+    def test_paste_at_anchor_expands_table(self) -> None:
+        panel, state = self._edit_panel(pd.DataFrame({"A": [1.0], "B": [2.0]}))
+        QApplication.clipboard().setText("5\t6\n7\t8")
+        panel.table.setCurrentIndex(panel.dataset_model.index(0, 0))
+
+        panel._on_paste()
+
+        self.assertEqual(len(state.df), 2)
+        self.assertEqual(state.df.at[0, "A"], 5.0)
+        self.assertEqual(state.df.at[0, "B"], 6.0)
+        self.assertEqual(state.df.at[1, "A"], 7.0)
+        self.assertEqual(state.df.at[1, "B"], 8.0)
+
+    def test_copy_works_in_view_mode_but_paste_does_not(self) -> None:
+        state = AppState(df=pd.DataFrame({"Time": [0.0, 1.0], "A": [10.0, 20.0]}))
+        state.channel_registry = dataset_service.build_registry_for_dataframe(state.df)
+        panel = RawDataPanel(RawDataViewModel(state), DatasetViewModel(state))
+        panel.set_selection_provider(lambda: ("Time", ["A"], None, None))
+        panel.refresh()
+
+        self._select(panel, panel.model, [(0, 0)])
+        QApplication.clipboard().setText("")
+        panel._on_copy()
+        self.assertEqual(QApplication.clipboard().text(), "0.0")
+
+        QApplication.clipboard().setText("99")
+        panel.table.setCurrentIndex(panel.model.index(0, 0))
+        panel._on_paste()
+        self.assertEqual(state.df.at[0, "Time"], 0.0)
+
+
+@unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
+class FindReplaceDialogTests(unittest.TestCase):
+    def _panel(self, df: pd.DataFrame):
+        state = AppState(df=df.copy())
+        state.channel_registry = dataset_service.build_registry_for_dataframe(state.df)
+        panel = RawDataPanel(RawDataViewModel(state), DatasetViewModel(state))
+        panel.set_selection_provider(lambda: ("Time", ["A"], None, None))
+        panel.refresh()
+        return panel, state
+
+    def test_dialog_opens_in_find_only_for_ctrl_f(self) -> None:
+        panel, _state = self._panel(pd.DataFrame({"Time": [0.0], "A": [1.0]}))
+        panel._open_find_replace(False)
+        dialog = panel._find_replace_dialog
+        self.assertIsNotNone(dialog)
+        self.assertFalse(dialog.replacement_edit.isEnabled())
+        self.assertFalse(dialog.replace_all_button.isEnabled())
+        dialog.close()
+
+    def test_dialog_opens_with_replace_for_ctrl_h(self) -> None:
+        panel, _state = self._panel(pd.DataFrame({"Time": [0.0], "A": [1.0]}))
+        panel._open_find_replace(True)
+        dialog = panel._find_replace_dialog
+        self.assertTrue(dialog.replacement_edit.isEnabled())
+        self.assertTrue(dialog.replace_all_button.isEnabled())
+        dialog.close()
+
+    def test_find_next_navigates_matches(self) -> None:
+        panel, _state = self._panel(pd.DataFrame({"Time": [0.0, 1.0, 2.0], "A": [5.0, 5.0, 9.0]}))
+        panel._open_find_replace(False)
+        dialog = panel._find_replace_dialog
+        dialog.query_edit.setText("5.0")
+
+        dialog._on_find_next()
+        self.assertIn("Match 1 of", dialog.status_label.text())
+        dialog._on_find_next()
+        self.assertIn("Match 2 of", dialog.status_label.text())
+        dialog.close()
+
+    def test_replace_all_shows_summary(self) -> None:
+        panel, state = self._panel(pd.DataFrame({"Time": [0.0, 1.0], "A": [5.0, 5.0]}))
+        panel._open_find_replace(True)
+        dialog = panel._find_replace_dialog
+        dialog.query_edit.setText("5.0")
+        dialog.replacement_edit.setText("8.0")
+
+        dialog._on_replace_all()
+
+        self.assertIn("Replaced 2", dialog.status_label.text())
+        self.assertEqual(state.df.at[0, "A"], 8.0)
+        self.assertEqual(state.df.at[1, "A"], 8.0)
+        dialog.close()
+
+
+@unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
+class FillHandleTests(unittest.TestCase):
+    def _edit_panel(self, df: pd.DataFrame):
+        state = AppState(df=df.copy())
+        state.channel_registry = dataset_service.build_registry_for_dataframe(state.df)
+        panel = RawDataPanel(RawDataViewModel(state), DatasetViewModel(state))
+        panel.enter_edit_mode()
+        return panel, state
+
+    def test_fill_handle_visible_in_edit_mode(self) -> None:
+        panel, _state = self._edit_panel(pd.DataFrame({"A": [1.0, 2.0]}))
+        panel.table.selectionModel().clearSelection()
+        self.assertFalse(panel.fill_handle_visible())
+
+        panel.table.selectionModel().select(
+            panel.dataset_model.index(0, 0), QItemSelectionModel.SelectionFlag.Select
+        )
+        self.assertTrue(panel.fill_handle_visible())
+
+    def test_fill_handle_hidden_in_view_mode(self) -> None:
+        state = AppState(df=pd.DataFrame({"Time": [0.0, 1.0], "A": [1.0, 2.0]}))
+        state.channel_registry = dataset_service.build_registry_for_dataframe(state.df)
+        panel = RawDataPanel(RawDataViewModel(state), DatasetViewModel(state))
+        panel.set_selection_provider(lambda: ("Time", ["A"], None, None))
+        panel.refresh()
+        panel.table.selectionModel().select(
+            panel.model.index(0, 0), QItemSelectionModel.SelectionFlag.Select
+        )
+        self.assertFalse(panel.fill_handle_visible())
+
+    def test_context_menu_fill_down_invokes_viewmodel(self) -> None:
+        panel, state = self._edit_panel(pd.DataFrame({"A": [5.0, 0.0, 0.0]}))
+        calls: list = []
+        original = panel.dataset_vm.fill_down
+        panel.dataset_vm.fill_down = lambda rows, ids: calls.append((list(rows), list(ids))) or original(rows, ids)
+
+        panel._fill_down([0, 1, 2], [state.channel_registry.ids()[0]])
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(list(state.df["A"]), [5.0, 5.0, 5.0])
+
+
+@unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
+class BatchImportDialogTests(unittest.TestCase):
+    def _dialog(self, **kwargs):
+        from test_data_analyser.qt_app.widgets.batch_import_dialog import BatchImportDialog
+
+        return BatchImportDialog(**kwargs)
+
+    def test_settings_round_trip(self) -> None:
+        dialog = self._dialog(initial_dir="C:/data")
+        dialog.folder_edit.setText("C:/runs")
+        dialog.glob_edit.setText("*.csv")
+        dialog.regex_edit.setText(r"SN(\d+)")
+        dialog.recursive_check.setChecked(True)
+        dialog.sheet_edit.setText("Sheet1")
+
+        settings = dialog.settings()
+        self.assertEqual(settings["folder"], "C:/runs")
+        self.assertEqual(settings["glob"], "*.csv")
+        self.assertEqual(settings["name_regex"], r"SN(\d+)")
+        self.assertTrue(settings["recursive"])
+        self.assertEqual(settings["sheet_name"], "Sheet1")
+        dialog.close()
+
+    def test_blank_optional_fields_become_none_and_glob_defaults(self) -> None:
+        dialog = self._dialog()
+        dialog.folder_edit.setText("C:/runs")
+
+        settings = dialog.settings()
+        self.assertIsNone(settings["name_regex"])
+        self.assertIsNone(settings["sheet_name"])
+        self.assertEqual(settings["glob"], "*.csv;*.xlsx")
+        self.assertFalse(settings["recursive"])
+        dialog.close()
 
 
 @unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
@@ -588,7 +925,6 @@ class AxisSelectionPanelTests(unittest.TestCase):
             self.panel.primary_clear_all_button,
             self.panel.secondary_select_all_button,
             self.panel.secondary_clear_all_button,
-            self.panel.plot_kind_combo,
             self.panel.xmin_edit,
             self.panel.xmax_edit,
             self.panel.cutoff_edit,
@@ -596,6 +932,29 @@ class AxisSelectionPanelTests(unittest.TestCase):
         ]:
             self.assertEqual(widget.minimumWidth(), 0)
             self.assertEqual(widget.sizePolicy().horizontalPolicy(), QSizePolicy.Policy.Expanding)
+        for combo in [self.panel.x_combo, self.panel.group_combo, self.panel.plot_kind_combo]:
+            self.assertEqual(combo.minimumWidth(), 0)
+            self.assertEqual(combo.sizePolicy().horizontalPolicy(), QSizePolicy.Policy.Ignored)
+
+    def test_long_channel_names_do_not_force_wide_controls(self) -> None:
+        self.panel.resize(260, 700)
+        self.panel.set_columns(
+            [
+                "Time (mins)",
+                "TC25 Structural Interface Temperature 240 Deg (C)",
+                "TC27 Composite Spar Temperature 120 Deg (C)",
+                "Max Spar Temperature Requirement (C)",
+            ],
+            "Time (mins)",
+        )
+        self.panel.show()
+        QApplication.processEvents()
+
+        available_width = self.panel.width() - 48
+        self.assertLessEqual(self.panel.x_combo.width(), available_width)
+        self.assertLessEqual(self.panel.y_list.width(), available_width)
+        self.assertEqual(self.panel.y_list.textElideMode(), Qt.TextElideMode.ElideRight)
+        self.assertEqual(self.panel.y_list.horizontalScrollBarPolicy(), Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
     def test_secondary_selection(self) -> None:
         for row in range(self.panel.secondary_y_list.count()):
@@ -766,6 +1125,48 @@ class PlotWorkspaceParityTests(unittest.TestCase):
         result = self.panel.generate_plot("Time", ["A"])
         self.assertTrue(result.ok)
         self.assertEqual(len(self.panel.canvas.figure.axes), 1)
+
+    def test_mark_peaks_adds_annotations(self) -> None:
+        import test_data_analyser.qt_app.widgets.plot_workspace as plot_workspace_module
+
+        self.state.plot_profiles = [{"name": "P1", "x_column": "Time", "y_columns": ["A"]}]
+        self.state.active_plot_profile_index = 0
+        self.state.current_x_axis = "Time"
+
+        class _FakeInput:
+            @staticmethod
+            def getDouble(*args, **kwargs):
+                return (0.0, True)
+
+            @staticmethod
+            def getItem(*args, **kwargs):
+                return ("A", True)
+
+        class _FakeMsg:
+            @staticmethod
+            def confirm(*args, **kwargs):
+                return False
+
+            @staticmethod
+            def warning(*args, **kwargs):
+                return None
+
+            @staticmethod
+            def info(*args, **kwargs):
+                return None
+
+        original_input = plot_workspace_module.QInputDialog
+        original_msg = plot_workspace_module.qt_message_service
+        plot_workspace_module.QInputDialog = _FakeInput
+        plot_workspace_module.qt_message_service = _FakeMsg
+        try:
+            self.panel.mark_peaks()
+        finally:
+            plot_workspace_module.QInputDialog = original_input
+            plot_workspace_module.qt_message_service = original_msg
+
+        self.assertTrue(self.panel.current_annotations())
+        self.assertEqual(self.panel.current_annotations()[0]["type"], "text")
 
     def test_annotation_controls_live_on_plot_toolbar(self) -> None:
         self.assertIsNone(self.panel.findChild(QFrame, "AnnotationToolbar"))
@@ -1672,7 +2073,7 @@ class HelpDialogTests(unittest.TestCase):
     def test_initial_page_selected(self) -> None:
         self.assertEqual(self.dialog.windowTitle(), "Test Data Analyser Help")
         self.assertFalse(self.dialog.isModal())
-        self.assertEqual(self.dialog.topic_list.count(), 14)
+        self.assertEqual(self.dialog.topic_list.count(), 15)
         self.assertEqual(self.dialog.topic_list.currentItem().text(), "Getting Started")
         self.assertIn("Normal workflow", self.dialog.content_browser.toPlainText())
 
@@ -1683,6 +2084,28 @@ class HelpDialogTests(unittest.TestCase):
         self.dialog.topic_list.setCurrentItem(matches[0])
 
         self.assertIn("Plot is blank", self.dialog.content_browser.toPlainText())
+
+    def test_dataset_editing_help_describes_raw_data_controls(self) -> None:
+        matches = self.dialog.topic_list.findItems("Manual Sessions and Dataset Editing", Qt.MatchFlag.MatchExactly)
+        self.assertEqual(len(matches), 1)
+
+        self.dialog.topic_list.setCurrentItem(matches[0])
+        text = self.dialog.content_browser.toPlainText()
+
+        self.assertIn("+ column header", text)
+        self.assertIn("delete removes all selected columns", text)
+        self.assertIn("Enter", text)
+        self.assertIn("Undo Edit", text)
+
+    def test_keyboard_shortcuts_topic_lists_known_shortcuts(self) -> None:
+        matches = self.dialog.topic_list.findItems("Keyboard Shortcuts", Qt.MatchFlag.MatchExactly)
+        self.assertEqual(len(matches), 1)
+
+        self.dialog.topic_list.setCurrentItem(matches[0])
+        text = self.dialog.content_browser.toPlainText()
+
+        for shortcut in ("Ctrl+O", "Ctrl+S", "Ctrl+N", "Ctrl+L", "Enter", "Esc"):
+            self.assertIn(shortcut, text)
 
     def test_search_filters_topic_titles_and_page_text(self) -> None:
         self.dialog.search_box.setText("legend is unclear")
@@ -1867,6 +2290,41 @@ class OpenDataFileInitialDirTests(unittest.TestCase):
 
 
 @unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
+class _FakeDropUrl:
+    def __init__(self, path: str) -> None:
+        self._path = path
+
+    def toLocalFile(self) -> str:
+        return self._path
+
+
+class _FakeMimeData:
+    def __init__(self, urls: list) -> None:
+        self._urls = urls
+
+    def hasUrls(self) -> bool:
+        return bool(self._urls)
+
+    def urls(self) -> list:
+        return self._urls
+
+
+class _FakeDropEvent:
+    def __init__(self, paths: list) -> None:
+        self._mime = _FakeMimeData([_FakeDropUrl(path) for path in paths])
+        self.accepted = False
+        self.ignored = False
+
+    def mimeData(self) -> _FakeMimeData:
+        return self._mime
+
+    def acceptProposedAction(self) -> None:
+        self.accepted = True
+
+    def ignore(self) -> None:
+        self.ignored = True
+
+
 class MainWindowLayoutTests(unittest.TestCase):
     """The main window builds offscreen with a ribbon and smooth splitter."""
 
@@ -1891,6 +2349,166 @@ class MainWindowLayoutTests(unittest.TestCase):
 
     def test_application_icon_asset_exists(self) -> None:
         self.assertTrue(_app_icon_path().exists())
+
+    def test_data_panel_load_path_loads_csv_without_dialog(self) -> None:
+        window = self._window()
+        directory = tempfile.mkdtemp()
+        csv_path = os.path.join(directory, "sample.csv")
+        pd.DataFrame({"Time": [0.0, 1.0, 2.0], "A": [1.0, 3.0, 2.0]}).to_csv(csv_path, index=False)
+
+        window.data_panel.load_path(csv_path)
+        QApplication.processEvents()
+
+        self.assertIsNotNone(window.vm.state.df)
+        assert window.vm.state.df is not None
+        self.assertEqual(list(window.vm.state.df.columns), ["Time", "A"])
+        self.assertEqual(window.data_panel.current_path(), csv_path)
+
+    def test_ribbon_menu_button_repopulates_on_show(self) -> None:
+        window = self._window()
+        calls: list[object] = []
+
+        def populator(menu: QMenu) -> None:
+            calls.append(menu)
+            menu.addAction("Example")
+
+        button = window._build_ribbon_button("FILE", "Recent", None, populator)
+        self.assertIsNotNone(button.menu())
+        assert button.menu() is not None
+
+        button.menu().aboutToShow.emit()
+        button.menu().aboutToShow.emit()
+
+        # The menu is cleared and rebuilt on every show, so it never duplicates.
+        self.assertEqual(len(calls), 2)
+        labels = [action.text() for action in button.menu().actions()]
+        self.assertEqual(labels, ["Example"])
+
+    def test_recent_files_menu_populates_from_viewmodel(self) -> None:
+        window = self._window()
+        directory = tempfile.mkdtemp()
+        csv_path = os.path.join(directory, "data.csv")
+        pd.DataFrame({"A": [1.0]}).to_csv(csv_path, index=False)
+        session_path = os.path.join(directory, "session.json")
+        with open(session_path, "w", encoding="utf-8") as handle:
+            handle.write("{}")
+
+        window.vm.register_recent_file(csv_path)
+        window.vm.register_recent_session(session_path)
+
+        button = window.ribbon_buttons["FILE:Recent"]
+        menu = button.menu()
+        self.assertIsNotNone(menu)
+        assert menu is not None
+        menu.aboutToShow.emit()
+
+        entries = [action for action in menu.actions() if action.data()]
+        labels = [action.text() for action in entries]
+        self.assertIn("data.csv", labels)
+        self.assertIn("session.json", labels)
+        self.assertTrue(all(action.isEnabled() for action in entries))
+
+    def test_recent_menu_disables_missing_entries(self) -> None:
+        window = self._window()
+        window.vm.register_recent_file(os.path.join(tempfile.mkdtemp(), "gone.csv"))
+
+        button = window.ribbon_buttons["FILE:Recent"]
+        menu = button.menu()
+        assert menu is not None
+        menu.aboutToShow.emit()
+
+        entries = [action for action in menu.actions() if action.data()]
+        self.assertEqual(len(entries), 1)
+        self.assertFalse(entries[0].isEnabled())
+
+    def test_drag_and_drop_data_file_calls_data_panel(self) -> None:
+        window = self._window()
+        directory = tempfile.mkdtemp()
+        csv_path = os.path.join(directory, "drop.csv")
+        pd.DataFrame({"A": [1.0]}).to_csv(csv_path, index=False)
+        calls: list[str] = []
+        window.data_panel.load_path = lambda path, sheet_name=None: calls.append(path)
+
+        event = _FakeDropEvent([csv_path])
+        window.dropEvent(event)
+
+        self.assertEqual(calls, [csv_path])
+        self.assertTrue(event.accepted)
+
+    def test_drag_and_drop_session_calls_load_session_path(self) -> None:
+        window = self._window()
+        calls: list[str] = []
+        window._load_session_path = lambda path: calls.append(path)
+
+        event = _FakeDropEvent([os.path.join("x", "session.json")])
+        window.dropEvent(event)
+
+        self.assertEqual(calls, [os.path.join("x", "session.json")])
+        self.assertTrue(event.accepted)
+
+    def test_drag_enter_ignores_unsupported_files(self) -> None:
+        window = self._window()
+        event = _FakeDropEvent([os.path.join("x", "notes.txt")])
+
+        window.dragEnterEvent(event)
+
+        self.assertTrue(event.ignored)
+        self.assertFalse(event.accepted)
+
+    def test_autosave_timer_skips_when_no_data(self) -> None:
+        window = self._window()
+        window.settings_manager.set("general_ui", "auto_save_enabled", True)
+        calls: list[str] = []
+        window.vm.save_session = lambda path: calls.append(path)
+
+        window._on_autosave_tick()
+
+        self.assertEqual(calls, [])
+
+    def test_autosave_timer_writes_when_dirty(self) -> None:
+        window = self._window()
+        directory = tempfile.mkdtemp()
+        window.settings_manager.set("general_ui", "auto_save_enabled", True)
+        window.vm.state.df = pd.DataFrame({"Time": [0.0, 1.0], "A": [1.0, 2.0]})
+        window.vm.state.root_file_directory = directory
+        window.vm.state.is_dirty = True
+
+        window._on_autosave_tick()
+
+        self.assertTrue(os.path.exists(os.path.join(directory, "autosave.json")))
+
+    def test_plot_tab_bar_is_movable(self) -> None:
+        window = self._window()
+        self.assertTrue(window.plot_tab_bar.isMovable())
+
+    def test_plot_tab_moved_reorders_profiles(self) -> None:
+        window = self._window()
+        window.vm.state.plot_profiles = [
+            {"name": "P1", "x_column": "", "y_columns": []},
+            {"name": "P2", "x_column": "", "y_columns": []},
+        ]
+        window.vm.state.active_plot_profile_index = 0
+        window._sync_plot_tabs()
+
+        window._on_plot_tab_moved(0, 1)
+
+        self.assertEqual([profile["name"] for profile in window.vm.state.plot_profiles], ["P2", "P1"])
+
+    def test_reset_axis_controller_is_wired(self) -> None:
+        window = self._window()
+        toolbar = window.plot_workspace.canvas.toolbar
+        self.assertIsNotNone(toolbar._axis_reset_callback)
+
+    def test_reset_axis_appearance_clears_manual_title(self) -> None:
+        window = self._window()
+        window.vm.state.plot_profiles = [
+            {"name": "P1", "x_column": "", "y_columns": [], "title": "Custom Title"}
+        ]
+        window.vm.state.active_plot_profile_index = 0
+
+        window._reset_axis_appearance()
+
+        self.assertNotEqual(window.vm.state.plot_profiles[0].get("title"), "Custom Title")
 
     def test_workflow_help_opens_reusable_modeless_dialog(self) -> None:
         window = self._window()
@@ -2385,8 +3003,24 @@ class MainWindowLayoutTests(unittest.TestCase):
         self.assertEqual(window.left_scroll.minimumWidth(), MainWindow.LEFT_RAIL_MINIMUM_WIDTH)
         self.assertEqual(window.left_scroll.maximumWidth(), MainWindow.LEFT_RAIL_MAXIMUM_WIDTH)
         self.assertLess(window.left_scroll.minimumWidth(), MainWindow.LEFT_RAIL_INITIAL_WIDTH)
+        self.assertGreater(MainWindow.LEFT_RAIL_MAXIMUM_WIDTH, 500)
         self.assertGreaterEqual(window.body_splitter.sizes()[0], MainWindow.LEFT_RAIL_INITIAL_WIDTH - 5)
         self.assertEqual(window.lower_stack.sizePolicy().horizontalPolicy(), QSizePolicy.Policy.Ignored)
+
+        window.body_splitter.setSizes([520, 800])
+        QApplication.processEvents()
+        self.assertGreaterEqual(window.body_splitter.sizes()[0], 500)
+
+        window.data_panel.sheet_combo.addItems(
+            ["Temperatures", "Thermal Fuses and Windings Temp", "Thermal Fuses and Windings  (2)"]
+        )
+        window.data_panel.sheet_row.setVisible(True)
+        window.body_splitter.setSizes([MainWindow.LEFT_RAIL_MAXIMUM_WIDTH, 680])
+        QApplication.processEvents()
+        window.body_splitter.setSizes([MainWindow.LEFT_RAIL_MINIMUM_WIDTH, 1080])
+        QApplication.processEvents()
+        self.assertLessEqual(window.data_panel.sheet_combo.width(), window.left_scroll.viewport().width())
+        self.assertLessEqual(window.axis_panel.x_combo.width(), window.left_scroll.viewport().width())
 
         total_width = sum(window.body_splitter.sizes())
         window.body_splitter.setSizes([total_width, 0])

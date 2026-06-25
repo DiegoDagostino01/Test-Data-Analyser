@@ -48,11 +48,7 @@ python -m PyInstaller --noconfirm --clean --onedir --windowed `
   --add-data "test_data_analyser\qt_app\assets;test_data_analyser\qt_app\assets" `
   --hidden-import openpyxl `
   --hidden-import xlrd `
-  --hidden-import xlsxwriter `
-  --hidden-import pyarrow `
   --hidden-import scipy `
-  --hidden-import reportlab `
-  --hidden-import docx `
   run_qt_app.py
 ```
 

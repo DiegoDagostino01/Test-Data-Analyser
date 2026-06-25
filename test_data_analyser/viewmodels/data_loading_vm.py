@@ -15,7 +15,7 @@ from ..core.data_io import get_excel_sheets, load_data
 from ..domain import SOURCE_EXCEL
 from ..services import dataset_service
 from ..services.results import OperationResult
-from ..core.utils import infer_column_by_keywords
+from ..core.column_matching import infer_column_by_keywords
 from .app_state import AppState
 
 

@@ -199,12 +199,40 @@ def set_cell(
     spec = registry.spec_for_id(channel_id)
     if spec is None:
         return OperationResult.failure("Column not found.")
+    return _assign_cell(df, spec, channel_id, row_index, coerce_cell_value(spec, text))
+
+
+def set_cell_value(
+    df: Optional[pd.DataFrame],
+    registry: ChannelRegistry,
+    channel_id: str,
+    row_index: int,
+    value: Any,
+) -> OperationResult:
+    """Write an already-coerced ``value`` without re-coercing it from text.
+
+    Used by bulk paste/fill operations that coerce a whole block in one pass, so
+    coerced ``NaN``/numeric values are not turned back into text. Dtype upcasting
+    and type re-detection match :func:`set_cell`.
+    """
+    spec = registry.spec_for_id(channel_id)
+    if spec is None:
+        return OperationResult.failure("Column not found.")
+    return _assign_cell(df, spec, channel_id, row_index, value)
+
+
+def _assign_cell(
+    df: Optional[pd.DataFrame],
+    spec: ColumnSpec,
+    channel_id: str,
+    row_index: int,
+    value: Any,
+) -> OperationResult:
     name = spec.display_name
     if df is None or name not in df.columns:
         return OperationResult.failure(f'Column "{name}" not found.')
     if not (0 <= int(row_index) < len(df)):
         return OperationResult.failure("Row index out of range.")
-    value = coerce_cell_value(spec, text)
     # Upcast a numeric column to object before storing kept-visible invalid text
     # so pandas does not reject the assignment.
     if isinstance(value, str) and pd.api.types.is_numeric_dtype(df[name]):

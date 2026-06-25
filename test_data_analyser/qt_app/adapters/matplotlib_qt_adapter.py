@@ -10,11 +10,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any
+import importlib
 
 import numpy as np
 from matplotlib.backends.backend_qt import NavigationToolbar2QT
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
-from matplotlib.backends.qt_editor import _formlayout, figureoptions
 from matplotlib.figure import Figure
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...core.config import theme_palette
-from ...core.utils import classify_channel_name
+from ...core.channel_classification import classify_channel_name
 from ...services import plot_render_service
 
 LEGEND_DISPLAY_PANEL = "panel"
@@ -37,6 +37,37 @@ LEGEND_DISPLAY_CHOICES = (
     (LEGEND_DISPLAY_GRAPH, "Inside graph"),
 )
 _AUTO_LEGEND_FIELD = "(Re-)Generate automatic legend"
+
+
+class _LazyQtEditorModule:
+    """Lazy proxy for Matplotlib's Qt editor modules.
+
+    Tests and extension points patch ``figureoptions`` / ``_formlayout`` at the
+    module level, so these names remain available without importing the Qt
+    editor stack during normal startup.
+    """
+
+    def __init__(self, module_name: str) -> None:
+        self._module_name = module_name
+        self._module = None
+
+    def _load(self):
+        if self._module is None:
+            self._module = importlib.import_module(f"matplotlib.backends.qt_editor.{self._module_name}")
+        return self._module
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._load(), name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name in {"_module_name", "_module"}:
+            object.__setattr__(self, name, value)
+            return
+        setattr(self._load(), name, value)
+
+
+_formlayout = _LazyQtEditorModule("_formlayout")
+figureoptions = _LazyQtEditorModule("figureoptions")
 
 
 class LegendAwareNavigationToolbar(NavigationToolbar2QT):
@@ -61,6 +92,7 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
         self._best_fit_settings_getter: Callable[[], list[dict[str, object]]] | None = None
         self._best_fit_settings_setter: Callable[[list[dict[str, object]]], None] | None = None
         self._best_fit_settings_applier: Callable[[], None] | None = None
+        self._axis_reset_callback: Callable[[], None] | None = None
         self.addSeparator()
         self.edit_axis_button = QPushButton("Edit Axis")
         self.edit_axis_button.setObjectName("PrimaryButton")
@@ -99,6 +131,18 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
         self._axis_tick_settings_getter = getter
         self._axis_tick_settings_setter = setter
         self._axis_tick_settings_applier = applier
+
+    def set_axis_reset_controller(self, callback: Callable[[], None]) -> None:
+        """Register the callback run by the Figure Options 'Reset Axis' button."""
+        self._axis_reset_callback = callback
+
+    def _reset_axis_from_form(self, axes_form) -> None:
+        """Run the reset callback and close the (now stale) Figure Options dialog."""
+        if self._axis_reset_callback is not None:
+            self._axis_reset_callback()
+        dialog = axes_form.window()
+        if dialog is not None:
+            dialog.close()
 
     def set_best_fit_controller(
         self,
@@ -417,6 +461,12 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
             )
             auto_fit_secondary_y_button.clicked.connect(lambda: self._auto_fit_axis_form(axes, axes_form, "secondary_y"))
             helper_layout.addWidget(auto_fit_secondary_y_button)
+        if self._axis_reset_callback is not None:
+            reset_axis_button = QPushButton("Reset Axis", helper_row)
+            reset_axis_button.setObjectName("AxisResetButton")
+            reset_axis_button.setToolTip("Clear manual title, labels, limits, and ticks and re-render with defaults.")
+            reset_axis_button.clicked.connect(lambda: self._reset_axis_from_form(axes_form))
+            helper_layout.addWidget(reset_axis_button)
         helper_layout.addStretch(1)
 
         axes_form.formlayout.addRow("Helpers", helper_row)

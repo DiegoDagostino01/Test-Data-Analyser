@@ -9,13 +9,15 @@ domain/services/viewmodels layers.
 from __future__ import annotations
 
 import base64
+import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QGuiApplication, QPixmap
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent, QGuiApplication, QPixmap
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -43,14 +45,18 @@ from .widgets.best_fit_formulas_panel import BestFitFormulasPanel
 from .widgets.cursor_compare_panel import CursorComparePanel
 from .widgets.data_file_panel import DataFilePanel
 from .widgets.engineering_notes_panel import EngineeringNotesPanel
-from .widgets.help_dialog import HelpDialog
 from .widgets.limits_panel import LimitsPanel
 from .widgets.maths_channels_panel import MathsChannelsPanel
 from .widgets.plot_workspace import PlotWorkspace
 from .widgets.raw_data_panel import RawDataPanel
 from .widgets.runs_comparison_panel import RunsComparisonPanel
-from .widgets.settings_dialog import SettingsDialog
 from .widgets.statistics_panel import StatisticsPanel
+
+if TYPE_CHECKING:
+    from .widgets.help_dialog import HelpDialog
+
+HelpDialog = None
+SettingsDialog = None
 
 
 class MainWindow(QMainWindow):
@@ -59,8 +65,11 @@ class MainWindow(QMainWindow):
     LOWER_REQUIREMENTS_INDEX = 2
     LOWER_NOTES_INDEX = 3
     LEFT_RAIL_INITIAL_WIDTH = 300
-    LEFT_RAIL_MINIMUM_WIDTH = 280
-    LEFT_RAIL_MAXIMUM_WIDTH = 380
+    LEFT_RAIL_MINIMUM_WIDTH = 240
+    LEFT_RAIL_MAXIMUM_WIDTH = 640
+    DATA_DROP_SUFFIXES = (".csv", ".xlsx", ".xls")
+    SESSION_DROP_SUFFIXES = (".json",)
+    AUTOSAVE_POLL_MS = 30_000
 
     def __init__(self, settings_manager: SettingsManager | None = None) -> None:
         super().__init__()
@@ -75,13 +84,20 @@ class MainWindow(QMainWindow):
         self._active_plot_tab_index = self.vm.state.active_plot_profile_index
         self._current_session_path: str | None = None
         self._help_dialog: HelpDialog | None = None
+        self._last_autosave_epoch: float | None = None
 
         self.setWindowTitle("Test Data Analyser — Eaton Edition")
         self.resize(1320, 840)
+        self.setAcceptDrops(True)
 
         self._build_menu()
         self._build_central_layout()
         self._apply_theme()
+
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setInterval(self.AUTOSAVE_POLL_MS)
+        self._autosave_timer.timeout.connect(self._on_autosave_tick)
+        self._configure_autosave_timer()
 
         self.statusBar().showMessage("Ready. Open a data file to begin.")
 
@@ -123,6 +139,7 @@ class MainWindow(QMainWindow):
         self.data_panel = DataFilePanel(self.vm.data_loading)
         self.axis_panel = AxisSelectionPanel()
         self.plot_workspace = PlotWorkspace(self.vm.plot_workspace, self.vm.settings)
+        self.plot_workspace.canvas.toolbar.set_axis_reset_controller(self._reset_axis_appearance)
         self.statistics_panel = StatisticsPanel()
         self.raw_data_panel = RawDataPanel(self.vm.raw_data, self.vm.dataset)
         self.raw_data_panel.set_selection_provider(self._current_axis_selection)
@@ -283,7 +300,7 @@ class MainWindow(QMainWindow):
         bar.setVisible(False)
         return bar
 
-    def _ribbon_commands(self) -> list[tuple[str, list[tuple[str, Callable[[], None]]]]]:
+    def _ribbon_commands(self) -> list[tuple[str, list[tuple[Any, ...]]]]:
         return [
             (
                 "FILE",
@@ -292,6 +309,7 @@ class MainWindow(QMainWindow):
                     ("Create Session", self._create_manual_session),
                     ("Save Session", self.save_session),
                     ("Load Session", self.load_session),
+                    ("Recent", None, self._populate_recent_menu),
                     ("Export Data", self._export_selected_data),
                 ],
             ),
@@ -336,7 +354,7 @@ class MainWindow(QMainWindow):
     def _build_ribbon_group(
         self,
         title: str,
-        commands: list[tuple[str, Callable[[], None]]],
+        commands: list[tuple[Any, ...]],
     ) -> QFrame:
         group = QFrame()
         group.setObjectName("RibbonGroup")
@@ -354,18 +372,52 @@ class MainWindow(QMainWindow):
         button_grid.setHorizontalSpacing(4)
         button_grid.setVerticalSpacing(3)
         column_count = 3 if len(commands) > 4 else 2
-        for index, (text, handler) in enumerate(commands):
-            button = QPushButton(text)
-            button.setObjectName("RibbonButton")
-            if title == "PLOT" and text == "Generate Plot":
-                button.setProperty("ribbonPrimary", "true")
-            button.setFixedHeight(23)
-            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            button.clicked.connect(handler)
+        for index, command in enumerate(commands):
+            text = command[0]
+            handler = command[1] if len(command) > 1 else None
+            menu_populator = command[2] if len(command) > 2 else None
+            button = self._build_ribbon_button(title, text, handler, menu_populator)
             self.ribbon_buttons[f"{title}:{text}"] = button
             button_grid.addWidget(button, index // column_count, index % column_count)
         group_layout.addLayout(button_grid)
         return group
+
+    def _build_ribbon_button(
+        self,
+        title: str,
+        text: str,
+        handler: Optional[Callable[[], None]],
+        menu_populator: Optional[Callable[[QMenu], None]] = None,
+    ) -> QPushButton:
+        """Build one ribbon button.
+
+        When ``menu_populator`` is provided the button shows a drop-down ``QMenu``
+        that is rebuilt on every ``aboutToShow`` so it always reflects current
+        state (used for the Recent files/sessions menu). Otherwise it is a plain
+        push button wired to ``handler``. A ``QPushButton`` is used in both cases
+        so the existing ``QPushButton#RibbonButton`` styling is preserved.
+        """
+        button = QPushButton(text)
+        button.setObjectName("RibbonButton")
+        if title == "PLOT" and text == "Generate Plot":
+            button.setProperty("ribbonPrimary", "true")
+        button.setFixedHeight(23)
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        if menu_populator is not None:
+            menu = QMenu(button)
+            menu.aboutToShow.connect(
+                lambda m=menu, p=menu_populator: self._populate_ribbon_menu(m, p)
+            )
+            button.setMenu(menu)
+        elif handler is not None:
+            button.clicked.connect(handler)
+        return button
+
+    @staticmethod
+    def _populate_ribbon_menu(menu: QMenu, populator: Callable[[QMenu], None]) -> None:
+        """Clear and repopulate a ribbon drop-down menu before it is shown."""
+        menu.clear()
+        populator(menu)
 
     def _build_logo_label(self) -> Optional[QLabel]:
         """Build the Eaton branding logo, or ``None`` if it cannot be decoded.
@@ -447,10 +499,11 @@ class MainWindow(QMainWindow):
         self.plot_tab_bar = QTabBar()
         self.plot_tab_bar.setObjectName("PlotProfileTabs")
         self.plot_tab_bar.setExpanding(False)
-        self.plot_tab_bar.setMovable(False)
+        self.plot_tab_bar.setMovable(True)
         self.plot_tab_bar.setUsesScrollButtons(True)
         self.plot_tab_bar.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.plot_tab_bar.currentChanged.connect(self._on_plot_tab_changed)
+        self.plot_tab_bar.tabMoved.connect(self._on_plot_tab_moved)
         self.plot_tab_bar.customContextMenuRequested.connect(self._show_plot_tab_menu)
         layout.addWidget(self.plot_tab_bar, stretch=1)
 
@@ -488,6 +541,20 @@ class MainWindow(QMainWindow):
             self._active_plot_tab_index = index
         finally:
             self._syncing_plot_tabs = False
+
+    def _on_plot_tab_moved(self, from_index: int, to_index: int) -> None:
+        """Reorder plot profiles when a tab is dragged, keeping the '+' tab last."""
+        if self._syncing_plot_tabs:
+            return
+        profile_count = len(self.vm.state.plot_profiles)
+        if from_index >= profile_count or to_index >= profile_count:
+            # The trailing '+' tab cannot be moved; restore the tab order.
+            QTimer.singleShot(0, self._sync_plot_tabs)
+            return
+        result = self.vm.reorder_plot_profile(from_index, to_index)
+        if result.ok:
+            self.statusBar().showMessage(result.message)
+        QTimer.singleShot(0, self._sync_plot_tabs)
 
     def _show_plot_tab_menu(self, position) -> None:
         index = self.plot_tab_bar.tabAt(position)
@@ -601,46 +668,78 @@ class MainWindow(QMainWindow):
         appearance = self.plot_workspace.current_axis_appearance() if self._plot_generated else {}
         if not appearance:
             appearance = self._stored_profile_appearance(profile)
-        self.vm.capture_working_state(
+        self._capture_working_state(
+            profile,
+            appearance,
             x_column=self.axis_panel.x_column(),
             y_columns=self.axis_panel.selected_y(),
             secondary_y_columns=self.axis_panel.selected_secondary_y(),
             plot_kind=self.axis_panel.plot_kind(),
-            legend_settings=self._current_legend_settings(profile),
             best_fit_lines=self.plot_workspace.best_fit_settings(),
             annotations=self.plot_workspace.current_annotations(),
             analysis_window=self.axis_panel.analysis_window_texts(),
             axis_ticks=self.plot_workspace.axis_tick_setting_texts(),
             filter_settings=self.axis_panel.filter_setting_texts(),
-            title=appearance.get("title", ""),
-            x_label=appearance.get("x_label", ""),
-            y_label=appearance.get("y_label", ""),
-            secondary_y_label=appearance.get("secondary_y_label", ""),
-            axis_limits=appearance.get("axis_limits", {}),
-            auto_fit_axes=appearance.get("auto_fit_axes", True),
             generated=self._plot_generated,
         )
 
     def _capture_preserved_plot_profile(self, profile: dict) -> None:
         appearance = self._stored_profile_appearance(profile)
-        self.vm.capture_working_state(
+        self._capture_working_state(
+            profile,
+            appearance,
             x_column=str(profile.get("x_column", "")),
             y_columns=list(profile.get("y_columns", [])),
             secondary_y_columns=list(profile.get("secondary_y_columns", [])),
             plot_kind=str(profile.get("plot_kind", "Line")),
-            legend_settings=self._current_legend_settings(profile),
             best_fit_lines=list(profile.get("best_fit_lines", [])) if isinstance(profile.get("best_fit_lines"), list) else [],
             annotations=list(profile.get("annotations", [])) if isinstance(profile.get("annotations"), list) else [],
             analysis_window=dict(profile.get("analysis_window", {})) if isinstance(profile.get("analysis_window"), dict) else {},
             axis_ticks=dict(profile.get("axis_ticks", {})) if isinstance(profile.get("axis_ticks"), dict) else {},
             filter_settings=dict(profile.get("filter", {})) if isinstance(profile.get("filter"), dict) else {},
+            generated=bool(profile.get("generated", False)),
+        )
+
+    def _capture_working_state(
+        self,
+        profile: dict,
+        appearance: dict,
+        *,
+        x_column: str,
+        y_columns: list,
+        secondary_y_columns: list,
+        plot_kind: str,
+        best_fit_lines: list,
+        annotations: list,
+        analysis_window: dict,
+        axis_ticks: dict,
+        filter_settings: dict,
+        generated: bool,
+    ) -> None:
+        """Fold the supplied axis/appearance state into the active plot profile.
+
+        Both capture paths (live UI vs frozen/preserved profile) supply the
+        differing values above; the shared legend and appearance fields are
+        derived here so the two callers stay in lock-step.
+        """
+        self.vm.capture_working_state(
+            x_column=x_column,
+            y_columns=y_columns,
+            secondary_y_columns=secondary_y_columns,
+            plot_kind=plot_kind,
+            legend_settings=self._current_legend_settings(profile),
+            best_fit_lines=best_fit_lines,
+            annotations=annotations,
+            analysis_window=analysis_window,
+            axis_ticks=axis_ticks,
+            filter_settings=filter_settings,
             title=appearance.get("title", ""),
             x_label=appearance.get("x_label", ""),
             y_label=appearance.get("y_label", ""),
             secondary_y_label=appearance.get("secondary_y_label", ""),
             axis_limits=appearance.get("axis_limits", {}),
             auto_fit_axes=appearance.get("auto_fit_axes", True),
-            generated=bool(profile.get("generated", False)),
+            generated=generated,
         )
 
     @staticmethod
@@ -720,6 +819,15 @@ class MainWindow(QMainWindow):
         self.plot_workspace.clear_cursor_markers()
         self.cursor_panel.refresh()
         self._restore_generated_plot(profile)
+
+    def _reset_axis_appearance(self) -> None:
+        """Clear the active plot's manual title/labels/limits/ticks and re-render."""
+        result = self.vm.reset_active_axis_appearance()
+        if not result.ok:
+            self.statusBar().showMessage(result.message)
+            return
+        self._apply_active_plot_profile()
+        self.statusBar().showMessage(result.message)
         self._refresh_best_fit_formulas()
 
     def _open_via_panel(self) -> None:
@@ -832,13 +940,26 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(result.message)
 
     def open_settings(self) -> None:
+        global SettingsDialog
+        if SettingsDialog is None:
+            from .widgets.settings_dialog import SettingsDialog as _SettingsDialog
+
+            SettingsDialog = _SettingsDialog
+
         dialog = SettingsDialog(self.vm.settings, self)
         if dialog.exec():
             self._apply_theme()
+            self._configure_autosave_timer()
             self.statusBar().showMessage("Settings saved.")
 
     def show_workflow_help(self) -> None:
+        global HelpDialog
         if self._help_dialog is None:
+            if HelpDialog is None:
+                from .widgets.help_dialog import HelpDialog as _HelpDialog
+
+                HelpDialog = _HelpDialog
+
             self._help_dialog = HelpDialog(self, self.vm.settings.theme_name())
         self._help_dialog.show()
         self._help_dialog.raise_()
@@ -854,6 +975,7 @@ class MainWindow(QMainWindow):
         result = self.vm.save_session(path)
         if result.ok:
             self._current_session_path = str(getattr(result, "payload", None) or path)
+            self.vm.register_recent_session(self._current_session_path)
         qt_message_service.show_result(self, "Save Session", result)
         self.statusBar().showMessage(result.message)
 
@@ -870,6 +992,10 @@ class MainWindow(QMainWindow):
         path = qt_file_dialogs.open_session_file(self, initial_dir)
         if not path:
             return
+        self._load_session_path(path)
+
+    def _load_session_path(self, path: str) -> None:
+        """Restore a session from ``path`` (shared by the dialog and recent menu)."""
         qt_widget_helpers.remember_session_directory(self.settings_manager, path)
         result, main_data_warning_shown = self._restore_session_with_optional_relink(path)
         if not result.ok:
@@ -877,12 +1003,156 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(result.message)
             return
         self._current_session_path = path
+        self.vm.register_recent_session(path)
         selection = result.payload if isinstance(result.payload, dict) else {}
         self._apply_loaded_session(selection)
         warnings = self._warnings_for_display(result.warnings, main_data_warning_shown)
         if warnings:
             qt_message_service.warning(self, "Load Session", "\n".join(warnings))
         self.statusBar().showMessage(result.message)
+
+    # ------------------------------------------------------------------
+    # Recent files / sessions menu
+    # ------------------------------------------------------------------
+    def _populate_recent_menu(self, menu: QMenu) -> None:
+        """Fill the FILE ribbon 'Recent' drop-down from the viewmodel.
+
+        Missing files are listed but disabled rather than removed, so the user
+        can see what was there. Real entries carry the full path as action data
+        and tool-tip; section headers are disabled, non-actionable rows.
+        """
+        recent_files = self.vm.recent_files()
+        recent_sessions = self.vm.recent_sessions()
+        if not recent_files and not recent_sessions:
+            empty = menu.addAction("No recent items")
+            empty.setEnabled(False)
+            return
+        if recent_files:
+            header = menu.addAction("Data Files")
+            header.setEnabled(False)
+            for path in recent_files:
+                self._add_recent_action(menu, path, self._open_recent_file)
+        if recent_sessions:
+            if recent_files:
+                menu.addSeparator()
+            header = menu.addAction("Sessions")
+            header.setEnabled(False)
+            for path in recent_sessions:
+                self._add_recent_action(menu, path, self._open_recent_session)
+
+    def _add_recent_action(self, menu: QMenu, path: str, handler: Callable[[str], None]) -> None:
+        action = menu.addAction(Path(path).name or path)
+        action.setData(path)
+        action.setToolTip(path)
+        if Path(path).exists():
+            action.triggered.connect(lambda _checked=False, p=path: handler(p))
+        else:
+            action.setEnabled(False)
+
+    def _open_recent_file(self, path: str) -> None:
+        if not Path(path).exists():
+            self.statusBar().showMessage(f"File no longer exists: {path}")
+            return
+        self.data_panel.load_path(path)
+
+    def _open_recent_session(self, path: str) -> None:
+        if not Path(path).exists():
+            self.statusBar().showMessage(f"Session no longer exists: {path}")
+            return
+        self._load_session_path(path)
+
+    # ------------------------------------------------------------------
+    # Drag-and-drop file open
+    # ------------------------------------------------------------------
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        if self._first_supported_drop_path(event) is not None:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        path = self._first_supported_drop_path(event)
+        if path is None:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        if Path(path).suffix.lower() in self.SESSION_DROP_SUFFIXES:
+            self._load_session_path(path)
+        else:
+            self.data_panel.load_path(path)
+        self.statusBar().showMessage(f"Opened via drag-and-drop: {path}")
+
+    def _first_supported_drop_path(self, event: Any) -> Optional[str]:
+        """Return the first dropped local file with a supported extension.
+
+        Only the first matching file is opened; additional dropped files are
+        ignored for now. Batch import (a later update) is the intended hook for
+        turning multi-file drops into runs.
+        """
+        mime = event.mimeData()
+        if not mime.hasUrls():
+            return None
+        supported = self.DATA_DROP_SUFFIXES + self.SESSION_DROP_SUFFIXES
+        for url in mime.urls():
+            local = url.toLocalFile()
+            if local and Path(local).suffix.lower() in supported:
+                return local
+        return None
+
+    # ------------------------------------------------------------------
+    # Auto-save
+    # ------------------------------------------------------------------
+    def _configure_autosave_timer(self) -> None:
+        """Start or stop the auto-save poll timer to match current settings."""
+        if self._auto_save_enabled():
+            if not self._autosave_timer.isActive():
+                self._autosave_timer.start()
+        else:
+            self._autosave_timer.stop()
+
+    def _auto_save_enabled(self) -> bool:
+        try:
+            return bool(self.settings_manager.get("general_ui", "auto_save_enabled"))
+        except (KeyError, AttributeError):
+            return False
+
+    def _auto_save_interval_minutes(self) -> int:
+        try:
+            return int(self.settings_manager.get("general_ui", "auto_save_interval_minutes"))
+        except (KeyError, ValueError, TypeError, AttributeError):
+            return 10
+
+    def _is_editing_cell(self) -> bool:
+        table = getattr(self.raw_data_panel, "table", None)
+        if table is None:
+            return False
+        try:
+            return table.state() == QAbstractItemView.State.EditingState
+        except Exception:
+            return False
+
+    def _on_autosave_tick(self) -> None:
+        """Auto-save the session when due, dirty, and safe to do so.
+
+        Silent by design: progress is reported only on the status bar so the
+        background save never interrupts the user with a modal dialog.
+        """
+        if not self._auto_save_enabled():
+            return
+        if self.vm.state.df is None or not self.vm.state.is_dirty:
+            return
+        if self._is_editing_cell():
+            return
+        if not self.vm.auto_save_due(self._last_autosave_epoch, time.time(), self._auto_save_interval_minutes()):
+            return
+        target = self.vm.auto_save_target_path(self._current_session_path)
+        self._capture_current_plot_profile()
+        result = self.vm.save_session(target)
+        self._last_autosave_epoch = time.time()
+        if result.ok:
+            self.statusBar().showMessage(f"Auto-saved at {time.strftime('%H:%M:%S')}")
+        else:
+            self.statusBar().showMessage(f"Auto-save failed: {result.message}")
 
     def _apply_loaded_session(self, selection: dict) -> None:
         self._plot_profile_snapshots.clear()
@@ -1079,6 +1349,9 @@ class MainWindow(QMainWindow):
         self.limits_panel.refresh()
         self.notes_panel.load_from_state()
         self.runs_panel.refresh()
+        loaded_path = self.vm.state.filepath
+        if loaded_path:
+            self.vm.register_recent_file(str(loaded_path))
         self.statusBar().showMessage(f"Loaded {len(columns)} columns. Select channels and generate a plot.")
 
     def _on_sheet_changed(self, columns: list[str]) -> None:

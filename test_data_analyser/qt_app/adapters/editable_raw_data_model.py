@@ -82,3 +82,22 @@ class EditableRawDataTableModel(PandasTableModel):
             return bool(first == second)
         except Exception:
             return False
+
+    # ------------------------------------------------------------------
+    # Source mapping (for clipboard copy of the displayed view)
+    # ------------------------------------------------------------------
+    def source_row_at(self, row: int) -> Any:
+        """Return the source dataframe index label for a displayed ``row``.
+
+        The displayed frame preserves the source index, so this maps a visible
+        row back to its dataframe row for clipboard operations.
+        """
+        if 0 <= row < len(self._df.index):
+            return self._df.index[row]
+        return None
+
+    def column_name_at(self, section: int) -> str | None:
+        """Return the column display name for a displayed column ``section``."""
+        if 0 <= section < self._df.shape[1]:
+            return str(self._df.columns[section])
+        return None

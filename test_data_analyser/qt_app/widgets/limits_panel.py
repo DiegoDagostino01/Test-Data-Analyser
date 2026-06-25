@@ -42,7 +42,7 @@ from ...services.limits_service import MARGIN_TABLE_COLUMNS
 from ...viewmodels.limits_vm import LimitsViewModel
 from .no_wheel_combo_box import NoWheelComboBox
 from ...viewmodels.plot_workspace_vm import PlotWorkspaceViewModel
-from ..adapters import qt_message_service
+from ..adapters import qt_file_dialogs, qt_message_service
 from ..adapters.pandas_table_model import PandasTableModel
 
 SelectionProvider = Callable[[], tuple[str, list[str], Optional[float], Optional[float]]]
@@ -204,7 +204,11 @@ class LimitsPanel(QWidget):
         duplicate_button.clicked.connect(self._duplicate_line)
         delete_button = QPushButton("Delete Limit")
         delete_button.clicked.connect(self._delete_line)
-        for button in (new_button, duplicate_button, delete_button):
+        save_template_button = QPushButton("Save Template…")
+        save_template_button.clicked.connect(self._save_template)
+        load_template_button = QPushButton("Load Template…")
+        load_template_button.clicked.connect(self._load_template)
+        for button in (new_button, duplicate_button, delete_button, save_template_button, load_template_button):
             toolbar.addWidget(button)
         toolbar.addStretch(1)
         return toolbar
@@ -503,6 +507,35 @@ class LimitsPanel(QWidget):
         result = self.vm.delete_line()
         self.refresh()
         self.limitsChanged.emit()
+        self.statusMessage.emit(result.message)
+
+    def _save_template(self) -> None:
+        path = qt_file_dialogs.save_limit_template_file(self)
+        if not path:
+            return
+        result = self.vm.export_template(path)
+        if not result.ok:
+            qt_message_service.error(self, "Save Template", result.message)
+            return
+        self.statusMessage.emit(result.message)
+
+    def _load_template(self) -> None:
+        path = qt_file_dialogs.open_limit_template_file(self)
+        if not path:
+            return
+        replace = False
+        if self.vm.lines:
+            replace = qt_message_service.confirm(
+                self,
+                "Load Template",
+                "Replace the existing limit lines?\n\nChoose No to merge the template into the current limits.",
+            )
+        result = self.vm.import_template(path, replace=replace)
+        self.refresh()
+        self.limitsChanged.emit()
+        if not result.ok:
+            qt_message_service.error(self, "Load Template", result.message)
+            return
         self.statusMessage.emit(result.message)
 
     # ------------------------------------------------------------------

@@ -7,6 +7,7 @@ loading.
 """
 from __future__ import annotations
 
+import math
 from typing import Any
 
 
@@ -31,6 +32,15 @@ def _float(value: object, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _finite_float(value: object, *, default: float | None = None) -> float | None:
+    """Return ``value`` as a finite float, or ``default`` when invalid/non-finite."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) else default
 
 
 def _int(value: object, default: int = 0) -> int:

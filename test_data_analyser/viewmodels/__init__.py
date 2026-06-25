@@ -19,6 +19,7 @@ from .plot_workspace_vm import PlotWorkspaceViewModel
 from .raw_data_vm import RawDataViewModel
 from .runs_comparison_vm import RunsComparisonViewModel
 from .settings_vm import SettingsViewModel
+from .state_controller import AppStateController
 
 __all__ = [
     "AppState",
@@ -33,4 +34,5 @@ __all__ = [
     "RawDataViewModel",
     "RunsComparisonViewModel",
     "SettingsViewModel",
+    "AppStateController",
 ]

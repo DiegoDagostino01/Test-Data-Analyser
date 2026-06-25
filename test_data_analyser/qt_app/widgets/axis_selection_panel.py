@@ -12,6 +12,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QMouseEvent
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFrame,
     QGroupBox,
     QGridLayout,
@@ -27,7 +28,8 @@ from PySide6.QtWidgets import (
 )
 
 from ...core.config import MATHS_CHANNEL_GROUP
-from ...core.utils import channel_group_options, classify_channel_name, natural_sort_key
+from ...core.channel_classification import channel_group_options, classify_channel_name
+from ...core.naming import natural_sort_key
 from .no_wheel_combo_box import NoWheelComboBox
 
 PLOT_KINDS = ("Line", "Scatter", "Line + Markers")
@@ -82,22 +84,25 @@ class AxisSelectionPanel(QFrame):
 
         # --- Axes & Channels -------------------------------------------------
         axes_group = QGroupBox("Axes & Channels")
+        self._make_shrinkable_group(axes_group, vertical_policy=QSizePolicy.Policy.Expanding)
         axes_layout = QVBoxLayout(axes_group)
         axes_layout.setSpacing(4)
         axes_layout.addWidget(QLabel("X-axis column:"))
         self.x_combo = NoWheelComboBox()
+        self._make_shrinkable_combo(self.x_combo)
         self.x_combo.currentTextChanged.connect(self._refresh_channel_lists)
         axes_layout.addWidget(self.x_combo)
         axes_layout.addWidget(QLabel("Channel group:"))
         self.group_combo = NoWheelComboBox()
+        self._make_shrinkable_combo(self.group_combo)
         self.group_combo.addItems(channel_group_options())
         self.group_combo.currentTextChanged.connect(self._refresh_channel_lists)
         axes_layout.addWidget(self.group_combo)
         axes_layout.addWidget(QLabel("Primary Y-axis channels:"))
         self.y_list = CheckableChannelListWidget()
+        self._make_shrinkable_list(self.y_list)
         self.y_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
         self.y_list.setMinimumHeight(160)
-        self.y_list.setMaximumHeight(220)
         self.y_list.itemChanged.connect(self._on_primary_item_changed)
         axes_layout.addWidget(self.y_list, stretch=1)
         self.primary_select_all_button = QPushButton("Select All")
@@ -110,9 +115,9 @@ class AxisSelectionPanel(QFrame):
         axes_layout.addLayout(primary_buttons)
         axes_layout.addWidget(QLabel("Secondary Y-axis channels (right):"))
         self.secondary_y_list = CheckableChannelListWidget()
+        self._make_shrinkable_list(self.secondary_y_list)
         self.secondary_y_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
         self.secondary_y_list.setMinimumHeight(160)
-        self.secondary_y_list.setMaximumHeight(220)
         self.secondary_y_list.itemChanged.connect(self._on_secondary_item_changed)
         axes_layout.addWidget(self.secondary_y_list, stretch=1)
         self.secondary_select_all_button = QPushButton("Select All")
@@ -123,21 +128,23 @@ class AxisSelectionPanel(QFrame):
         self.secondary_clear_all_button.clicked.connect(self._clear_secondary)
         secondary_buttons = self._button_row(self.secondary_select_all_button, self.secondary_clear_all_button)
         axes_layout.addLayout(secondary_buttons)
-        controls.addWidget(axes_group)
+        controls.addWidget(axes_group, stretch=1)
 
         # --- Plot Options ----------------------------------------------------
         options_group = QGroupBox("Plot Options")
+        self._make_shrinkable_group(options_group)
         options_layout = QVBoxLayout(options_group)
         options_layout.setSpacing(4)
         options_layout.addWidget(QLabel("Plot kind:"))
         self.plot_kind_combo = NoWheelComboBox()
         self.plot_kind_combo.addItems(PLOT_KINDS)
-        self._make_expanding(self.plot_kind_combo)
+        self._make_shrinkable_combo(self.plot_kind_combo)
         options_layout.addWidget(self.plot_kind_combo)
         controls.addWidget(options_group)
 
         # --- Analysis Window -------------------------------------------------
         window_group = QGroupBox("Analysis Window")
+        self._make_shrinkable_group(window_group)
         window_layout = QGridLayout(window_group)
         window_layout.setHorizontalSpacing(6)
         window_layout.setVerticalSpacing(4)
@@ -158,6 +165,7 @@ class AxisSelectionPanel(QFrame):
 
         # --- Filter ----------------------------------------------------------
         filter_group = QGroupBox("Filter")
+        self._make_shrinkable_group(filter_group)
         filter_layout = QGridLayout(filter_group)
         filter_layout.setHorizontalSpacing(6)
         filter_layout.setVerticalSpacing(4)
@@ -176,11 +184,11 @@ class AxisSelectionPanel(QFrame):
         filter_layout.setColumnStretch(1, 1)
         controls.addWidget(filter_group)
 
-        controls.addStretch(1)
+        controls.addStretch(0)
         scroll.setWidget(container)
         root.addWidget(scroll, stretch=1)
 
-        self.setMinimumWidth(240)
+        self.setMinimumWidth(220)
 
     @staticmethod
     def _button_row(left_button: QPushButton, right_button: QPushButton) -> QGridLayout:
@@ -197,6 +205,29 @@ class AxisSelectionPanel(QFrame):
     def _make_expanding(widget: QWidget) -> None:
         widget.setMinimumWidth(0)
         widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    @staticmethod
+    def _make_shrinkable_group(
+        group: QGroupBox,
+        *,
+        vertical_policy: QSizePolicy.Policy = QSizePolicy.Policy.Preferred,
+    ) -> None:
+        group.setMinimumWidth(0)
+        group.setSizePolicy(QSizePolicy.Policy.Ignored, vertical_policy)
+
+    @staticmethod
+    def _make_shrinkable_combo(combo: QComboBox) -> None:
+        combo.setMinimumWidth(0)
+        combo.setMinimumContentsLength(0)
+        combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        combo.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+
+    @staticmethod
+    def _make_shrinkable_list(widget: QListWidget) -> None:
+        widget.setMinimumWidth(0)
+        widget.setTextElideMode(Qt.TextElideMode.ElideRight)
+        widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        widget.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
 
     # ------------------------------------------------------------------
     # Population

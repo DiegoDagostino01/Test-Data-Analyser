@@ -9,27 +9,45 @@ Run with:
 """
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
+import tempfile
 import unittest
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import numpy as np
 import pandas as pd
 
-from test_data_analyser.domain import PlotData
+from test_data_analyser.core import data_io
+from test_data_analyser.core.config import EATON_PLOT_COLORS
+from test_data_analyser.domain import SOURCE_MANUAL, PlotData, SessionState
 from test_data_analyser.services import (
+    column_reference_service,
+    batch_import_service,
+    clipboard_service,
     cursor_service,
     dataset_service,
+    fill_series_service,
+    find_replace_service,
+    limit_templates_service,
     limits_service,
     maths_channel_service,
+    peak_detection_service,
+    plot_profile_service,
     plot_render_service,
     plotting_data_service,
     raw_data_service,
     run_comparison_service,
+    session_service,
     statistics_service,
 )
 from test_data_analyser.services.maths_channel_service import MathsChannelEvaluator
-from test_data_analyser.services.results import OperationResult
+from test_data_analyser.services.results import OperationResult, payload_dict
 
 
 class StatisticsServiceTests(unittest.TestCase):
@@ -70,6 +88,124 @@ class CursorServiceTests(unittest.TestCase):
 
     def test_nearest_point_empty(self) -> None:
         self.assertIsNone(cursor_service.nearest_point(pd.Series(dtype=float), {}, 0.0))
+
+
+class PlotProfileServiceTests(unittest.TestCase):
+    def test_add_profile_uses_unique_name_and_supplied_x_column(self) -> None:
+        update = plot_profile_service.add_profile(
+            [{"name": "Plot 1"}],
+            0,
+            name="",
+            x_column="Time",
+        )
+
+        self.assertTrue(update.result.ok)
+        self.assertEqual(update.active_index, 1)
+        self.assertEqual(update.result.payload, 1)
+        self.assertEqual([profile["name"] for profile in update.profiles], ["Plot 1", "Plot 2"])
+        self.assertEqual(update.profiles[1]["x_column"], "Time")
+
+    def test_duplicate_rename_delete_preserve_active_index_rules(self) -> None:
+        profiles = [{"name": "Plot 1"}, {"name": "Plot 2"}]
+
+        duplicate = plot_profile_service.duplicate_profile(profiles, 0, index=0)
+        self.assertTrue(duplicate.result.ok)
+        self.assertEqual(duplicate.active_index, 1)
+        self.assertEqual(duplicate.profiles[1]["name"], "Plot 1 Copy")
+
+        rename = plot_profile_service.rename_profile(duplicate.profiles, duplicate.active_index, 1, "Renamed")
+        self.assertTrue(rename.result.ok)
+        self.assertEqual(rename.profiles[1]["name"], "Renamed")
+        self.assertFalse(plot_profile_service.rename_profile(rename.profiles, 1, 1, "Plot 1").result.ok)
+
+        delete = plot_profile_service.delete_profile(rename.profiles, rename.active_index, index=1)
+        self.assertTrue(delete.result.ok)
+        self.assertEqual(delete.active_index, 1)
+        self.assertEqual([profile["name"] for profile in delete.profiles], ["Plot 1", "Plot 2"])
+
+    def test_select_rejects_out_of_range_without_losing_profiles(self) -> None:
+        profiles = [{"name": "Plot 1"}]
+
+        update = plot_profile_service.select_profile(profiles, 0, 99)
+
+        self.assertFalse(update.result.ok)
+        self.assertEqual(update.active_index, 0)
+        self.assertEqual(update.profiles[0]["name"], "Plot 1")
+
+    def test_legend_override_normalises_aliases_and_preserves_existing_style(self) -> None:
+        key = plot_render_service.normalise_channel_name("Motor Voltage")
+        profiles = [
+            {
+                "name": "Plot 1",
+                "y_columns": ["Motor Voltage"],
+                "legend": {
+                    "channel_overrides": {
+                        key: {"channel": "Motor Voltage", "colour": "#123456", "line_style": "--"}
+                    }
+                },
+            }
+        ]
+
+        result = plot_profile_service.update_legend_channel_override(
+            profiles,
+            0,
+            "Motor Voltage",
+            {"hidden": True, "plot_kind": "Line + Marker", "marker_face_color": "#ABCDEF"},
+        )
+
+        self.assertTrue(result.ok, result.message)
+        style = profiles[0]["legend"]["channel_overrides"][key]
+        self.assertEqual(style["colour"], "#123456")
+        self.assertEqual(style["line_style"], "--")
+        self.assertEqual(style["hidden"], "true")
+        self.assertEqual(style["plot_kind"], "Line + Markers")
+        self.assertEqual(style["marker_face_colour"], "#ABCDEF")
+
+    def test_legend_colour_override_propagates_to_matching_profiles(self) -> None:
+        profiles = [
+            {"name": "Plot 1", "y_columns": ["Motor Voltage"]},
+            {"name": "Plot 2", "secondary_y_columns": [" motor voltage "]},
+            {"name": "Plot 3", "y_columns": ["Motor Current"]},
+        ]
+
+        result = plot_profile_service.update_legend_channel_override(
+            profiles,
+            0,
+            "Motor Voltage",
+            {"label": "Voltage", "colour": "#123456"},
+        )
+
+        self.assertTrue(result.ok, result.message)
+        key = plot_render_service.normalise_channel_name("Motor Voltage")
+        self.assertEqual(profiles[0]["legend"]["channel_overrides"][key]["label"], "Voltage")
+        self.assertEqual(profiles[1]["legend"]["channel_overrides"][key]["colour"], "#123456")
+        self.assertNotIn("legend", profiles[2])
+        self.assertEqual(plot_profile_service.legend_channel_colour_overrides(profiles)[key], "#123456")
+
+    def test_capture_working_profile_merges_legend_and_preserves_existing_annotations_when_none(self) -> None:
+        key = plot_render_service.normalise_channel_name("A")
+        existing = {
+            "name": "Plot 1",
+            "legend": {"display_mode": "panel", "channel_overrides": {key: {"channel": "A", "colour": "#123456"}}},
+            "annotations": [{"id": "ann_001", "type": "text", "text": "Note", "x": 1.0, "y": 2.0}],
+        }
+
+        profile = plot_profile_service.capture_working_profile(
+            existing,
+            0,
+            x_column="Time",
+            y_columns=["A"],
+            legend_settings={"display_mode": "graph"},
+            limit_lines=[{"name": "Limit", "points": []}],
+            engineering_notes={"objective": "Verify"},
+        )
+
+        self.assertEqual(profile["x_column"], "Time")
+        self.assertEqual(profile["legend"]["display_mode"], "graph")
+        self.assertEqual(profile["legend"]["channel_overrides"][key]["colour"], "#123456")
+        self.assertEqual(profile["annotations"][0]["text"], "Note")
+        self.assertEqual(profile["limit_lines"][0]["name"], "Limit")
+        self.assertEqual(profile["engineering_notes"]["objective"], "Verify")
 
     def test_comparison_frame_empty(self) -> None:
         frame = cursor_service.cursor_comparison_frame([])
@@ -334,6 +470,46 @@ class PlotRenderServiceTests(unittest.TestCase):
         self.assertEqual(settings[0]["channel"], "A")
         self.assertEqual(settings[0]["order"], plot_render_service.MAX_BEST_FIT_ORDER)
 
+    def test_resolve_axis_range_applies_full_and_partial_manual_limits(self) -> None:
+        self.assertEqual(plot_render_service.resolve_axis_range((0.0, 10.0), 1.0, 9.0), (1.0, 9.0))
+        self.assertEqual(plot_render_service.resolve_axis_range((0.0, 10.0), None, 8.0), (0.0, 8.0))
+        self.assertEqual(plot_render_service.resolve_axis_range((0.0, 10.0), 2.0, None), (2.0, 10.0))
+
+    def test_resolve_axis_range_ignores_empty_or_inverted_limits(self) -> None:
+        self.assertIsNone(plot_render_service.resolve_axis_range((0.0, 10.0), None, None))
+        self.assertIsNone(plot_render_service.resolve_axis_range((0.0, 10.0), 10.0, 1.0))
+        self.assertIsNone(plot_render_service.resolve_axis_range((0.0, 10.0), 5.0, 5.0))
+
+    def test_apply_channel_style_overrides_updates_label_plot_kind_colour_and_hidden_state(self) -> None:
+        items = [
+            {"channel": "A", "label": "A", "secondary": False},
+            {"channel": "B", "label": "B [Right Y]", "secondary": True},
+        ]
+        styles = {
+            "a": {"channel": "A", "name": "Pump Pressure", "color": "#123456", "plot_kind": "Scatter"},
+            "b": {"channel": "B", "label": "Flow", "hidden": "true", "plot_kind": "Line + Marker"},
+        }
+
+        styled = plot_render_service.apply_channel_style_overrides(items, styles, "Line")
+
+        self.assertEqual(styled[0]["label"], "Pump Pressure")
+        self.assertEqual(styled[0]["colour"], "#123456")
+        self.assertEqual(styled[0]["plot_kind"], "Scatter")
+        self.assertTrue(styled[0]["label_overridden"])
+        self.assertEqual(styled[1]["label"], "Flow [Right Y]")
+        self.assertTrue(styled[1]["hidden"])
+        self.assertEqual(styled[1]["plot_kind"], "Line + Markers")
+
+    def test_apply_channel_style_overrides_uses_default_plot_kind_for_invalid_styles(self) -> None:
+        styled = plot_render_service.apply_channel_style_overrides(
+            [{"channel": "A", "label": "A", "secondary": False}],
+            {"a": {"channel": "A", "plot_kind": "Bars"}},
+            "Line + Markers",
+        )
+
+        self.assertEqual(styled[0]["plot_kind"], "Line + Markers")
+        self.assertFalse(styled[0]["plot_kind_overridden"])
+
     def test_eaton_colours_do_not_import_matplotlib_pyplot(self) -> None:
         script = """
 import sys
@@ -347,6 +523,25 @@ raise SystemExit(1 if "matplotlib.pyplot" in sys.modules else 0)
 """
         completed = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
+    def test_colour_cycle_registry_lists_defaults_and_allows_internal_extensions(self) -> None:
+        self.assertEqual(
+            plot_render_service.available_colour_cycles()[:3],
+            ["eaton", "matplotlib", "colourblind_safe"],
+        )
+        plot_render_service.register_colour_cycle("phase9_test", lambda: ["#111111", "#222222"], replace=True)
+
+        self.assertEqual(plot_render_service.resolve_plot_colours("phase9_test"), ["#111111", "#222222"])
+
+    def test_colour_cycle_registry_rejects_duplicate_names_by_default(self) -> None:
+        with self.assertRaises(ValueError):
+            plot_render_service.register_colour_cycle("eaton", lambda: ["#000000"])
+
+    def test_unknown_or_empty_colour_cycle_falls_back_to_eaton(self) -> None:
+        plot_render_service.register_colour_cycle("phase9_empty", lambda: [], replace=True)
+
+        self.assertEqual(plot_render_service.resolve_plot_colours("missing"), list(EATON_PLOT_COLORS))
+        self.assertEqual(plot_render_service.resolve_plot_colours("phase9_empty"), list(EATON_PLOT_COLORS))
 
     def test_persistent_channel_colours_empty_for_single_plot(self) -> None:
         mapping = plot_render_service.persistent_channel_colour_map(
@@ -430,6 +625,277 @@ class RawDataServiceTests(unittest.TestCase):
             raw_data_service.coerce_raw_edit_value(self.df, "Sig", "not-a-number")
 
 
+class RawDataSortTests(unittest.TestCase):
+    def test_numeric_sort_preserves_original_index(self) -> None:
+        frame = pd.DataFrame({"V": [30.0, 10.0, 20.0]}, index=[2, 5, 8])
+        ascending = raw_data_service.sort_display_frame(frame, "V", True)
+        self.assertEqual(list(ascending["V"]), [10.0, 20.0, 30.0])
+        self.assertEqual(list(ascending.index), [5, 8, 2])
+        descending = raw_data_service.sort_display_frame(frame, "V", False)
+        self.assertEqual(list(descending["V"]), [30.0, 20.0, 10.0])
+
+    def test_text_sort_is_natural(self) -> None:
+        frame = pd.DataFrame({"Ch": ["TC10", "TC2", "TC1"]})
+        result = raw_data_service.sort_display_frame(frame, "Ch", True)
+        self.assertEqual(list(result["Ch"]), ["TC1", "TC2", "TC10"])
+
+    def test_nan_sinks_to_bottom_in_both_directions(self) -> None:
+        frame = pd.DataFrame({"V": [2.0, np.nan, 1.0]})
+        ascending = raw_data_service.sort_display_frame(frame, "V", True)
+        self.assertEqual(list(ascending["V"])[:2], [1.0, 2.0])
+        self.assertTrue(np.isnan(list(ascending["V"])[2]))
+        descending = raw_data_service.sort_display_frame(frame, "V", False)
+        self.assertEqual(list(descending["V"])[:2], [2.0, 1.0])
+        self.assertTrue(np.isnan(list(descending["V"])[2]))
+
+    def test_blank_text_sinks_and_index_preserved(self) -> None:
+        frame = pd.DataFrame({"Ch": ["B", "", "A"]}, index=[10, 11, 12])
+        result = raw_data_service.sort_display_frame(frame, "Ch", True)
+        self.assertEqual(list(result["Ch"]), ["A", "B", ""])
+        self.assertEqual(list(result.index), [12, 10, 11])
+
+    def test_unknown_column_returns_frame_unchanged(self) -> None:
+        frame = pd.DataFrame({"V": [1.0, 2.0]})
+        result = raw_data_service.sort_display_frame(frame, "Missing", True)
+        self.assertTrue(result.equals(frame))
+
+
+class RawDataFilterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.frame = pd.DataFrame(
+            {"V": [1.0, 5.0, 10.0, 50.0], "Name": ["alpha", "Beta", "gamma", "delta"]},
+            index=[100, 101, 102, 103],
+        )
+
+    def test_substring_is_case_insensitive(self) -> None:
+        result = raw_data_service.filter_display_frame(self.frame, {"Name": "ET"})
+        self.assertEqual(list(result["Name"]), ["Beta"])
+
+    def test_greater_than(self) -> None:
+        result = raw_data_service.filter_display_frame(self.frame, {"V": ">5"})
+        self.assertEqual(list(result["V"]), [10.0, 50.0])
+        self.assertEqual(list(result.index), [102, 103])
+
+    def test_less_than_or_equal(self) -> None:
+        result = raw_data_service.filter_display_frame(self.frame, {"V": "<=10"})
+        self.assertEqual(list(result["V"]), [1.0, 5.0, 10.0])
+
+    def test_range_inclusive(self) -> None:
+        result = raw_data_service.filter_display_frame(self.frame, {"V": "5..10"})
+        self.assertEqual(list(result["V"]), [5.0, 10.0])
+
+    def test_equality(self) -> None:
+        result = raw_data_service.filter_display_frame(self.frame, {"V": "=10"})
+        self.assertEqual(list(result["V"]), [10.0])
+
+    def test_blank_filter_is_noop(self) -> None:
+        result = raw_data_service.filter_display_frame(self.frame, {"V": "  "})
+        self.assertEqual(len(result), 4)
+
+
+class ClipboardServiceTests(unittest.TestCase):
+    def test_selection_to_tsv_round_trip(self) -> None:
+        values = [["1", "2"], ["3", "4"]]
+        tsv = clipboard_service.selection_to_tsv(values)
+        self.assertEqual(tsv, "1\t2\n3\t4")
+        self.assertEqual(clipboard_service.tsv_to_values(tsv), values)
+
+    def test_selection_to_tsv_blanks_none_and_nan(self) -> None:
+        tsv = clipboard_service.selection_to_tsv([[1.0, None], [float("nan"), "x"]])
+        self.assertEqual(tsv, "1.0\t\n\tx")
+
+    def test_tsv_to_values_drops_trailing_newline_row(self) -> None:
+        self.assertEqual(clipboard_service.tsv_to_values("a\tb\n"), [["a", "b"]])
+        self.assertEqual(clipboard_service.tsv_to_values("a\tb\r\nc\td"), [["a", "b"], ["c", "d"]])
+        self.assertEqual(clipboard_service.tsv_to_values(""), [])
+
+    def test_infer_column_type(self) -> None:
+        self.assertEqual(clipboard_service.infer_column_type(["1", "2", ""]), "numeric")
+        self.assertEqual(clipboard_service.infer_column_type(["1", "abc"]), "text")
+        self.assertEqual(clipboard_service.infer_column_type(["", ""]), "numeric")
+
+    def test_coerce_pasted_block_numeric_and_text(self) -> None:
+        from test_data_analyser.domain import ColumnSpec
+
+        numeric = ColumnSpec(id="c1", display_name="N", data_type="numeric")
+        text = ColumnSpec(id="c2", display_name="T", data_type="text")
+        values = [["10", "hello"], ["bad", "world"]]
+
+        coerced, warnings = clipboard_service.coerce_pasted_block(values, [numeric, text])
+
+        self.assertEqual(coerced[0][0], 10.0)
+        self.assertEqual(coerced[0][1], "hello")
+        self.assertEqual(coerced[1][0], "bad")
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("numeric column 'N'", warnings[0])
+
+    def test_coerce_pasted_block_keeps_overflow_columns_as_text(self) -> None:
+        from test_data_analyser.domain import ColumnSpec
+
+        numeric = ColumnSpec(id="c1", display_name="N", data_type="numeric")
+        coerced, warnings = clipboard_service.coerce_pasted_block([["1", "extra"]], [numeric])
+
+        self.assertEqual(coerced[0][0], 1.0)
+        self.assertEqual(coerced[0][1], "extra")
+        self.assertEqual(warnings, [])
+
+
+class FindReplaceServiceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.df = pd.DataFrame({"A": [1.5, 2.0, 15.0], "Name": ["alpha", "Alpha", "beta"]})
+
+    def test_find_substring_default_case_insensitive(self) -> None:
+        matches = find_replace_service.find_matches(self.df, "alpha")
+        self.assertEqual(len(matches), 2)
+        self.assertEqual({m.column for m in matches}, {"Name"})
+
+    def test_find_case_sensitive(self) -> None:
+        matches = find_replace_service.find_matches(self.df, "alpha", case_sensitive=True)
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].value, "alpha")
+
+    def test_find_numeric_by_string_representation(self) -> None:
+        matches = find_replace_service.find_matches(self.df, "1.5", columns=["A"])
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].row, 0)
+
+    def test_find_regex(self) -> None:
+        matches = find_replace_service.find_matches(self.df, r"^1", regex=True, columns=["A"])
+        self.assertEqual({m.row for m in matches}, {0, 2})
+
+    def test_find_column_scoping(self) -> None:
+        matches = find_replace_service.find_matches(self.df, "a", columns=["Name"])
+        self.assertTrue(all(m.column == "Name" for m in matches))
+
+    def test_apply_replacements_uses_write_and_collects_warnings(self) -> None:
+        df = self.df.copy()
+        writes: list[tuple] = []
+
+        def write(row, column, new_text):
+            writes.append((row, column, new_text))
+            return OperationResult.success(warnings=["w"] if new_text == "BETA" else None)
+
+        matches = find_replace_service.find_matches(df, "beta")
+        summary = find_replace_service.apply_replacements(df, matches, "BETA", query="beta", write=write)
+
+        self.assertEqual(summary.replaced, 1)
+        self.assertEqual(writes[0][2], "BETA")
+        self.assertEqual(summary.warnings, ["w"])
+
+    def test_invalid_regex_raises(self) -> None:
+        with self.assertRaises(re.error):
+            find_replace_service.find_matches(self.df, "(", regex=True)
+
+
+class FillSeriesServiceTests(unittest.TestCase):
+    def test_constant_fill(self) -> None:
+        pattern = fill_series_service.infer_fill_pattern([5.0, 5.0, 5.0])
+        self.assertEqual(pattern.kind, "constant")
+        self.assertEqual(fill_series_service.generate_fill(pattern, 3), [5.0, 5.0, 5.0])
+
+    def test_linear_fill(self) -> None:
+        pattern = fill_series_service.infer_fill_pattern([1.0, 2.0, 3.0])
+        self.assertEqual(pattern.kind, "linear")
+        self.assertEqual(fill_series_service.generate_fill(pattern, 4), [4.0, 5.0, 6.0, 7.0])
+
+    def test_repeat_fill_for_non_linear(self) -> None:
+        pattern = fill_series_service.infer_fill_pattern([1.0, 4.0, 9.0])
+        self.assertEqual(pattern.kind, "repeat")
+        self.assertEqual(fill_series_service.generate_fill(pattern, 4), [1.0, 4.0, 9.0, 1.0])
+
+    def test_text_values_repeat_verbatim(self) -> None:
+        pattern = fill_series_service.infer_fill_pattern(["a", "b"])
+        self.assertEqual(pattern.kind, "repeat")
+        self.assertEqual(fill_series_service.generate_fill(pattern, 3), ["a", "b", "a"])
+
+    def test_single_value_is_constant(self) -> None:
+        pattern = fill_series_service.infer_fill_pattern([7.0])
+        self.assertEqual(fill_series_service.generate_fill(pattern, 2), [7.0, 7.0])
+
+
+class BatchImportServiceTests(unittest.TestCase):
+    def test_discover_with_glob_and_natural_order(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            for name in ["Run2.csv", "Run10.csv", "notes.txt", "data.xlsx"]:
+                Path(directory, name).write_text("x", encoding="utf-8")
+            found = batch_import_service.discover_data_files(directory, glob="*.csv;*.xlsx")
+            names = [path.name for path in found]
+            self.assertIn("Run2.csv", names)
+            self.assertIn("data.xlsx", names)
+            self.assertNotIn("notes.txt", names)
+            self.assertLess(names.index("Run2.csv"), names.index("Run10.csv"))
+
+    def test_discover_recursive(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            sub = Path(directory, "sub")
+            sub.mkdir()
+            Path(sub, "a.csv").write_text("x", encoding="utf-8")
+            self.assertEqual(batch_import_service.discover_data_files(directory, glob="*.csv"), [])
+            recursive = batch_import_service.discover_data_files(directory, glob="*.csv", recursive=True)
+            self.assertEqual([path.name for path in recursive], ["a.csv"])
+
+    def test_extract_run_name_default_stem(self) -> None:
+        self.assertEqual(batch_import_service.extract_run_name("x/Run_SN13260599.csv"), "Run_SN13260599")
+
+    def test_extract_run_name_regex_group(self) -> None:
+        self.assertEqual(
+            batch_import_service.extract_run_name("Run_SN13260599.csv", regex=r"SN(\d+)"), "13260599"
+        )
+
+    def test_extract_run_name_invalid_regex_falls_back(self) -> None:
+        self.assertEqual(batch_import_service.extract_run_name("Run1.csv", regex="("), "Run1")
+
+
+class LimitTemplatesServiceTests(unittest.TestCase):
+    def test_round_trip_preserves_fields(self) -> None:
+        lines = [
+            {
+                "name": "Upper",
+                "type": "Upper Limit",
+                "applies_to": "Pressure",
+                "color": "#FF0000",
+                "points": [{"x": 0.0, "y": 10.0}, {"x": 5.0, "y": 12.0}],
+            }
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "template.json")
+            limit_templates_service.save_limit_template(path, lines)
+            loaded = limit_templates_service.load_limit_template(path)
+
+        self.assertEqual(len(loaded), 1)
+        self.assertEqual(loaded[0]["name"], "Upper")
+        self.assertEqual(loaded[0]["type"], "Upper Limit")
+        self.assertEqual(loaded[0]["applies_to"], "Pressure")
+        self.assertEqual(loaded[0]["color"], "#FF0000")
+        self.assertEqual(loaded[0]["points"], [{"x": 0.0, "y": 10.0}, {"x": 5.0, "y": 12.0}])
+
+    def test_load_missing_key_returns_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "empty.json")
+            path.write_text("{}", encoding="utf-8")
+            self.assertEqual(limit_templates_service.load_limit_template(path), [])
+
+
+class PeakDetectionServiceTests(unittest.TestCase):
+    def test_finds_sine_peaks(self) -> None:
+        x = np.linspace(0, 4 * np.pi, 400)
+        peaks = peak_detection_service.find_peaks(x, np.sin(x))
+        self.assertEqual(len([peak for peak in peaks if not peak.is_trough]), 2)
+
+    def test_prominence_filters_small_bumps(self) -> None:
+        x = np.arange(7, dtype=float)
+        y = np.array([0, 5, 0, 1, 0, 5, 0], dtype=float)
+        self.assertEqual(len(peak_detection_service.find_peaks(x, y, prominence=0.5)), 3)
+        self.assertEqual(len(peak_detection_service.find_peaks(x, y, prominence=2.0)), 2)
+
+    def test_troughs_flag(self) -> None:
+        x = np.linspace(0, 2 * np.pi, 200)
+        peaks = peak_detection_service.find_peaks(x, np.sin(x), find_troughs=True)
+        self.assertTrue(any(peak.is_trough for peak in peaks))
+
+
+
+
 class RunComparisonServiceTests(unittest.TestCase):
     def _runs(self) -> list[dict]:
         return [
@@ -484,6 +950,96 @@ class OperationResultTests(unittest.TestCase):
         bad = OperationResult.failure("nope")
         self.assertFalse(bad.ok)
         self.assertEqual(bad.errors, ["nope"])
+
+    def test_payload_dict_adapts_legacy_dict_payloads(self) -> None:
+        self.assertEqual(payload_dict(OperationResult.success(payload={"df": "frame"})), {"df": "frame"})
+        self.assertEqual(payload_dict(OperationResult.success(payload="not-a-dict")), {})
+
+
+class SessionServiceTests(unittest.TestCase):
+    def _base_parts(self) -> dict[str, object]:
+        return {
+            "version": "test",
+            "root_file_directory": "",
+            "file_path": "source.csv",
+            "sheet_name": "",
+            "runs": [],
+            "comparison": {},
+            "active_plot_profile_index": 0,
+            "plot_profiles": [{"name": "Plot 1"}],
+            "calculated_channels": {},
+        }
+
+    def test_validate_session_for_write_rejects_missing_required_new_write_fields(self) -> None:
+        validation = session_service.validate_session_for_write(SessionState.from_dict({}))
+
+        self.assertFalse(validation.ok)
+        self.assertIn("Session version is required.", validation.errors)
+        self.assertIn("At least one plot profile is required.", validation.errors)
+
+    def test_build_session_dict_rejects_invalid_new_write_payload(self) -> None:
+        parts = self._base_parts()
+        parts["version"] = ""
+
+        with self.assertRaises(ValueError):
+            session_service.build_session_dict(**parts)
+
+    def test_build_runtime_session_dict_embeds_manual_rows_and_normalises_channels(self) -> None:
+        df = pd.DataFrame({"Time": [0.0, 1.0], "Pressure": [10.0, 11.0]})
+        registry = dataset_service.build_registry_for_dataframe(df)
+
+        session = session_service.build_runtime_session_dict(
+            version="test",
+            root_file_directory="",
+            file_path="",
+            sheet_name="",
+            runs=[],
+            comparison={},
+            active_plot_profile_index=0,
+            plot_profiles=[{"name": "Plot 1"}],
+            calculated_channels={"Sum": {"formula": "Time + Pressure"}, "Broken": {"name": "Broken"}},
+            data_source_type=SOURCE_MANUAL,
+            channel_registry=registry,
+            df=df,
+        )
+
+        self.assertEqual(session["data_source_type"], SOURCE_MANUAL)
+        self.assertEqual(len(session["dataset_rows"]), 2)
+        self.assertIn("Sum", session["calculated_channels"])
+        self.assertNotIn("Broken", session["calculated_channels"])
+
+
+class DataIoTests(unittest.TestCase):
+    def test_xlsx_fast_path_preserves_single_row_headers_and_numeric_dtypes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "single-header.xlsx"
+            with pd.ExcelWriter(path, engine="openpyxl") as writer:
+                pd.DataFrame({"Time": [0.0, 1.0], "Pressure": [10.0, 11.0]}).to_excel(
+                    writer, sheet_name="Data", index=False
+                )
+
+            loaded = data_io.load_data(path, "Data")
+
+        self.assertEqual(list(loaded.columns), ["Time", "Pressure"])
+        self.assertTrue(pd.api.types.is_numeric_dtype(loaded["Time"]))
+        self.assertTrue(pd.api.types.is_numeric_dtype(loaded["Pressure"]))
+
+    def test_xlsx_fast_path_preserves_grouped_headers(self) -> None:
+        rows = [
+            ["Run 1", "Run 1"],
+            ["Time", "Pressure"],
+            [0.0, 10.0],
+            [1.0, 11.0],
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "grouped-header.xlsx"
+            with pd.ExcelWriter(path, engine="openpyxl") as writer:
+                pd.DataFrame(rows).to_excel(writer, sheet_name="Data", index=False, header=False)
+
+            loaded = data_io.load_data(path, "Data")
+
+        self.assertEqual(list(loaded.columns), ["Run 1 - Time", "Run 1 - Pressure"])
+        self.assertEqual(list(loaded["Run 1 - Pressure"]), [10.0, 11.0])
 
 
 class DatasetServiceTests(unittest.TestCase):
@@ -578,6 +1134,81 @@ class DatasetServiceTests(unittest.TestCase):
         self.assertIsNone(rows[1][registry.id_for_name("A")])
         rebuilt = dataset_service.dataframe_from_rows(registry, rows)
         self.assertTrue(np.isnan(rebuilt.at[1, "A"]))
+
+
+class ColumnReferenceServiceTests(unittest.TestCase):
+    def test_rename_updates_profiles_limits_and_maths_references(self) -> None:
+        key = plot_render_service.normalise_channel_name("Pressure")
+        profiles = [
+            {
+                "name": "Plot 1",
+                "x_column": "Pressure",
+                "y_columns": ["Pressure"],
+                "secondary_y_columns": ["Flow"],
+                "best_fit_lines": [{"channel": "Pressure", "fit_type": "Linear", "order": 1}],
+                "legend": {"channel_overrides": {key: {"channel": "Pressure", "colour": "#111111"}}},
+                "limit_lines": [{"name": "L", "applies_to": "Pressure", "points": []}],
+            }
+        ]
+        calculated_channels = {
+            "Doubled": {
+                "formula": "`Pressure` * 2",
+                "created_from_columns": ["Pressure", "Flow"],
+            }
+        }
+        limit_lines = [{"name": "Top", "applies_to": "Pressure", "points": []}]
+
+        update = column_reference_service.propagate_column_rename(
+            current_x_axis="Pressure",
+            plot_profiles=profiles,
+            calculated_channels=calculated_channels,
+            limit_lines=limit_lines,
+            old_name="Pressure",
+            new_name="Outlet Pressure",
+        )
+
+        self.assertEqual(update.current_x_axis, "Outlet Pressure")
+        self.assertEqual(profiles[0]["x_column"], "Outlet Pressure")
+        self.assertEqual(profiles[0]["y_columns"], ["Outlet Pressure"])
+        self.assertEqual(profiles[0]["best_fit_lines"][0]["channel"], "Outlet Pressure")
+        self.assertEqual(profiles[0]["limit_lines"][0]["applies_to"], "Outlet Pressure")
+        new_key = plot_render_service.normalise_channel_name("Outlet Pressure")
+        self.assertEqual(profiles[0]["legend"]["channel_overrides"][new_key]["channel"], "Outlet Pressure")
+        self.assertEqual(limit_lines[0]["applies_to"], "Outlet Pressure")
+        self.assertEqual(calculated_channels["Doubled"]["formula"], "`Outlet Pressure` * 2")
+        self.assertEqual(calculated_channels["Doubled"]["created_from_columns"], ["Outlet Pressure", "Flow"])
+
+    def test_delete_removes_plot_references_and_returns_warnings(self) -> None:
+        key = plot_render_service.normalise_channel_name("Pressure")
+        profiles = [
+            {
+                "name": "Plot 1",
+                "x_column": "Pressure",
+                "y_columns": ["Pressure", "Flow"],
+                "secondary_y_columns": ["Pressure"],
+                "best_fit_lines": [{"channel": "Pressure", "fit_type": "Linear", "order": 1}],
+                "legend": {"channel_overrides": {key: {"channel": "Pressure", "colour": "#111111"}}},
+            }
+        ]
+        calculated_channels = {
+            "Doubled": {"formula": "`Pressure` * 2", "created_from_columns": ["Pressure"]}
+        }
+
+        update = column_reference_service.propagate_column_delete(
+            current_x_axis="Pressure",
+            plot_profiles=profiles,
+            calculated_channels=calculated_channels,
+            name="Pressure",
+        )
+
+        self.assertEqual(update.current_x_axis, "")
+        self.assertEqual(profiles[0]["x_column"], "")
+        self.assertEqual(profiles[0]["y_columns"], ["Flow"])
+        self.assertEqual(profiles[0]["secondary_y_columns"], [])
+        self.assertEqual(profiles[0]["best_fit_lines"], [])
+        self.assertEqual(profiles[0]["legend"]["channel_overrides"], {})
+        self.assertTrue(any("Plot 1" in warning for warning in update.warnings))
+        self.assertTrue(any("Doubled" in warning for warning in update.warnings))
 
 
 class MathsChannelFormulaRenameTests(unittest.TestCase):

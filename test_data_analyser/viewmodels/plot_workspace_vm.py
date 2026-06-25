@@ -14,9 +14,9 @@ import pandas as pd
 
 from ..core.data_io import numeric_series
 from ..domain import PlotData
-from ..services import plotting_data_service, statistics_service
+from ..services import peak_detection_service, plotting_data_service, statistics_service
 from ..services.results import OperationResult
-from ..core.utils import _matching_x_column_for_y
+from ..core.column_matching import matching_x_column_for_y
 from .app_state import AppState
 
 
@@ -28,6 +28,46 @@ class PlotWorkspaceViewModel:
         if self.state.df is None or column not in self.state.df.columns:
             return pd.Series(dtype=float)
         return numeric_series(self.state.df[column])
+
+    def detect_peaks(
+        self,
+        channel: str,
+        *,
+        x_col: Optional[str] = None,
+        prominence: Optional[float] = None,
+        distance: Optional[float] = None,
+        find_troughs: bool = False,
+    ) -> OperationResult:
+        """Detect peaks (and optionally troughs) for ``channel``.
+
+        Payload is ``{"points": [(x, y), ...], "annotations": [text-annotation
+        dicts]}`` so the caller can both inspect the peaks and drop them straight
+        into the plot-profile annotation list. Fails gracefully when SciPy is
+        unavailable.
+        """
+        if self.state.df is None:
+            return OperationResult.failure("Please load a data file first.")
+        if channel not in self.state.df.columns:
+            return OperationResult.failure(f"Channel '{channel}' is not available.")
+        column_x = x_col or self.state.current_x_axis
+        y_series = self._numeric(channel)
+        x_series = self._numeric(column_x) if column_x and column_x in self.state.df.columns else None
+        try:
+            peaks = peak_detection_service.find_peaks(
+                x_series, y_series, prominence=prominence, distance=distance, find_troughs=find_troughs
+            )
+        except RuntimeError as exc:
+            return OperationResult.failure(str(exc))
+        points = [(peak.x, peak.y) for peak in peaks]
+        annotations = [
+            {"type": "text", "axis": "primary", "x": peak.x, "y": peak.y, "text": f"{peak.y:.3g}"}
+            for peak in peaks
+        ]
+        kind = "peak/trough" if find_troughs else "peak"
+        return OperationResult.success(
+            f"Found {len(points)} {kind}(s) on '{channel}'.",
+            payload={"points": points, "annotations": annotations},
+        )
 
     def prepare_plot_data(
         self,
@@ -50,7 +90,7 @@ class PlotWorkspaceViewModel:
         x = self._numeric(x_col)
         y_map = {col: self._numeric(col) for col in y_cols}
         x_map = {
-            col: self._numeric(_matching_x_column_for_y(x_col, col, self.state.df.columns))
+            col: self._numeric(matching_x_column_for_y(x_col, col, self.state.df.columns))
             for col in y_cols
         }
         return plotting_data_service.apply_analysis_window(x, y_map, x_map, xmin, xmax)

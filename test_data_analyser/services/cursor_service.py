@@ -10,7 +10,7 @@ from typing import Any, Optional
 
 import pandas as pd
 
-from ..core.utils import natural_sort_key
+from ..core.naming import natural_sort_key
 
 
 def nearest_point(
