@@ -33,6 +33,30 @@ def confirm(parent: QWidget | None, title: str, message: str) -> bool:
     return reply == QMessageBox.Yes
 
 
+def confirm_unsaved_changes(parent: QWidget | None, title: str, message: str) -> str:
+    """Prompt to Save / Don't Save / Cancel for unsaved changes.
+
+    Returns ``"save"``, ``"discard"``, or ``"cancel"``.
+    """
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Icon.Warning)
+    box.setWindowTitle(title)
+    box.setText(message)
+    box.setStandardButtons(
+        QMessageBox.StandardButton.Save
+        | QMessageBox.StandardButton.Discard
+        | QMessageBox.StandardButton.Cancel
+    )
+    box.setDefaultButton(QMessageBox.StandardButton.Save)
+    box.button(QMessageBox.StandardButton.Discard).setText("Don't Save")
+    reply = box.exec()
+    if reply == QMessageBox.StandardButton.Save:
+        return "save"
+    if reply == QMessageBox.StandardButton.Discard:
+        return "discard"
+    return "cancel"
+
+
 def show_result(parent: QWidget | None, title: str, result) -> None:
     """Display an :class:`OperationResult` as an info or error dialog."""
     if getattr(result, "ok", False):

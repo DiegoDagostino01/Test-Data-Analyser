@@ -662,10 +662,10 @@ class MainWindow(QMainWindow):
     def _capture_current_plot_profile(self) -> None:
         self.vm.ensure_plot_profiles()
         profile = self.vm.state.active_plot_profile() or {}
-        if self._plot_display_frozen:
-            self._capture_preserved_plot_profile(profile)
-            return
         appearance = self.plot_workspace.current_axis_appearance() if self._plot_generated else {}
+        if self._plot_display_frozen:
+            self._capture_preserved_plot_profile(profile, appearance)
+            return
         if not appearance:
             appearance = self._stored_profile_appearance(profile)
         self._capture_working_state(
@@ -683,8 +683,9 @@ class MainWindow(QMainWindow):
             generated=self._plot_generated,
         )
 
-    def _capture_preserved_plot_profile(self, profile: dict) -> None:
-        appearance = self._stored_profile_appearance(profile)
+    def _capture_preserved_plot_profile(self, profile: dict, appearance: dict | None = None) -> None:
+        if not appearance:
+            appearance = self._stored_profile_appearance(profile)
         self._capture_working_state(
             profile,
             appearance,
@@ -965,11 +966,16 @@ class MainWindow(QMainWindow):
         self._help_dialog.raise_()
         self._help_dialog.activateWindow()
 
-    def save_session(self) -> None:
+    def save_session(self) -> bool:
+        """Save the current session, returning ``True`` only when a file was written.
+
+        Returns ``False`` when the user cancels the file dialog or the save fails,
+        so callers such as the close handler can keep the app open.
+        """
         initial_dir = self._save_session_initial_path()
         path = qt_file_dialogs.save_session_file(self, initial_dir)
         if not path:
-            return
+            return False
         qt_widget_helpers.remember_session_directory(self.settings_manager, path)
         self._capture_current_plot_profile()
         result = self.vm.save_session(path)
@@ -978,6 +984,7 @@ class MainWindow(QMainWindow):
             self.vm.register_recent_session(self._current_session_path)
         qt_message_service.show_result(self, "Save Session", result)
         self.statusBar().showMessage(result.message)
+        return bool(result.ok)
 
     def _save_session_initial_path(self) -> str:
         if self._current_session_path:
@@ -986,6 +993,37 @@ class MainWindow(QMainWindow):
             self.settings_manager,
             self.vm.state.filepath,
         )
+
+    def _has_unsaved_changes(self) -> bool:
+        return bool(self.vm.state.has_data and self.vm.state.is_dirty)
+
+    def closeEvent(self, event) -> None:
+        """Warn about unsaved changes before closing.
+
+        Offers Save / Don't Save / Cancel when there are changes since the last
+        save. Save keeps the app open if the save is cancelled or fails; Cancel
+        aborts the close; Don't Save closes without saving.
+        """
+        # Fold any pending panel/Figure Options edits into the active profile so
+        # changes made without regenerating are detected as unsaved.
+        if self.vm.state.has_data:
+            self._capture_current_plot_profile()
+        if not self._has_unsaved_changes():
+            event.accept()
+            return
+        choice = qt_message_service.confirm_unsaved_changes(
+            self,
+            "Unsaved Changes",
+            "You have unsaved changes since your last save.\n\n"
+            "Do you want to save them before closing?",
+        )
+        if choice == "cancel":
+            event.ignore()
+            return
+        if choice == "save" and not self.save_session():
+            event.ignore()
+            return
+        event.accept()
 
     def load_session(self) -> None:
         initial_dir = qt_widget_helpers.last_session_directory(self.settings_manager)
@@ -1147,7 +1185,7 @@ class MainWindow(QMainWindow):
             return
         target = self.vm.auto_save_target_path(self._current_session_path)
         self._capture_current_plot_profile()
-        result = self.vm.save_session(target)
+        result = self.vm.save_session(target, mark_clean=False)
         self._last_autosave_epoch = time.time()
         if result.ok:
             self.statusBar().showMessage(f"Auto-saved at {time.strftime('%H:%M:%S')}")

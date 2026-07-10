@@ -159,7 +159,9 @@ class RawDataViewModel:
         if pd.api.types.is_integer_dtype(df[column_name]) and pd.isna(value):
             df[column_name] = df[column_name].astype(float)
         df.at[df_index, column_name] = value
+        self.state.invalidate_numeric_cache(column_name)
         self._undo_stack.append(("cell", df_index, column_name, old_value))
+        self._controller.mark_dirty()
         return OperationResult.success("Cell updated.", payload=old_value)
 
     def undo_last_edit(self) -> OperationResult:
@@ -177,6 +179,7 @@ class RawDataViewModel:
         if pd.api.types.is_integer_dtype(df[column_name]) and pd.isna(old_value):
             df[column_name] = df[column_name].astype(float)
         df.at[df_index, column_name] = old_value
+        self.state.invalidate_numeric_cache(column_name)
         return OperationResult.success(f"Reverted the last edit to '{column_name}'.", payload=(df_index, column_name))
 
     # ------------------------------------------------------------------

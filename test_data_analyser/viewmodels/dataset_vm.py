@@ -102,6 +102,19 @@ class DatasetViewModel:
                 self._push_undo(undo)
         return result
 
+    def move_column(self, channel_id: str, to_index: int) -> OperationResult:
+        spec = self.state.channel_registry.spec_for_id(channel_id)
+        if spec is None:
+            return OperationResult.failure("Column not found.")
+        undo = self._capture_undo("move column")
+        result = dataset_service.move_column(self.state.df, self.state.channel_registry, channel_id, to_index)
+        payload = payload_dict(result)
+        if result.ok and payload:
+            self._state_controller.apply_dataframe_payload(payload)
+            self._state_controller.mark_dirty()
+            self._push_undo(undo)
+        return result
+
     def delete_columns(self, channel_ids: Iterable[str]) -> OperationResult:
         unique_ids = list(dict.fromkeys(str(channel_id) for channel_id in channel_ids))
         specs = [self.state.channel_registry.spec_for_id(channel_id) for channel_id in unique_ids]

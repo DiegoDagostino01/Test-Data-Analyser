@@ -187,6 +187,8 @@ class MainWindowViewModel:
             x_column=self._current_x_axis_or_default(),
         )
         self._apply_plot_profile_update(update)
+        if update.result.ok:
+            self._state_controller.mark_dirty()
         return update.result
 
     def duplicate_plot_profile(self, index: int | None = None) -> OperationResult:
@@ -196,6 +198,8 @@ class MainWindowViewModel:
             index=index,
         )
         self._apply_plot_profile_update(update)
+        if update.result.ok:
+            self._state_controller.mark_dirty()
         return update.result
 
     def rename_plot_profile(self, index: int, name: str) -> OperationResult:
@@ -206,6 +210,8 @@ class MainWindowViewModel:
             name,
         )
         self._apply_plot_profile_update(update)
+        if update.result.ok:
+            self._state_controller.mark_dirty()
         return update.result
 
     def delete_plot_profile(self, index: int | None = None) -> OperationResult:
@@ -215,6 +221,8 @@ class MainWindowViewModel:
             index=index,
         )
         self._apply_plot_profile_update(update)
+        if update.result.ok:
+            self._state_controller.mark_dirty()
         return update.result
 
     def select_plot_profile(self, index: int) -> OperationResult:
@@ -247,6 +255,7 @@ class MainWindowViewModel:
         elif to_index <= active < from_index:
             active += 1
         self.state.active_plot_profile_index = clamp_index(active, len(profiles))
+        self._state_controller.mark_dirty()
         return OperationResult.success("Reordered plots.")
 
     def reset_active_axis_appearance(self) -> OperationResult:
@@ -271,6 +280,7 @@ class MainWindowViewModel:
         ):
             profile.pop(key, None)
         self.state.plot_profiles[index] = normalise_plot_profile(profile)
+        self._state_controller.mark_dirty()
         return OperationResult.success("Reset axis title, labels, limits, and ticks.")
 
     def set_current_x_axis(self, x_column: str) -> str:
@@ -329,12 +339,15 @@ class MainWindowViewModel:
     def update_active_legend_channel_override(self, channel: str, style: dict[str, Any]) -> OperationResult:
         """Store a legend-row style override for the active profile."""
         self.ensure_plot_profiles()
-        return plot_profile_service.update_legend_channel_override(
+        result = plot_profile_service.update_legend_channel_override(
             self.state.plot_profiles,
             self.state.active_plot_profile_index,
             channel,
             style,
         )
+        if result.ok:
+            self._state_controller.mark_dirty()
+        return result
 
     def _legend_channel_colour_overrides(self) -> dict[str, str]:
         self.ensure_plot_profiles()
@@ -509,13 +522,14 @@ class MainWindowViewModel:
             df=self.state.df,
         )
 
-    def save_session(self, path: str | Path) -> OperationResult:
+    def save_session(self, path: str | Path, *, mark_clean: bool = True) -> OperationResult:
         try:
             session = self.build_session()
             saved_path = session_service.save_session_dict(path, session)
         except Exception as exc:
             return OperationResult.failure(f"Could not save the analysis session: {exc}")
-        self.state.is_dirty = False
+        if mark_clean:
+            self.state.is_dirty = False
         return OperationResult.success(f"Session saved successfully:\n{saved_path}", payload=str(saved_path))
 
     def load_session(self, path: str | Path) -> OperationResult:
@@ -607,6 +621,8 @@ class MainWindowViewModel:
             limit_lines=self.state.limit_lines,
             engineering_notes=self.state.engineering_notes,
         )
+        if profile != self.state.plot_profiles[index]:
+            self._state_controller.mark_dirty()
         self._state_controller.set_active_plot_profile(index, profile)
 
     def restore_session(

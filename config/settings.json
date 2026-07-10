@@ -46,7 +46,7 @@
     "header_row_index": 0,
     "skip_rows": 0,
     "decimal_separator": ".",
-    "last_data_directory": "\\\\GBTITSPFS01\\Projects\\777X\\27_Qualification\\Components\\39-0097-1100 OJ Pump\\10 - Qual Tests\\6.10 Locked Rotor\\Data"
+    "last_data_directory": "C:\\Users\\E0764939\\OneDrive - Eaton\\Work\\Projects\\Project Equator"
   },
   "export": {
     "default_image_format": "png",
@@ -73,7 +73,7 @@
     "auto_save_interval_minutes": 5,
     "confirm_before_delete": true,
     "show_tooltips": true,
-    "last_session_directory": "C:\\Users\\E0764939\\OneDrive - Eaton\\Work\\Projects\\Jufeng Supplier Change\\Dassault"
+    "last_session_directory": "C:\\Users\\E0764939\\OneDrive - Eaton\\Work\\Projects\\Project Equator\\Data Analysis"
   },
   "engineering_analysis": {
     "default_statistics_columns": [
@@ -89,8 +89,15 @@
     "significant_figures_maths": 6
   },
   "recent": {
-    "recent_files": [],
+    "recent_files": [
+      "C:\\Users\\E0764939\\OneDrive - Eaton\\Work\\Projects\\Project Equator\\568-1-29115 - Qualification Data.xlsx",
+      "C:\\Users\\E0764939\\OneDrive - Eaton\\Work\\Projects\\Project Equator\\Aerospace_Test_Comparison_Workbook.xlsx",
+      "\\\\gbtitspfs01\\CH53K\\000_1s Actuator\\14_Development\\06 - Development Testing\\53-0085-5DTP\\7.5 - Operation Time\\Data\\50Deg C Test\\16VDC - 50Deg C - 25lbf.in\\CH53K - Operational Time - POS 1 (TE) to POS 2 (TE) - 16VDC - 50Deg C - 25 lbf.csv"
+    ],
     "recent_sessions": [
+      "C:\\Users\\E0764939\\OneDrive - Eaton\\Work\\Projects\\Project Equator\\Data Analysis\\568-1-29117 & 568-1-29115 - Correlation Data.json",
+      "C:\\Users\\E0764939\\OneDrive - Eaton\\Work\\Projects\\Project Equator\\Data Analysis\\568-1-29115 - Qualification Data.json",
+      "C:\\Users\\E0764939\\OneDrive - Eaton\\Work\\Projects\\Project Equator\\Data Analysis\\568-1-29117 Correlation Data.json",
       "C:\\Users\\E0764939\\OneDrive - Eaton\\Work\\Projects\\Jufeng Supplier Change\\Dassault\\PAT Data Comparison - PTU-1.json"
     ]
   }

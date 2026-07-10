@@ -587,12 +587,11 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
         return "Selected Signals"
 
     def _auto_fit_limits(self, axes, axis_name: str) -> tuple[float, float]:
-        values = self._finite_axis_values(axes, axis_name)
-        if not values:
+        bounds = self._finite_axis_bounds(axes, axis_name)
+        if bounds is None:
             current_lower, current_upper = getattr(axes, f"get_{axis_name}lim")()
             return float(current_lower), float(current_upper)
-        lower = min(values)
-        upper = max(values)
+        lower, upper = bounds
         span = upper - lower
         fraction = self._axis_padding_fraction(axis_name)
         if span <= 0:
@@ -603,11 +602,21 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
         return lower - padding, upper + padding
 
     @staticmethod
-    def _finite_axis_values(axes, axis_name: str) -> list[float]:
-        values: list[float] = []
+    def _finite_axis_bounds(axes, axis_name: str) -> tuple[float, float] | None:
+        """Return the ``(min, max)`` of finite plotted values for the axis.
+
+        Uses vectorised NumPy reductions per artist instead of materialising every
+        plotted point into a Python list, so auto-fit stays responsive on
+        multi-million-point plots. Returns ``None`` when no finite values exist.
+        """
+        lower = float("inf")
+        upper = float("-inf")
         for line in axes.get_lines():
             data = line.get_xdata(orig=False) if axis_name == "x" else line.get_ydata(orig=False)
-            values.extend(LegendAwareNavigationToolbar._finite_values(data))
+            bounds = LegendAwareNavigationToolbar._array_finite_bounds(data)
+            if bounds is not None:
+                lower = min(lower, bounds[0])
+                upper = max(upper, bounds[1])
         for collection in axes.collections:
             offsets_getter = getattr(collection, "get_offsets", None)
             if not callable(offsets_getter):
@@ -617,16 +626,27 @@ class LegendAwareNavigationToolbar(NavigationToolbar2QT):
             if offset_array.size == 0:
                 continue
             column = 0 if axis_name == "x" else 1
-            values.extend(LegendAwareNavigationToolbar._finite_values(offset_array[:, column]))
-        return values
+            bounds = LegendAwareNavigationToolbar._array_finite_bounds(offset_array[:, column])
+            if bounds is not None:
+                lower = min(lower, bounds[0])
+                upper = max(upper, bounds[1])
+        if lower == float("inf") or upper == float("-inf"):
+            return None
+        return lower, upper
 
     @staticmethod
-    def _finite_values(values) -> list[float]:
+    def _array_finite_bounds(values) -> tuple[float, float] | None:
+        """Return the finite ``(min, max)`` of ``values`` using NumPy, or ``None``."""
         try:
             array = np.asarray(values, dtype=float).ravel()
         except (TypeError, ValueError):
-            return []
-        return [float(value) for value in array if np.isfinite(value)]
+            return None
+        if array.size == 0:
+            return None
+        finite = array[np.isfinite(array)]
+        if finite.size == 0:
+            return None
+        return float(finite.min()), float(finite.max())
 
     def _axis_padding_fraction(self, axis_name: str) -> float:
         settings = self._axis_padding_getter() if self._axis_padding_getter is not None else {}

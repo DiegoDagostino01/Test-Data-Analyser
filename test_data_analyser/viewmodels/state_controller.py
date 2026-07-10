@@ -50,11 +50,13 @@ class AppStateController:
         self.state.calculated_channels = deepcopy(snapshot.calculated_channels)
         self.state.limit_lines = deepcopy(snapshot.limit_lines)
         self.state.is_dirty = snapshot.is_dirty
+        self.state.invalidate_numeric_cache()
 
     def apply_dataframe_payload(self, payload: dict[str, object]) -> bool:
         if "df" not in payload:
             return False
         self.state.df = payload.get("df")  # type: ignore[assignment]
+        self.state.invalidate_numeric_cache()
         return True
 
     def set_plot_profiles(self, profiles: list[dict[str, Any]], active_index: int) -> None:

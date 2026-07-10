@@ -1042,6 +1042,52 @@ class DataIoTests(unittest.TestCase):
         self.assertEqual(list(loaded["Run 1 - Pressure"]), [10.0, 11.0])
 
 
+class CsvLoadingTests(unittest.TestCase):
+    """Fast CSV loading: delimiter sniffing and numeric data-start detection."""
+
+    def _write(self, tmp: str, name: str, text: str) -> Path:
+        path = Path(tmp) / name
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_units_row_skipped_so_columns_load_numeric(self) -> None:
+        # Header + a units row + a blank separator, like a PicoScope export. The
+        # units row must not poison the numeric dtype or appear as data.
+        text = "Time,Channel A,Channel B\n(ms),(A),(V)\n\n0.0,1.0,15.0\n1.0,2.0,16.0\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            loaded = data_io.load_data(self._write(tmp, "scope.csv", text))
+        self.assertEqual(list(loaded.columns), ["Time", "Channel A", "Channel B"])
+        self.assertTrue(pd.api.types.is_numeric_dtype(loaded["Time"]))
+        self.assertTrue(pd.api.types.is_numeric_dtype(loaded["Channel A"]))
+        self.assertEqual(list(loaded["Channel A"]), [1.0, 2.0])
+        self.assertEqual(len(loaded), 2)
+
+    def test_plain_numeric_csv_is_unchanged(self) -> None:
+        text = "Time,Sig\n0,10\n1,20\n2,30\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            loaded = data_io.load_data(self._write(tmp, "plain.csv", text))
+        self.assertEqual(list(loaded.columns), ["Time", "Sig"])
+        self.assertEqual(list(loaded["Sig"]), [10, 20, 30])
+        self.assertEqual(len(loaded), 3)
+
+    def test_semicolon_delimiter_is_auto_sniffed(self) -> None:
+        text = "Time;Sig\n0;10\n1;20\n2;30\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            loaded = data_io.load_data(self._write(tmp, "euro.csv", text))
+        self.assertEqual(list(loaded.columns), ["Time", "Sig"])
+        self.assertTrue(pd.api.types.is_numeric_dtype(loaded["Sig"]))
+        self.assertEqual(len(loaded), 3)
+
+    def test_text_only_table_is_not_truncated(self) -> None:
+        # No row has >=2 numeric cells, so nothing is treated as a units row.
+        text = "Name,Status\nPump,OK\nValve,FAIL\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            loaded = data_io.load_data(self._write(tmp, "text.csv", text))
+        self.assertEqual(list(loaded.columns), ["Name", "Status"])
+        self.assertEqual(list(loaded["Name"]), ["Pump", "Valve"])
+        self.assertEqual(len(loaded), 2)
+
+
 class DatasetServiceTests(unittest.TestCase):
     def _dataset(self):
         df = pd.DataFrame({"Time": [0.0, 1.0, 2.0], "Pressure": [10.0, 11.0, 12.0]})
@@ -1098,6 +1144,17 @@ class DatasetServiceTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertNotIn("Pressure", df.columns)
         self.assertIsNone(registry.spec_for_id(channel_id))
+
+    def test_move_column_reorders_df_and_registry(self) -> None:
+        df, registry = self._dataset()
+        channel_id = registry.id_for_name("Pressure")
+        result = dataset_service.move_column(df, registry, channel_id, 0)
+        self.assertTrue(result.ok)
+        self.assertEqual(list(result.payload["df"].columns), ["Pressure", "Time"])
+        self.assertEqual(registry.display_names(), ["Pressure", "Time"])
+        unchanged = dataset_service.move_column(df, registry, channel_id, 0)
+        self.assertTrue(unchanged.ok)
+        self.assertEqual(registry.display_names(), ["Pressure", "Time"])
 
     def test_add_and_delete_rows(self) -> None:
         df, _ = self._dataset()

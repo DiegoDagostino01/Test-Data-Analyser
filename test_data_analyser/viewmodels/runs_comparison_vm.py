@@ -83,6 +83,7 @@ class RunsComparisonViewModel:
         index = len(self.state.runs) - 1
         if self.state.active_run_index < 0:
             self.state.active_run_index = index
+        self.state.is_dirty = True
         return OperationResult.success(f"Added {run['name']}.", payload=index)
 
     def add_runs_from_folder(
@@ -138,6 +139,7 @@ class RunsComparisonViewModel:
         index = len(self.state.runs) - 1
         if self.state.active_run_index < 0:
             self.state.active_run_index = index
+        self.state.is_dirty = True
         return OperationResult.success(f"Added {run['name']}.", payload=index)
 
     def remove_run(self, index: int) -> OperationResult:
@@ -148,6 +150,7 @@ class RunsComparisonViewModel:
             self.state.active_run_index = min(index, len(self.state.runs) - 1)
         elif index < self.state.active_run_index:
             self.state.active_run_index -= 1
+        self.state.is_dirty = True
         return OperationResult.success(f"Removed '{removed.get('name', 'Run')}'.")
 
     def duplicate_run(self, index: int) -> OperationResult:
@@ -163,6 +166,7 @@ class RunsComparisonViewModel:
             enabled=bool(source.get("enabled", True)),
         )
         self.state.runs.append(duplicate)
+        self.state.is_dirty = True
         return OperationResult.success(f"Duplicated '{source.get('name', 'Run')}'.", payload=len(self.state.runs) - 1)
 
     def rename_run(self, index: int, new_name: str) -> OperationResult:
@@ -172,12 +176,14 @@ class RunsComparisonViewModel:
         if not name:
             return OperationResult.failure("Please enter a run name.")
         self.state.runs[index]["name"] = name
+        self.state.is_dirty = True
         return OperationResult.success(f"Renamed to '{name}'.")
 
     def set_active(self, index: int) -> OperationResult:
         if not (0 <= index < len(self.state.runs)):
             return OperationResult.failure("Select a run to make active.")
         self.state.active_run_index = index
+        self.state.is_dirty = True
         return OperationResult.success(f"'{self.state.runs[index].get('name', 'Run')}' is now the active run.")
 
     def toggle_enabled(self, index: int) -> OperationResult:
@@ -186,6 +192,7 @@ class RunsComparisonViewModel:
         run = self.state.runs[index]
         run["enabled"] = not bool(run.get("enabled", True))
         state = "enabled" if run["enabled"] else "disabled"
+        self.state.is_dirty = True
         return OperationResult.success(f"'{run.get('name', 'Run')}' {state}.")
 
     def run_rows(self) -> list[dict[str, Any]]:
@@ -218,6 +225,7 @@ class RunsComparisonViewModel:
     def set_setting(self, name: str, value: bool) -> None:
         if hasattr(self.state.comparison, name):
             setattr(self.state.comparison, name, bool(value))
+            self.state.is_dirty = True
 
     # ------------------------------------------------------------------
     # Comparison data

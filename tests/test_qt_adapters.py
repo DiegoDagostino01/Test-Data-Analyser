@@ -207,6 +207,86 @@ class EditableDatasetModelTests(unittest.TestCase):
         self.assertFalse(model.flags(model.index(0, add_column)) & Qt.ItemFlag.ItemIsSelectable)
         self.assertFalse(model.setData(model.index(add_row, 0), "99", Qt.ItemDataRole.EditRole))
 
+    def test_small_dataset_is_fully_editable(self) -> None:
+        model, state = self._model()
+        self.assertFalse(model.is_row_capped())
+        self.assertEqual(model.data_row_count(), len(state.df))
+        self.assertEqual(model.total_data_row_count(), len(state.df))
+        self.assertEqual(model.window_start(), 0)
+
+    def _windowed_model(self, total: int, window: int):
+        import test_data_analyser.qt_app.adapters.editable_dataset_model as edm
+
+        df = pd.DataFrame({"Time": list(range(total)), "Pressure": list(range(100, 100 + total))})
+        state = AppState(df=df)
+        state.channel_registry = dataset_service.build_registry_for_dataframe(state.df)
+        model = EditableDatasetModel(DatasetViewModel(state))
+        original = edm.MAX_EDITABLE_ROWS
+        edm.MAX_EDITABLE_ROWS = window
+        self.addCleanup(setattr, edm, "MAX_EDITABLE_ROWS", original)
+        model.refresh()
+        return model, state
+
+    def test_window_loads_first_block_for_large_dataset(self) -> None:
+        model, _state = self._windowed_model(total=10, window=4)
+        self.assertTrue(model.is_row_capped())
+        self.assertEqual(model.total_data_row_count(), 10)
+        self.assertEqual(model.window_start(), 0)
+        self.assertEqual(model.window_row_count(), 4)
+        # Not at the dataset end -> no trailing add-row in the first window.
+        self.assertFalse(model.is_window_at_end())
+        self.assertEqual(model.rowCount(), 4)
+        self.assertEqual(model.df_row_for_view(0), 0)
+        self.assertEqual(model.headerData(0, Qt.Orientation.Vertical, Qt.ItemDataRole.DisplayRole), "1")
+        self.assertEqual(model.data(model.index(0, 0), Qt.ItemDataRole.DisplayRole), "0")
+
+    def test_window_slides_and_maps_rows(self) -> None:
+        model, _state = self._windowed_model(total=10, window=4)
+        # Request a deep start; it clamps to total - window (10 - 4 = 6).
+        self.assertTrue(model.set_window_start(8))
+        self.assertEqual(model.window_start(), 6)
+        self.assertTrue(model.is_window_at_end())
+        self.assertEqual(model.rowCount(), 5)  # 4 rows + the trailing add-row
+        self.assertEqual(model.df_row_for_view(0), 6)
+        self.assertEqual(model.view_row_for_df(9), 3)
+        self.assertIsNone(model.view_row_for_df(2))  # above the window
+        self.assertEqual(model.headerData(0, Qt.Orientation.Vertical, Qt.ItemDataRole.DisplayRole), "7")
+        self.assertEqual(model.data(model.index(0, 0), Qt.ItemDataRole.DisplayRole), "6")
+        self.assertTrue(model.is_add_row(4))
+
+    def test_window_edit_writes_to_correct_df_row(self) -> None:
+        model, state = self._windowed_model(total=10, window=4)
+        model.set_window_start(5)  # window covers df rows 5-8
+        self.assertEqual(model.window_start(), 5)
+        self.assertTrue(model.setData(model.index(0, 0), "999", Qt.ItemDataRole.EditRole))
+        self.assertEqual(state.df["Time"].iloc[5], 999)
+
+    def test_edit_window_go_to_row_updates_mapping(self) -> None:
+        import test_data_analyser.qt_app.adapters.editable_dataset_model as edm
+
+        df = pd.DataFrame({"Time": list(range(20)), "Pressure": list(range(100, 120))})
+        state = AppState(df=df)
+        state.channel_registry = dataset_service.build_registry_for_dataframe(state.df)
+        panel = RawDataPanel(RawDataViewModel(state), DatasetViewModel(state))
+        original = edm.MAX_EDITABLE_ROWS
+        edm.MAX_EDITABLE_ROWS = 5
+        self.addCleanup(setattr, edm, "MAX_EDITABLE_ROWS", original)
+
+        panel.enter_edit_mode()
+        self.assertTrue(panel.dataset_model.is_row_capped())
+        self.assertFalse(panel.goto_row_edit.isHidden())
+        self.assertEqual(panel.dataset_model.window_start(), 0)
+
+        panel.goto_row_edit.setText("11")
+        panel._on_go_to_row()
+        # Row 11 (1-based) -> df row 10 is loaded and maps back to itself.
+        target_df = 10
+        view_row = panel.dataset_model.view_row_for_df(target_df)
+        self.assertIsNotNone(view_row)
+        self.assertEqual(panel._source_row(view_row), target_df)
+        self.assertGreater(panel.dataset_model.window_start(), 0)
+        self.assertLessEqual(panel.dataset_model.window_start(), target_df)
+
     def test_raw_data_panel_expands_columns_to_fit_headers(self) -> None:
         long_title = "Pressure Sensor With Long Engineering Header"
         df = pd.DataFrame({"Time": [0.0, 1.0], long_title: [10.0, 20.0]})
@@ -242,6 +322,33 @@ class EditableDatasetModelTests(unittest.TestCase):
 
         selected_names = [state.name_for_channel_id(channel_id) for channel_id in panel._selected_column_ids(2)]
         self.assertEqual(selected_names, ["Pressure", "Flow"])
+
+    def test_edit_mode_columns_are_movable_and_drag_reorders(self) -> None:
+        df = pd.DataFrame({"Time": [0.0, 1.0], "Pressure": [10.0, 20.0], "Flow": [1.0, 2.0]})
+        state = AppState(df=df.copy())
+        state.channel_registry = dataset_service.build_registry_for_dataframe(state.df)
+        panel = RawDataPanel(RawDataViewModel(state), DatasetViewModel(state))
+        panel.enter_edit_mode()
+        self.assertTrue(panel.table.horizontalHeader().sectionsMovable())
+
+        # Drag the "Flow" column (section 2) to the front.
+        panel._on_column_moved(2, 2, 0)
+        self.assertEqual(state.column_names(), ["Flow", "Time", "Pressure"])
+
+        # Dropping a column onto the trailing "+" add-column slot is ignored.
+        add_column = panel.dataset_model.data_column_count()
+        panel._on_column_moved(0, 0, add_column)
+        self.assertEqual(state.column_names(), ["Flow", "Time", "Pressure"])
+
+    def test_edit_mode_has_undo_shortcut(self) -> None:
+        from PySide6.QtGui import QKeySequence, QShortcut
+
+        df = pd.DataFrame({"Time": [0.0, 1.0], "Pressure": [10.0, 20.0]})
+        state = AppState(df=df.copy())
+        state.channel_registry = dataset_service.build_registry_for_dataframe(state.df)
+        panel = RawDataPanel(RawDataViewModel(state), DatasetViewModel(state))
+        keys = {shortcut.key() for shortcut in panel.table.findChildren(QShortcut)}
+        self.assertIn(QKeySequence(QKeySequence.StandardKey.Undo), keys)
 
 
 @unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
@@ -1108,6 +1215,43 @@ class _PaddingSettingsVM:
 
 
 @unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
+class AutoFitLimitsTests(unittest.TestCase):
+    """Auto-fit range uses vectorised NumPy reductions, not a per-point loop."""
+
+    @staticmethod
+    def _axes_with_line(y):
+        figure = matplotlib_qt_adapter.Figure()
+        axes = figure.add_subplot(111)
+        axes.plot(range(len(y)), y)
+        return axes
+
+    def test_finite_bounds_ignores_nan_and_inf(self) -> None:
+        axes = self._axes_with_line([1.0, float("nan"), 5.0, float("inf"), -3.0])
+        bounds = matplotlib_qt_adapter.LegendAwareNavigationToolbar._finite_axis_bounds(axes, "y")
+        self.assertEqual(bounds, (-3.0, 5.0))
+
+    def test_finite_bounds_none_when_no_finite_values(self) -> None:
+        axes = self._axes_with_line([float("nan"), float("inf")])
+        bounds = matplotlib_qt_adapter.LegendAwareNavigationToolbar._finite_axis_bounds(axes, "y")
+        self.assertIsNone(bounds)
+
+    def test_finite_bounds_fast_on_large_series(self) -> None:
+        import time
+
+        import numpy as np
+
+        y = np.linspace(-5.0, 5.0, 2_000_000)
+        axes = self._axes_with_line(y)
+        start = time.perf_counter()
+        bounds = matplotlib_qt_adapter.LegendAwareNavigationToolbar._finite_axis_bounds(axes, "y")
+        elapsed = time.perf_counter() - start
+        self.assertEqual(bounds, (-5.0, 5.0))
+        # Vectorised reduction is ~milliseconds; the previous per-element Python
+        # loop took seconds at this size. The generous bound guards the regression.
+        self.assertLess(elapsed, 1.0)
+
+
+@unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
 class PlotWorkspaceParityTests(unittest.TestCase):
     def setUp(self) -> None:
         import numpy as np
@@ -1358,6 +1502,18 @@ class PlotWorkspaceParityTests(unittest.TestCase):
         )
         self.assertTrue(result.ok, result.message)
         self.assertEqual(len(self.panel.canvas.figure.axes), 1)
+
+    def test_tick_step_too_small_for_range_is_ignored(self) -> None:
+        result = self.panel.generate_plot(
+            "Time",
+            ["A"],
+            axis_limits={"xmin": 0.0, "xmax": 90000.0},
+            auto_fit_axes=False,
+            axis_tick_settings={"x_major_tick": "2"},
+        )
+        self.assertTrue(result.ok, result.message)
+        # The step would force ~45000 ticks; the failsafe keeps automatic ticks.
+        self.assertLessEqual(len(self.panel.canvas.axes.get_xticks()), self.panel.MAX_AXIS_MAJOR_TICKS)
 
     @staticmethod
     def _visible_ticks(ticks, limits) -> list[float]:
@@ -2477,6 +2633,60 @@ class MainWindowLayoutTests(unittest.TestCase):
 
         self.assertTrue(os.path.exists(os.path.join(directory, "autosave.json")))
 
+    def test_autosave_is_recovery_only_and_keeps_dirty(self) -> None:
+        window = self._window()
+        directory = tempfile.mkdtemp()
+        window.settings_manager.set("general_ui", "auto_save_enabled", True)
+        window.vm.state.df = pd.DataFrame({"Time": [0.0, 1.0], "A": [1.0, 2.0]})
+        window.vm.state.root_file_directory = directory
+        window.vm.state.is_dirty = True
+
+        window._on_autosave_tick()
+
+        self.assertTrue(os.path.exists(os.path.join(directory, "autosave.json")))
+        # Recovery autosave must not mark the session as saved.
+        self.assertTrue(window.vm.state.is_dirty)
+
+    def test_close_prompts_after_raw_data_edit(self) -> None:
+        from PySide6.QtGui import QCloseEvent
+
+        window = self._window()
+        window.vm.state.df = pd.DataFrame({"Time": [0.0, 1.0], "A": [10.0, 20.0]})
+        window.vm.state.is_dirty = False
+        self.assertTrue(window.vm.raw_data.apply_edit(0, "A", 99.0).ok)
+
+        prompts: list[str] = []
+        original = qt_message_service.confirm_unsaved_changes
+        qt_message_service.confirm_unsaved_changes = lambda *a, **k: prompts.append("p") or "discard"
+        try:
+            event = QCloseEvent()
+            window.closeEvent(event)
+        finally:
+            qt_message_service.confirm_unsaved_changes = original
+        self.assertEqual(prompts, ["p"])
+        self.assertTrue(event.isAccepted())
+
+    def test_close_does_not_prompt_after_clean_capture(self) -> None:
+        from PySide6.QtGui import QCloseEvent
+
+        window = self._window()
+        window.vm.state.df = pd.DataFrame({"Time": [0.0, 1.0], "A": [10.0, 20.0]})
+        # Mirror a freshly saved/loaded state: capture once, then mark clean.
+        window._capture_current_plot_profile()
+        window.vm.state.is_dirty = False
+
+        called: list[str] = []
+        original = qt_message_service.confirm_unsaved_changes
+        qt_message_service.confirm_unsaved_changes = lambda *a, **k: called.append("p") or "cancel"
+        try:
+            event = QCloseEvent()
+            window.closeEvent(event)
+        finally:
+            qt_message_service.confirm_unsaved_changes = original
+        # Capture-on-close must not falsely dirty an unchanged session.
+        self.assertEqual(called, [])
+        self.assertTrue(event.isAccepted())
+
     def test_plot_tab_bar_is_movable(self) -> None:
         window = self._window()
         self.assertTrue(window.plot_tab_bar.isMovable())
@@ -2796,6 +3006,32 @@ class MainWindowLayoutTests(unittest.TestCase):
         window.plot_tab_bar.setCurrentIndex(1)
         self.assertEqual(window.axis_panel.selected_y(), ["B"])
 
+    def test_plot_tabs_preserve_manual_axis_limits_after_snapshot_restore(self) -> None:
+        window = self._window()
+        window.vm.state.df = pd.DataFrame({"Time": [0.0, 1.0, 2.0], "A": [1.0, 2.0, 3.0], "B": [3.0, 2.0, 1.0]})
+        window._on_file_loaded(window.vm.state.column_names())
+        window.axis_panel.apply_selection(window.vm.state.column_names(), "Time", ["A"], [])
+        window._new_plot_profile()
+        window.axis_panel.apply_selection(window.vm.state.column_names(), "Time", ["B"], [])
+        window._on_generate_plot()
+        self.assertTrue(window._plot_generated)
+
+        # Switch away and back so the second plot is restored from its snapshot
+        # (this freezes the display, mirroring a freshly loaded session).
+        window.plot_tab_bar.setCurrentIndex(0)
+        window.plot_tab_bar.setCurrentIndex(1)
+        self.assertTrue(window._plot_display_frozen)
+
+        # User adjusts the y-axis directly on the live canvas.
+        window.plot_workspace.canvas.axes.set_ylim(0.5, 9.5)
+
+        # Leaving and returning must not reset the manual axis change.
+        window.plot_tab_bar.setCurrentIndex(0)
+        window.plot_tab_bar.setCurrentIndex(1)
+        ymin, ymax = window.plot_workspace.canvas.axes.get_ylim()
+        self.assertAlmostEqual(ymin, 0.5, places=3)
+        self.assertAlmostEqual(ymax, 9.5, places=3)
+
     def test_sheet_change_preserves_profiles_limits_notes_and_plot(self) -> None:
         window = self._window()
         first_sheet = pd.DataFrame({"Time": [0.0, 1.0, 2.0], "A": [1.0, 2.0, 3.0], "B": [3.0, 2.0, 1.0]})
@@ -2984,6 +3220,103 @@ class MainWindowLayoutTests(unittest.TestCase):
         stylesheet = theme.build_stylesheet("light")
         self.assertIn("QFrame#EatonHeader QLabel", stylesheet)
         self.assertIn(f"background-color: {EATON_HEADER_BLUE};", stylesheet)
+
+    def test_spin_box_step_buttons_are_styled(self) -> None:
+        for theme_name in ("light", "dark"):
+            stylesheet = theme.build_stylesheet(theme_name)
+            self.assertIn("QSpinBox::up-button", stylesheet)
+            self.assertIn("QSpinBox::down-button", stylesheet)
+            self.assertIn("QSpinBox::up-arrow", stylesheet)
+            self.assertIn("QSpinBox::down-arrow", stylesheet)
+            # The up/down arrows use generated +/- glyph images, not CSS lines.
+            self.assertIn("plus_", stylesheet)
+            self.assertIn("minus_", stylesheet)
+
+    def _dirty_window(self) -> "MainWindow":
+        window = self._window()
+        window.vm.state.df = pd.DataFrame({"Time": [0.0, 1.0], "A": [1.0, 2.0]})
+        window.vm.state.is_dirty = True
+        return window
+
+    def test_close_without_unsaved_changes_accepts_without_prompt(self) -> None:
+        from PySide6.QtGui import QCloseEvent
+
+        window = self._window()
+        window.vm.state.is_dirty = False
+        original = qt_message_service.confirm_unsaved_changes
+
+        def _fail(*args, **kwargs):
+            raise AssertionError("Should not prompt when there are no unsaved changes.")
+
+        qt_message_service.confirm_unsaved_changes = _fail
+        try:
+            event = QCloseEvent()
+            window.closeEvent(event)
+        finally:
+            qt_message_service.confirm_unsaved_changes = original
+        self.assertTrue(event.isAccepted())
+
+    def test_close_with_unsaved_changes_cancel_keeps_app_open(self) -> None:
+        from PySide6.QtGui import QCloseEvent
+
+        window = self._dirty_window()
+        original = qt_message_service.confirm_unsaved_changes
+        save_calls: list[bool] = []
+        window.save_session = lambda: save_calls.append(True) or True
+        qt_message_service.confirm_unsaved_changes = lambda *args, **kwargs: "cancel"
+        try:
+            event = QCloseEvent()
+            window.closeEvent(event)
+        finally:
+            qt_message_service.confirm_unsaved_changes = original
+        self.assertFalse(event.isAccepted())
+        self.assertEqual(save_calls, [])
+
+    def test_close_with_unsaved_changes_discard_closes(self) -> None:
+        from PySide6.QtGui import QCloseEvent
+
+        window = self._dirty_window()
+        original = qt_message_service.confirm_unsaved_changes
+        save_calls: list[bool] = []
+        window.save_session = lambda: save_calls.append(True) or True
+        qt_message_service.confirm_unsaved_changes = lambda *args, **kwargs: "discard"
+        try:
+            event = QCloseEvent()
+            window.closeEvent(event)
+        finally:
+            qt_message_service.confirm_unsaved_changes = original
+        self.assertTrue(event.isAccepted())
+        self.assertEqual(save_calls, [])
+
+    def test_close_with_unsaved_changes_save_then_closes(self) -> None:
+        from PySide6.QtGui import QCloseEvent
+
+        window = self._dirty_window()
+        original = qt_message_service.confirm_unsaved_changes
+        save_calls: list[bool] = []
+        window.save_session = lambda: save_calls.append(True) or True
+        qt_message_service.confirm_unsaved_changes = lambda *args, **kwargs: "save"
+        try:
+            event = QCloseEvent()
+            window.closeEvent(event)
+        finally:
+            qt_message_service.confirm_unsaved_changes = original
+        self.assertTrue(event.isAccepted())
+        self.assertEqual(save_calls, [True])
+
+    def test_close_when_save_cancelled_keeps_app_open(self) -> None:
+        from PySide6.QtGui import QCloseEvent
+
+        window = self._dirty_window()
+        original = qt_message_service.confirm_unsaved_changes
+        window.save_session = lambda: False  # user cancelled the save dialog
+        qt_message_service.confirm_unsaved_changes = lambda *args, **kwargs: "save"
+        try:
+            event = QCloseEvent()
+            window.closeEvent(event)
+        finally:
+            qt_message_service.confirm_unsaved_changes = original
+        self.assertFalse(event.isAccepted())
 
     def test_left_controls_are_scrollable(self) -> None:
         window = self._window()

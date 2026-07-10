@@ -84,6 +84,7 @@ HELP_PAGE_BODIES: dict[str, str] = {
             <li><b>Esc</b> - Cancel the current cell edit.</li>
             <li><b>Ctrl+C</b> / <b>Ctrl+V</b> / <b>Ctrl+X</b> - Copy, paste, and cut cell ranges
             (Excel-compatible). Paste and cut require <b>Edit dataset</b> mode; copy works in either mode.</li>
+            <li><b>Ctrl+Z</b> - Undo the most recent Raw Data or dataset edit.</li>
             <li><b>Ctrl+F</b> - Find within the Raw Data table.</li>
             <li><b>Ctrl+H</b> - Find and replace within the Raw Data table.</li>
         </ul>
@@ -129,8 +130,8 @@ HELP_PAGE_BODIES: dict[str, str] = {
             <li>Select a cell and type directly, or double-click it, to edit its value.</li>
         </ul>
         <p>Press <b>Enter</b> after editing a cell to commit the value and move down to the next row. Press
-        <b>Esc</b> to cancel the active edit. Column widths expand to fit header titles, and <b>Undo Edit</b>
-        restores the most recent cell edit, row/column addition, deletion, or column rename.</p>
+        <b>Esc</b> to cancel the active edit. Drag a column header left or right to reorder columns, and <b>Undo Edit</b>
+        (or <b>Ctrl+Z</b>) restores the most recent cell edit, row/column addition, deletion, move, or column rename.</p>
         <p>Edits affect the current session only and never change the original Excel file on disk.</p>
         <h2>Channel IDs and renaming</h2>
         <p>Every column keeps a stable internal channel ID, so renaming a column header does not break plots, Maths

@@ -2,9 +2,8 @@
 
 Coordinates plot-data preparation, statistics, selected-data ranges, and
 prepared render series for the active dataframe through the service layer. It
-pulls numeric series from ``AppState.df`` itself (via
-:func:`data_io.numeric_series`) and applies the per-channel X matching used for
-wide grouped files.
+pulls cached numeric series from :meth:`AppState.numeric_column` and applies the
+per-channel X matching used for wide grouped files.
 """
 from __future__ import annotations
 
@@ -12,7 +11,6 @@ from typing import Optional, Tuple
 
 import pandas as pd
 
-from ..core.data_io import numeric_series
 from ..domain import PlotData
 from ..services import peak_detection_service, plotting_data_service, statistics_service
 from ..services.results import OperationResult
@@ -25,9 +23,7 @@ class PlotWorkspaceViewModel:
         self.state = state
 
     def _numeric(self, column: str) -> pd.Series:
-        if self.state.df is None or column not in self.state.df.columns:
-            return pd.Series(dtype=float)
-        return numeric_series(self.state.df[column])
+        return self.state.numeric_column(column)
 
     def detect_peaks(
         self,

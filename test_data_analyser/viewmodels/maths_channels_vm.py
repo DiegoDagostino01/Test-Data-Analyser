@@ -114,6 +114,7 @@ class MathsChannelsViewModel:
                 del self.state.df[selected_name]
 
         self.state.df[channel_name] = series
+        self.state.invalidate_numeric_cache()
         self.state.calculated_channels[channel_name] = {
             "name": channel_name,
             "formula": formula,
@@ -121,6 +122,7 @@ class MathsChannelsViewModel:
             "enabled": True,
             "created_from_columns": referenced_columns,
         }
+        self.state.is_dirty = True
         return OperationResult.success(
             f"Maths Channel '{channel_name}' saved.",
             payload={"name": channel_name, "created_from_columns": referenced_columns},
@@ -166,6 +168,8 @@ class MathsChannelsViewModel:
             definition["created_from_columns"] = referenced_columns
             changed = True
 
+        if changed:
+            self.state.invalidate_numeric_cache()
         message = (
             "Some Maths Channels could not be recalculated."
             if errors
@@ -181,4 +185,6 @@ class MathsChannelsViewModel:
         self.state.calculated_channels.pop(channel_name, None)
         if self.state.df is not None and channel_name in self.state.df.columns:
             del self.state.df[channel_name]
+        self.state.invalidate_numeric_cache()
+        self.state.is_dirty = True
         return OperationResult.success(f"Maths Channel '{channel_name}' deleted.", payload={"name": channel_name})

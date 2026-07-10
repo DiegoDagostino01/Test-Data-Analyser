@@ -7,12 +7,44 @@ centralised here rather than being scattered across widgets.
 """
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
+
 from ..core.config import (
     EATON_HEADER_BLUE,
     EATON_NAV_BLUE,
     EATON_WHITE,
     theme_palette,
 )
+
+#: Cache directory for the generated +/- spin-box arrow icons.
+_SPIN_ICON_DIR = Path(tempfile.gettempdir()) / "tda_spin_icons"
+
+
+def _spin_arrow_icon(sign: str, colour: str) -> str:
+    """Write a small ``+``/``-`` SVG in ``colour`` and return a Qt url path.
+
+    Qt renders spin-box arrows from the ``::up-arrow``/``::down-arrow`` image, and
+    CSS border-triangles are drawn as flat lines, so a real glyph image is needed
+    to show clear plus/minus step buttons. Icons are cached per sign+colour so
+    both themes are covered without rewriting on every restyle. Returns ``""`` if
+    the icon cannot be written, leaving the arrow unstyled.
+    """
+    safe = colour.lstrip("#")
+    path = _SPIN_ICON_DIR / f"{sign}_{safe}.svg"
+    if not path.exists():
+        line = 'M2 5 H8' if sign == "minus" else 'M5 2 V8 M2 5 H8'
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">'
+            f'<path d="{line}" stroke="{colour}" stroke-width="1.6" '
+            'stroke-linecap="round" fill="none"/></svg>'
+        )
+        try:
+            _SPIN_ICON_DIR.mkdir(parents=True, exist_ok=True)
+            path.write_text(svg, encoding="utf-8")
+        except OSError:
+            return ""
+    return path.as_posix()
 
 
 def build_stylesheet(theme_name: str = "light") -> str:
@@ -38,6 +70,8 @@ def build_stylesheet(theme_name: str = "light") -> str:
     plot_container = palette["plot_container"]
     plot_bg = palette["plot_bg"]
     table_header_bg = card_alt if str(theme_name).lower() == "dark" else EATON_NAV_BLUE
+    plus_icon = _spin_arrow_icon("plus", text)
+    minus_icon = _spin_arrow_icon("minus", text)
 
     return f"""
     QMainWindow, QWidget {{
@@ -249,6 +283,45 @@ def build_stylesheet(theme_name: str = "light") -> str:
         background-color: {bg};
         color: {muted};
         border-color: {border_soft};
+    }}
+    QSpinBox, QDoubleSpinBox {{
+        padding-right: 20px;
+    }}
+    QSpinBox::up-button, QDoubleSpinBox::up-button {{
+        subcontrol-origin: border;
+        subcontrol-position: top right;
+        width: 18px;
+        border-left: 1px solid {border_soft};
+        border-bottom: 1px solid {border_soft};
+        border-top-right-radius: 5px;
+        background-color: {entry};
+    }}
+    QSpinBox::down-button, QDoubleSpinBox::down-button {{
+        subcontrol-origin: border;
+        subcontrol-position: bottom right;
+        width: 18px;
+        border-left: 1px solid {border_soft};
+        border-top: 1px solid {border_soft};
+        border-bottom-right-radius: 5px;
+        background-color: {entry};
+    }}
+    QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+    QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{
+        background-color: {hover};
+    }}
+    QSpinBox::up-button:pressed, QDoubleSpinBox::up-button:pressed,
+    QSpinBox::down-button:pressed, QDoubleSpinBox::down-button:pressed {{
+        background-color: {selected};
+    }}
+    QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
+        image: url("{plus_icon}");
+        width: 10px;
+        height: 10px;
+    }}
+    QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
+        image: url("{minus_icon}");
+        width: 10px;
+        height: 10px;
     }}
     QComboBox::drop-down {{
         subcontrol-origin: padding;

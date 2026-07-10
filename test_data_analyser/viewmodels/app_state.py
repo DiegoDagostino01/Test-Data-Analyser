@@ -15,6 +15,7 @@ from typing import Any, Optional
 
 import pandas as pd
 
+from ..core.data_io import numeric_series
 from ..core.indexing import clamp_index
 from ..domain import SOURCE_EXCEL, SOURCE_MANUAL, ChannelRegistry, ComparisonSettings
 
@@ -39,6 +40,8 @@ class AppState:
     engineering_notes: dict[str, str] = field(default_factory=dict)
     comparison: ComparisonSettings = field(default_factory=ComparisonSettings)
     settings_manager: Any = None
+    _numeric_cache: dict[str, pd.Series] = field(default_factory=dict, repr=False, compare=False)
+    _numeric_cache_token: Any = field(default=None, repr=False, compare=False)
 
     # ------------------------------------------------------------------
     # Derived, read-only views
@@ -68,6 +71,38 @@ class AppState:
         if self.channel_registry.columns:
             return [name for name in self.channel_registry.numeric_names() if name in self.df.columns]
         return self.column_names()
+
+    def numeric_column(self, name: str) -> pd.Series:
+        """Return the tolerant numeric coercion of column ``name``, cached.
+
+        The cache is scoped to the current dataframe: it is dropped automatically
+        when the dataframe object or its shape changes, and explicitly via
+        :meth:`invalidate_numeric_cache` after in-place cell edits that keep the
+        same shape. This avoids repeating the expensive text->number coercion for
+        the same column across plotting, statistics, and range calculations.
+        """
+        if self.df is None or name not in self.df.columns:
+            return pd.Series(dtype=float)
+        token = (id(self.df), self.df.shape)
+        if token != self._numeric_cache_token:
+            self._numeric_cache.clear()
+            self._numeric_cache_token = token
+        series = self._numeric_cache.get(name)
+        if series is None:
+            series = numeric_series(self.df[name])
+            self._numeric_cache[name] = series
+        return series
+
+    def invalidate_numeric_cache(self, column: Optional[str] = None) -> None:
+        """Drop cached numeric coercions after an in-place dataframe edit.
+
+        Pass ``column`` to drop a single column, or omit it to clear every cached
+        column (used when an edit may touch several columns at once).
+        """
+        if column is None:
+            self._numeric_cache.clear()
+        else:
+            self._numeric_cache.pop(column, None)
 
     def channel_id_for_name(self, name: str) -> Optional[str]:
         return self.channel_registry.id_for_name(name)

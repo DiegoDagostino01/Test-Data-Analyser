@@ -19,6 +19,96 @@ current release format.
 When releasing an update, change `__version__` and add a new entry at the top of
 this file.
 
+## 1.02.02 - Unreleased
+
+Large-file performance update: faster loading, plotting, and axis auto-fit for
+multi-million-row CSV captures, plus a plot-tab axis-limit persistence fix,
+an unsaved-changes prompt on exit, and Raw Data editing productivity additions.
+
+**Performance**
+
+- Sped up loading large `.csv` files by sniffing the delimiter so the fast C
+  parser is used instead of the slower Python parser, and by detecting the first
+  numeric data row so a leading units row (for example `(ms),(A),(V)` beneath the
+  header) no longer forces the numeric columns to load as text. On a ~345 MB,
+  9.6-million-row oscilloscope capture this cut load time from about 30 s to
+  about 4 s; the units row is now treated as header metadata and no longer
+  appears as a Raw Data row, matching how grouped Excel headers are handled.
+- Cached the tolerant text-to-number conversion per column, scoped to the loaded
+  dataframe and refreshed after edits, so generating a plot and its statistics no
+  longer repeats the same expensive full-column coercion several times. Combined
+  with the loading change, a first plot of the large capture dropped from roughly
+  two minutes to a few seconds.
+- Vectorised the Figure Options **Auto-fit X / Y / Secondary Y** range
+  calculation using NumPy reductions instead of a per-point Python loop, making
+  auto-fit effectively instant on multi-million-point plots (about 7 s to under
+  0.1 s per axis on the large capture) while producing identical axis limits.
+- Made **Edit dataset** mode load a sliding 1,000-row window for very large
+  datasets instead of binding millions of rows to the live editable table, which
+  could make the whole app sluggish for several seconds. The window auto-advances
+  as you scroll to its top or bottom, a **Go to row** box jumps anywhere in the
+  dataset, and the status bar shows the loaded row range. Smaller datasets remain
+  fully editable in a single view.
+
+**Fixes**
+
+- Fixed manual axis limits resetting when switching between plot tabs (or
+  returning to a tab after loading a session). Adjusting a tab's axes and then
+  leaving and coming back no longer reverts to the original limits; live axis
+  edits are now kept when the plot was restored from its cached snapshot.
+- Added a failsafe so a major tick step too small for the axis range (for
+  example 2 on a 0-90000 flow-rate axis) no longer crashes plotting with a
+  Matplotlib MAXTICKS error; the oversize step is ignored and automatic ticks
+  are kept.
+- Fixed the spin box up/down arrows (for example the Best Fits **Order** field
+  and Settings number boxes) rendering as blank or flat lines. The theme now
+  draws clear **+** / **-** step buttons that follow the active theme colour.
+
+**Raw Data**
+
+- Added **Ctrl+Z** as an Undo shortcut for the Raw Data table, mirroring the
+  existing **Undo Edit** button for cell edits, row/column changes, renames, and
+  reorders.
+- Made dataset columns drag-reorderable in **Edit dataset** mode: drag a column
+  header left or right to reorder it across the dataframe and channel registry,
+  with the move captured as a single undo step.
+
+**Sessions**
+
+- Added an unsaved-changes prompt when closing the app. If changes have been
+  made since the last save, a dialog offers **Save**, **Don't Save**, or
+  **Cancel**; choosing Save and then cancelling the file dialog keeps the app
+  open so work is not lost.
+- Made unsaved-change detection reliable: plot edits (channels, axis, labels,
+  limits, plot kind, profile add/rename/delete/reorder, legend), normal Raw Data
+  cell edits, Maths Channels, Runs/Comparison, Engineering Notes, and
+  Requirements/Limits now all mark the session unsaved, and pending Figure
+  Options/panel edits are folded in on close so the prompt is not missed.
+- Made auto-save recovery-only: a background auto-save (including the
+  `autosave.json` fallback before you have saved a session) no longer clears the
+  unsaved state, so the close prompt still appears for changes not written to
+  your chosen session file.
+
+**Tests**
+
+- Added regression tests for fast CSV loading (delimiter sniffing, units-row
+  skipping, text-only tables), the cached numeric coercion and its invalidation
+  after edits, the vectorised auto-fit range calculation, and the Edit dataset
+  sliding-window loading, row mapping, and Go-to-row navigation.
+- Added a regression test confirming manual axis-limit edits persist when
+  switching away from and back to a snapshot-restored plot tab.
+- Added regression tests for dataset column reordering (service, viewmodel undo)
+  and for the Raw Data movable columns and Undo shortcut.
+- Added a regression test confirming a tick step too small for the axis range is
+  ignored instead of exceeding the Matplotlib tick limit.
+- Added a regression test confirming the theme styles spin box step buttons and
+  arrows.
+- Added regression tests for the unsaved-changes close prompt (Save, Don't Save,
+  Cancel, save-cancelled, and no-prompt-when-clean paths).
+- Added regression tests for unsaved-change tracking (Raw Data edits, Maths
+  Channels, Runs, plot-profile capture/CRUD), recovery-only auto-save keeping the
+  unsaved flag, and the close prompt firing after edits without false positives.
+
 ## 1.02.01 - 2026-06-23
 
 Performance, Raw Data usability, productivity, architecture refactor, packaging,

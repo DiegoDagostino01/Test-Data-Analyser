@@ -146,6 +146,23 @@ def delete_column(
     )
 
 
+def move_column(
+    df: Optional[pd.DataFrame], registry: ChannelRegistry, channel_id: str, to_index: int
+) -> OperationResult:
+    spec = registry.spec_for_id(channel_id)
+    if spec is None:
+        return OperationResult.failure("Column not found.")
+    if not registry.move_column(channel_id, to_index):
+        return OperationResult.success("No change.", payload={"df": df, "column_id": channel_id})
+    if df is not None:
+        ordered = [name for name in registry.display_names() if name in df.columns]
+        df = df[ordered]
+    return OperationResult.success(
+        f'Moved column "{spec.display_name}".',
+        payload={"df": df, "column_id": channel_id},
+    )
+
+
 # ----------------------------------------------------------------------
 # Row operations (return a new DataFrame)
 # ----------------------------------------------------------------------

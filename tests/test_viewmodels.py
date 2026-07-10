@@ -131,6 +131,50 @@ class AppStateTests(unittest.TestCase):
         self.assertEqual(state.limit_lines, [])
         self.assertEqual(state.engineering_notes, {})
 
+    def test_numeric_column_caches_until_invalidated(self) -> None:
+        import test_data_analyser.viewmodels.app_state as app_state_module
+
+        calls = {"n": 0}
+        real = app_state_module.numeric_series
+
+        def counting(series):
+            calls["n"] += 1
+            return real(series)
+
+        app_state_module.numeric_series = counting
+        try:
+            state = AppState(df=_sample_df())
+            first = state.numeric_column("A")
+            second = state.numeric_column("A")
+            self.assertIs(first, second)
+            self.assertEqual(calls["n"], 1)  # coerced once, then served from cache
+            state.invalidate_numeric_cache("A")
+            state.numeric_column("A")
+            self.assertEqual(calls["n"], 2)  # recomputed only after invalidation
+        finally:
+            app_state_module.numeric_series = real
+
+    def test_numeric_column_cache_resets_when_dataframe_replaced(self) -> None:
+        state = AppState(df=_sample_df())
+        cached = state.numeric_column("A")
+        state.df = pd.DataFrame({"A": [100.0, 200.0]})
+        refreshed = state.numeric_column("A")
+        self.assertEqual(list(refreshed), [100.0, 200.0])
+        self.assertIsNot(refreshed, cached)
+
+    def test_numeric_column_missing_returns_empty(self) -> None:
+        state = AppState(df=_sample_df())
+        self.assertTrue(state.numeric_column("Nope").empty)
+
+    def test_raw_data_edit_refreshes_numeric_cache(self) -> None:
+        state = AppState(df=_sample_df())
+        state.channel_registry = dataset_service.build_registry_for_dataframe(state.df)
+        self.assertEqual(list(state.numeric_column("A")), [10.0, 20.0, 30.0, 40.0])
+        raw_vm = RawDataViewModel(state)
+        result = raw_vm.apply_edit(0, "A", 99.0)
+        self.assertTrue(result.ok)
+        self.assertEqual(state.numeric_column("A").iloc[0], 99.0)
+
 
 class DataLoadingViewModelTests(unittest.TestCase):
     def test_load_csv_updates_state(self) -> None:
@@ -333,6 +377,12 @@ class RawDataViewModelTests(unittest.TestCase):
         self.assertEqual(self.vm.parse_row_limit("10").payload, 10)
         self.assertFalse(self.vm.parse_row_limit("bad").ok)
 
+    def test_apply_edit_marks_dirty(self) -> None:
+        self.assertFalse(self.state.is_dirty)
+        result = self.vm.apply_edit(0, "A", 99.0)
+        self.assertTrue(result.ok)
+        self.assertTrue(self.state.is_dirty)
+
     def test_select_frame(self) -> None:
         frame, removed = self.vm.select_frame(
             "Time", ["A"], apply_window=True, xmin=1.0, xmax=2.0, drop_blank=False
@@ -460,6 +510,14 @@ class MathsChannelsViewModelTests(unittest.TestCase):
         self.assertIn("Sum", self.state.df.columns)
         self.assertIn("Sum", self.state.calculated_channels)
         self.assertCountEqual(result.payload["created_from_columns"], ["A", "B"])
+
+    def test_apply_and_delete_channel_mark_dirty(self) -> None:
+        self.assertFalse(self.state.is_dirty)
+        self.assertTrue(self.vm.apply_channel("Sum", "A + B").ok)
+        self.assertTrue(self.state.is_dirty)
+        self.state.is_dirty = False
+        self.assertTrue(self.vm.delete_channel("Sum").ok)
+        self.assertTrue(self.state.is_dirty)
 
     def test_channel_names_are_naturally_sorted(self) -> None:
         self.vm.apply_channel("TC10", "A + B")
@@ -599,6 +657,20 @@ class RunsComparisonViewModelCrudTests(unittest.TestCase):
     def test_comparison_settings_roundtrip(self) -> None:
         self.vm.set_setting("comparison_common_x_range", True)
         self.assertTrue(self.vm.get_setting("comparison_common_x_range"))
+
+    def test_run_mutations_mark_dirty(self) -> None:
+        self.state.is_dirty = False
+        self.assertTrue(self.vm.rename_run(0, "Baseline").ok)
+        self.assertTrue(self.state.is_dirty)
+        self.state.is_dirty = False
+        self.assertTrue(self.vm.toggle_enabled(1).ok)
+        self.assertTrue(self.state.is_dirty)
+        self.state.is_dirty = False
+        self.vm.set_setting("comparison_common_x_range", True)
+        self.assertTrue(self.state.is_dirty)
+        self.state.is_dirty = False
+        self.assertTrue(self.vm.remove_run(1).ok)
+        self.assertTrue(self.state.is_dirty)
 
 
 class CursorCompareViewModelTests(unittest.TestCase):
@@ -1002,6 +1074,39 @@ class MainWindowViewModelTests(unittest.TestCase):
             result = source.save_session(path)
             self.assertTrue(result.ok)
             self.assertTrue((Path(tmp) / "session.json").exists())
+
+    def test_save_session_mark_clean_false_keeps_dirty(self) -> None:
+        vm = self._populated_vm()
+        vm.state.is_dirty = True
+        with tempfile.TemporaryDirectory() as tmp:
+            recovery = vm.save_session(Path(tmp) / "recovery.json", mark_clean=False)
+            self.assertTrue(recovery.ok)
+            self.assertTrue(vm.state.is_dirty)
+            explicit = vm.save_session(Path(tmp) / "explicit.json")
+            self.assertTrue(explicit.ok)
+            self.assertFalse(vm.state.is_dirty)
+
+    def test_capture_working_state_marks_dirty_on_real_change_only(self) -> None:
+        vm = MainWindowViewModel()
+        vm.capture_working_state(x_column="Time", y_columns=["A"])
+        vm.state.is_dirty = False
+        vm.capture_working_state(x_column="Time", y_columns=["A"])
+        self.assertFalse(vm.state.is_dirty)
+        vm.capture_working_state(x_column="Time", y_columns=["A", "B"])
+        self.assertTrue(vm.state.is_dirty)
+
+    def test_profile_crud_marks_dirty_but_select_does_not(self) -> None:
+        vm = MainWindowViewModel()
+        vm.ensure_plot_profiles()
+        vm.state.is_dirty = False
+        self.assertTrue(vm.add_plot_profile("Plot 2").ok)
+        self.assertTrue(vm.state.is_dirty)
+        vm.state.is_dirty = False
+        self.assertTrue(vm.select_plot_profile(0).ok)
+        self.assertFalse(vm.state.is_dirty)
+        vm.state.is_dirty = False
+        self.assertTrue(vm.rename_plot_profile(0, "Renamed").ok)
+        self.assertTrue(vm.state.is_dirty)
 
     def test_capture_working_state_builds_profile(self) -> None:
         vm = MainWindowViewModel()
@@ -1833,6 +1938,15 @@ class DatasetViewModelTests(unittest.TestCase):
         self.assertEqual(vm.state.df.at[0, "Pressure"], 42.0)
         self.assertTrue(vm.dataset.delete_rows([0]).ok)
         self.assertEqual(len(vm.state.df), 2)
+
+    def test_move_column_reorders_and_can_undo(self) -> None:
+        vm = self._manual_vm()
+        channel_id = vm.state.channel_registry.id_for_name("Time")
+        self.assertTrue(vm.dataset.move_column(channel_id, 1).ok)
+        self.assertEqual(vm.state.column_names(), ["Pressure", "Time"])
+        self.assertTrue(vm.dataset.can_undo)
+        self.assertTrue(vm.dataset.undo_last_edit().ok)
+        self.assertEqual(vm.state.column_names(), ["Time", "Pressure"])
 
     def test_undo_dataset_cell_edit(self) -> None:
         vm = self._manual_vm()

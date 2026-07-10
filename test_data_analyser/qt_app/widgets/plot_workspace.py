@@ -265,6 +265,8 @@ class PlotWorkspace(QWidget):
     bestFitFormulasChanged = Signal()
     LEGEND_DEFAULT_WIDTH = 230
     LEGEND_MAXIMUM_WIDTH = 400
+    #: Cap on major ticks per axis; matplotlib raises MAXTICKS (1000) beyond this.
+    MAX_AXIS_MAJOR_TICKS = 1000
 
     def __init__(
         self,
@@ -2034,9 +2036,11 @@ class PlotWorkspace(QWidget):
 
     @classmethod
     def _apply_axis_tick_settings(cls, axes, secondary_axes, settings: dict[str, object]) -> None:
-        x_major_tick = cls._positive_float(settings.get("x_major_tick"))
-        y_major_tick = cls._positive_float(settings.get("y_major_tick"))
-        y2_major_tick = cls._positive_float(settings.get("y2_major_tick"))
+        x_major_tick = cls._safe_major_tick(cls._positive_float(settings.get("x_major_tick")), axes.get_xlim())
+        y_major_tick = cls._safe_major_tick(cls._positive_float(settings.get("y_major_tick")), axes.get_ylim())
+        y2_major_tick = None
+        if secondary_axes is not None:
+            y2_major_tick = cls._safe_major_tick(cls._positive_float(settings.get("y2_major_tick")), secondary_axes.get_ylim())
 
         if x_major_tick is not None:
             axes.xaxis.set_major_locator(MultipleLocator(x_major_tick))
@@ -2046,6 +2050,25 @@ class PlotWorkspace(QWidget):
             secondary_axes.yaxis.set_major_locator(MultipleLocator(y2_major_tick))
         if secondary_axes is not None and bool(settings.get("align_secondary_y_axis_grid", False)):
             cls._align_secondary_y_ticks_to_primary(axes, secondary_axes)
+
+    @classmethod
+    def _safe_major_tick(cls, step: float | None, limits: tuple[float, float]) -> float | None:
+        """Ignore a tick step too small for the axis range to avoid a tick blow-up.
+
+        Matplotlib's ``MultipleLocator`` raises ``Locator.MAXTICKS`` once a step
+        forces more than ~1000 ticks across the axis span. A tiny step on a wide
+        axis (for example 2 on a 0-90000 flow-rate axis) would crash rendering, so
+        the step is dropped and automatic ticks are kept instead.
+        """
+        if step is None:
+            return None
+        try:
+            span = abs(float(limits[1]) - float(limits[0]))
+        except (TypeError, ValueError, IndexError):
+            return step
+        if span and span / step > cls.MAX_AXIS_MAJOR_TICKS:
+            return None
+        return step
 
     @staticmethod
     def _positive_float(value: object) -> float | None:

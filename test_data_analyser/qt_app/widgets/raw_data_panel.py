@@ -102,6 +102,8 @@ class RawDataTableView(QTableView):
 
 class RawDataPanel(QWidget):
     datasetChanged = Signal()
+    #: Rows to slide the editable window when the user scrolls to its top/bottom.
+    EDIT_WINDOW_SHIFT = 500
 
     def __init__(
         self,
@@ -114,6 +116,8 @@ class RawDataPanel(QWidget):
         self.dataset_vm = dataset_view_model
         self._selection_provider: Optional[SelectionProvider] = None
         self._edit_mode = False
+        self._reordering_columns = False
+        self._shifting_window = False
         self._sort_state: Optional[tuple[str, bool]] = None
         self._filter_enabled = False
         self._column_filters: dict[str, str] = {}
@@ -155,6 +159,7 @@ class RawDataPanel(QWidget):
         self.table.horizontalHeader().setStretchLastSection(False)
         self.table.horizontalHeader().sectionClicked.connect(self._on_horizontal_header_clicked)
         self.table.horizontalHeader().sectionDoubleClicked.connect(self._rename_column_from_header)
+        self.table.horizontalHeader().sectionMoved.connect(self._on_column_moved)
         self.table.horizontalHeader().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.horizontalHeader().customContextMenuRequested.connect(self._show_column_context_menu)
         self.table.verticalHeader().setSectionsClickable(True)
@@ -167,6 +172,7 @@ class RawDataPanel(QWidget):
         self.cell_delegate = RawDataCellDelegate(self.table)
         self.cell_delegate.enterPressed.connect(self.table.move_current_down)
         self.table.setItemDelegate(self.cell_delegate)
+        self.table.verticalScrollBar().valueChanged.connect(self._on_edit_scroll)
         self._install_clipboard_shortcuts()
         layout.addWidget(self.table, stretch=1)
 
@@ -189,6 +195,17 @@ class RawDataPanel(QWidget):
         )
         self.edit_mode_check.toggled.connect(self._on_edit_mode_toggled)
         controls.addWidget(self.edit_mode_check)
+
+        self.goto_row_label = QLabel("Go to row:")
+        self.goto_row_label.setVisible(False)
+        controls.addWidget(self.goto_row_label)
+        self.goto_row_edit = QLineEdit()
+        self.goto_row_edit.setFixedWidth(90)
+        self.goto_row_edit.setPlaceholderText("row #")
+        self.goto_row_edit.setToolTip("Jump the editable window to a row number in a large dataset.")
+        self.goto_row_edit.returnPressed.connect(self._on_go_to_row)
+        self.goto_row_edit.setVisible(False)
+        controls.addWidget(self.goto_row_edit)
 
         self.row_limit_label = QLabel("Rows to display:")
         controls.addWidget(self.row_limit_label)
@@ -404,6 +421,9 @@ class RawDataPanel(QWidget):
             shortcut = QShortcut(key, self.table)
             shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             shortcut.activated.connect(lambda enabled=replace_enabled: self._open_find_replace(enabled))
+        undo_shortcut = QShortcut(QKeySequence.StandardKey.Undo, self.table)
+        undo_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        undo_shortcut.activated.connect(self._undo_edit)
 
     def _on_copy(self) -> None:
         rows, channel_ids = self._current_selection_block()
@@ -494,7 +514,7 @@ class RawDataPanel(QWidget):
         if self._edit_mode:
             if self.dataset_model.is_add_row(view_row):
                 return None
-            return view_row
+            return self.dataset_model.df_row_for_view(view_row)
         label = self.model.source_row_at(view_row)
         return None if label is None else int(label)
 
@@ -560,11 +580,23 @@ class RawDataPanel(QWidget):
         target_row = None
         if self._edit_mode:
             try:
-                row = int(row_label)
+                df_row = int(row_label)
             except (TypeError, ValueError):
                 return False
-            if 0 <= row < model.rowCount():
-                target_row = row
+            if not (0 <= df_row < self.dataset_model.total_data_row_count()):
+                return False
+            view_row = self.dataset_model.view_row_for_df(df_row)
+            if view_row is None:
+                # The match is outside the loaded window; slide the window to it.
+                self._shifting_window = True
+                try:
+                    self.dataset_model.set_window_start(df_row)
+                    self._resize_inline_controls()
+                    self._update_edit_status()
+                finally:
+                    self._shifting_window = False
+                view_row = self.dataset_model.view_row_for_df(df_row)
+            target_row = view_row
         else:
             for row in range(self.model.rowCount()):
                 if self.model.source_row_at(row) == row_label:
@@ -612,15 +644,101 @@ class RawDataPanel(QWidget):
             self.edit_mode_check.setChecked(True)
 
     def refresh_dataset(self) -> None:
-        self.dataset_model.refresh()
-        self._resize_inline_controls()
-        df = self.dataset_vm.state.df
-        rows = len(df) if df is not None else 0
+        # The model reset clamps the window and resets the scrollbar to the top;
+        # guard the auto-advance handler so that reset is not mistaken for a user
+        # scrolling to the top of the window.
+        self._shifting_window = True
+        try:
+            self.dataset_model.refresh()
+            self._resize_inline_controls()
+        finally:
+            self._shifting_window = False
+        self._update_edit_status()
+
+    def _update_edit_status(self) -> None:
         columns = len(self.dataset_vm.editable_columns())
-        self.status_label.setText(
-            f"Editing dataset: {columns} column(s) × {rows} row(s). "
-            "Changes affect the current session only."
-        )
+        total_rows = self.dataset_model.total_data_row_count()
+        if self.dataset_model.is_row_capped():
+            start = self.dataset_model.window_start()
+            count = self.dataset_model.window_row_count()
+            self.status_label.setText(
+                f"Editing dataset: {columns} column(s) \u00b7 rows {start + 1:,}\u2013{start + count:,} of "
+                f"{total_rows:,} loaded (scroll to load more, or use Go to row). "
+                "Changes affect the current session only."
+            )
+        else:
+            self.status_label.setText(
+                f"Editing dataset: {columns} column(s) \u00d7 {total_rows:,} row(s). "
+                "Changes affect the current session only."
+            )
+
+    def _on_edit_scroll(self, value: int) -> None:
+        """Slide the editable window when the user scrolls to its top or bottom."""
+        if not self._edit_mode or self._shifting_window:
+            return
+        model = self.dataset_model
+        if not model.is_row_capped():
+            return
+        bar = self.table.verticalScrollBar()
+        if value >= bar.maximum() and model.can_load_more_below():
+            self._shift_edit_window(self.EDIT_WINDOW_SHIFT)
+        elif value <= bar.minimum() and model.can_load_more_above():
+            self._shift_edit_window(-self.EDIT_WINDOW_SHIFT)
+
+    def _shift_edit_window(self, delta: int) -> None:
+        """Move the loaded window by ``delta`` rows, keeping the top row in view."""
+        model = self.dataset_model
+        anchor_view = max(0, self.table.rowAt(0))
+        anchor_df = model.df_row_for_view(anchor_view)
+        self._shifting_window = True
+        try:
+            if not model.set_window_start(model.window_start() + delta):
+                return
+            self._resize_inline_controls()
+            self._update_edit_status()
+            target_view = model.view_row_for_df(anchor_df)
+            if target_view is None:
+                target_view = 0
+            self.table.scrollTo(
+                model.index(target_view, 0), QAbstractItemView.ScrollHint.PositionAtTop
+            )
+        finally:
+            self._shifting_window = False
+
+    def _on_go_to_row(self) -> None:
+        """Jump the editable window so a typed row number is loaded and selected."""
+        if not self._edit_mode:
+            return
+        text = self.goto_row_edit.text().strip().replace(",", "")
+        if not text:
+            return
+        try:
+            target = int(text) - 1
+        except ValueError:
+            self.status_label.setText("Enter a valid row number to jump to.")
+            return
+        total = self.dataset_model.total_data_row_count()
+        if total <= 0:
+            return
+        target = max(0, min(target, total - 1))
+        # Leave headroom above the target so the window can also slide upward.
+        headroom = min(target, self.EDIT_WINDOW_SHIFT)
+        self._shifting_window = True
+        try:
+            self.dataset_model.set_window_start(target - headroom)
+            if self.dataset_model.view_row_for_df(target) is None:
+                # Window smaller than the headroom: place the target at the top.
+                self.dataset_model.set_window_start(target)
+            self._resize_inline_controls()
+            self._update_edit_status()
+            view_row = self.dataset_model.view_row_for_df(target)
+            if view_row is None:
+                view_row = 0
+            index = self.dataset_model.index(view_row, 0)
+            self.table.setCurrentIndex(index)
+            self.table.scrollTo(index, QAbstractItemView.ScrollHint.PositionAtCenter)
+        finally:
+            self._shifting_window = False
 
     def _on_edit_mode_toggled(self, enabled: bool) -> None:
         self._apply_edit_mode(enabled)
@@ -628,11 +746,13 @@ class RawDataPanel(QWidget):
     def _apply_edit_mode(self, enabled: bool) -> None:
         self._edit_mode = enabled
         if enabled:
+            self.dataset_model.reset_window()
             self.table.setModel(self.dataset_model)
             self.refresh_dataset()
         else:
             self.table.setModel(self.model)
             self.refresh()
+        self.table.horizontalHeader().setSectionsMovable(enabled)
         # Filter/inspection controls only apply to the read view; disabling them
         # in edit mode keeps row indices aligned 1:1 for structural edits.
         for widget in (
@@ -645,6 +765,9 @@ class RawDataPanel(QWidget):
             self.clear_filters_button,
         ):
             widget.setEnabled(not enabled)
+        show_goto = enabled and self.dataset_model.is_row_capped()
+        self.goto_row_label.setVisible(show_goto)
+        self.goto_row_edit.setVisible(show_goto)
         if enabled:
             self.filter_row.setVisible(False)
         elif self._filter_enabled:
@@ -741,6 +864,28 @@ class RawDataPanel(QWidget):
         if not menu.isEmpty():
             menu.exec(self.table.viewport().mapToGlobal(position))
 
+    def _on_column_moved(self, logical_index: int, old_visual: int, new_visual: int) -> None:
+        """Persist a drag-reorder of dataset columns (edit mode only)."""
+        if not self._edit_mode or self._reordering_columns:
+            return
+        header = self.table.horizontalHeader()
+        add_column = self.dataset_model.data_column_count()
+        channel_id = self.dataset_model.channel_id_at(logical_index)
+        # Revert the header's visual move; the model reorder below is the source
+        # of truth, keeping logical and visual sections aligned 1:1.
+        self._reordering_columns = True
+        header.blockSignals(True)
+        header.moveSection(new_visual, old_visual)
+        header.blockSignals(False)
+        self._reordering_columns = False
+        if channel_id is None or new_visual >= add_column:
+            return
+        result = self.dataset_vm.move_column(channel_id, new_visual)
+        if not result.ok:
+            qt_message_service.warning(self, "Move Column", result.message)
+            return
+        self._after_structural_change(result)
+
     def _show_column_context_menu(self, position: QPoint) -> None:
         if not self._edit_mode:
             return
@@ -782,12 +927,12 @@ class RawDataPanel(QWidget):
         rows: set[int] = set()
         if selection_model is not None:
             rows = {
-                index.row()
+                self.dataset_model.df_row_for_view(index.row())
                 for index in selection_model.selectedIndexes()
                 if self.dataset_model.is_data_index(index)
             }
         if not rows and fallback is not None and self.dataset_model.is_data_index(fallback):
-            rows.add(fallback.row())
+            rows.add(self.dataset_model.df_row_for_view(fallback.row()))
         return sorted(rows)
 
     def _selected_column_ids(self, fallback_section: int | None = None) -> list[str]:

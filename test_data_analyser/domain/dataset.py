@@ -193,6 +193,19 @@ class ChannelRegistry:
             self.columns = [column for column in self.columns if column.id != channel_id]
         return spec
 
+    def move_column(self, channel_id: str, to_index: int) -> bool:
+        """Reorder ``channel_id`` to ``to_index``; return ``True`` if it moved."""
+        ids = self.ids()
+        if channel_id not in ids:
+            return False
+        current = ids.index(channel_id)
+        target = max(0, min(int(to_index), len(self.columns) - 1))
+        if current == target:
+            return False
+        spec = self.columns.pop(current)
+        self.columns.insert(target, spec)
+        return True
+
     def names_to_ids(self, names: list[str]) -> list[str]:
         """Resolve display names to channel IDs, skipping unknown names."""
         resolved: list[str] = []

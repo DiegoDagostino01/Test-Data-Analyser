@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import posixpath
 from pathlib import Path
 from typing import Any, Iterable, Literal, Optional, cast
@@ -412,6 +413,115 @@ def _read_excel_with_smart_headers(
     data = data.dropna(how="all").dropna(axis=1, how="all").reset_index(drop=True)
     return data
 
+#: Bytes sampled from the head of a CSV when sniffing its delimiter.
+_CSV_SNIFF_BYTES = 65536
+
+
+def _sniff_csv_delimiter(path: Path, encoding: str) -> Optional[str]:
+    """Return a single-character delimiter sniffed from the file head, or ``None``.
+
+    Sampling only the head keeps this cheap for very large files. Returning
+    ``None`` lets the caller fall back to pandas' (slower) Python-engine delimiter
+    inference so behaviour is preserved when sniffing is inconclusive.
+    """
+    try:
+        with open(path, "r", encoding=encoding, newline="", errors="replace") as handle:
+            sample = handle.read(_CSV_SNIFF_BYTES)
+    except (OSError, UnicodeError):
+        return None
+    if not sample:
+        return None
+    try:
+        return csv.Sniffer().sniff(sample, delimiters=",;\t|").delimiter
+    except csv.Error:
+        return None
+
+
+def _resolve_csv_dialect(path: Path, delimiter: str, encoding: str) -> tuple[Any, Optional[str]]:
+    """Resolve the ``(sep, engine)`` pair for :func:`pandas.read_csv`.
+
+    An explicit delimiter keeps pandas' default fast C parser. ``"auto"`` sniffs a
+    single-character delimiter so the C parser can still be used; only when
+    sniffing fails do we fall back to the Python engine (``sep=None``), preserving
+    the previous auto-detect behaviour.
+    """
+    if delimiter and delimiter != "auto":
+        return delimiter, None
+    sniffed = _sniff_csv_delimiter(path, encoding)
+    if sniffed is not None:
+        return sniffed, "c"
+    return None, "python"
+
+
+def _csv_header_and_unit_lines(
+    path: Path,
+    base_kwargs: dict[str, Any],
+    *,
+    header_row: int,
+    skip_rows: int,
+) -> tuple[int, list[int]]:
+    """Return ``(header_line, unit_line_numbers)`` for a CSV.
+
+    ``header_line`` is the absolute 0-based row used as the header. Unit lines are
+    the contiguous non-numeric rows immediately after the header (for example a
+    ``(ms),(A),(V)`` units row, or a blank separator) that would otherwise be read
+    as data and force the numeric columns to load as slow object/text dtype.
+
+    This mirrors the >=2 numeric-cell data-start rule already used for Excel. When
+    no numeric data row is found in the preview (a genuinely text-only table or a
+    single-numeric-column file) nothing is skipped, preserving the previous
+    tolerant behaviour.
+    """
+    header_line = max(0, int(skip_rows)) + max(0, int(header_row))
+    try:
+        preview = pd.read_csv(
+            path,
+            header=header_line,
+            nrows=SMART_HEADER_PREVIEW_ROWS,
+            dtype=str,
+            **base_kwargs,
+        )
+    except (ValueError, OSError, pd.errors.ParserError):
+        return header_line, []
+    unit_count = 0
+    for _position, row in preview.iterrows():
+        if sum(_looks_numeric_cell(value) for value in row.tolist()) >= 2:
+            break
+        unit_count += 1
+    if unit_count >= len(preview):
+        return header_line, []
+    unit_lines = [header_line + 1 + offset for offset in range(unit_count)]
+    return header_line, unit_lines
+
+
+def _read_csv(path: Path, settings_manager: Any) -> pd.DataFrame:
+    """Read a CSV with the fast C parser and numeric-aware data-start detection.
+
+    Two behaviour-preserving performance changes over a plain ``header=0`` read:
+    the delimiter is sniffed so the C parser can be used instead of the slow
+    Python engine, and contiguous leading non-numeric "units" rows are skipped so
+    the numeric columns load as native numeric dtype instead of text.
+    """
+    delimiter = _settings_value(settings_manager, "data_import", "default_delimiter", "auto")
+    encoding = str(_settings_value(settings_manager, "data_import", "default_encoding", "utf-8") or "utf-8")
+    header_row = int(_settings_value(settings_manager, "data_import", "header_row_index", 0) or 0)
+    skip_rows = int(_settings_value(settings_manager, "data_import", "skip_rows", 0) or 0)
+    decimal_separator = str(_settings_value(settings_manager, "data_import", "decimal_separator", ".") or ".")
+
+    sep, engine = _resolve_csv_dialect(path, delimiter, encoding)
+    base_kwargs: dict[str, Any] = {"encoding": encoding, "decimal": decimal_separator, "sep": sep}
+    if engine is not None:
+        base_kwargs["engine"] = engine
+
+    header_line, unit_lines = _csv_header_and_unit_lines(
+        path, base_kwargs, header_row=header_row, skip_rows=skip_rows
+    )
+    df = pd.read_csv(path, header=header_line, skiprows=unit_lines or None, **base_kwargs)
+    df = df.dropna(how="all").dropna(axis=1, how="all").reset_index(drop=True)
+    df.columns = _make_unique_column_names([str(c).strip() for c in df.columns])
+    return df
+
+
 def load_data(filepath: str | Path, sheet_name: Optional[str] = None, settings_manager: Any = None) -> pd.DataFrame:
     path = Path(filepath)
     if not path.exists():
@@ -419,25 +529,7 @@ def load_data(filepath: str | Path, sheet_name: Optional[str] = None, settings_m
 
     ext = path.suffix.lower()
     if ext == ".csv":
-        delimiter = _settings_value(settings_manager, "data_import", "default_delimiter", "auto")
-        encoding = str(_settings_value(settings_manager, "data_import", "default_encoding", "utf-8") or "utf-8")
-        header_row = int(_settings_value(settings_manager, "data_import", "header_row_index", 0) or 0)
-        skip_rows = int(_settings_value(settings_manager, "data_import", "skip_rows", 0) or 0)
-        decimal_separator = str(_settings_value(settings_manager, "data_import", "decimal_separator", ".") or ".")
-        read_kwargs: dict[str, Any] = {
-            "encoding": encoding,
-            "header": header_row,
-            "skiprows": skip_rows,
-            "decimal": decimal_separator,
-        }
-        if delimiter == "auto":
-            read_kwargs.update({"sep": None, "engine": "python"})
-        else:
-            read_kwargs["sep"] = delimiter
-        df = pd.read_csv(path, **read_kwargs)
-        df = df.dropna(how="all").dropna(axis=1, how="all").reset_index(drop=True)
-        df.columns = _make_unique_column_names([str(c).strip() for c in df.columns])
-        return df
+        return _read_csv(path, settings_manager)
     if ext == ".xlsx":
         return _read_excel_with_smart_headers(path, sheet_name, engine="openpyxl", settings_manager=settings_manager)
     if ext == ".xls":
