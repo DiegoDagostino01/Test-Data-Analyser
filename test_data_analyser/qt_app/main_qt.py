@@ -11,7 +11,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtGui import QIcon
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QGuiApplication, QIcon
 from PySide6.QtWidgets import QApplication
 
 from .main_window import MainWindow
@@ -34,7 +35,12 @@ def _load_app_icon() -> QIcon:
     return QIcon(str(icon_path)) if icon_path.exists() else QIcon()
 
 
+def _high_dpi_rounding_policy() -> Qt.HighDpiScaleFactorRoundingPolicy:
+    return Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+
+
 def main() -> int:
+    QGuiApplication.setHighDpiScaleFactorRoundingPolicy(_high_dpi_rounding_policy())
     app = QApplication(sys.argv)
     app.setApplicationName("Test Data Analyser")
     app.setOrganizationName("Eaton")

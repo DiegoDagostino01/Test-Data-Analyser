@@ -42,6 +42,10 @@ class _Field:
 FIELD_SPEC: dict[str, list[_Field]] = {
     "General": [
         _Field("general_ui", "theme", "Theme", "combo", ("light", "dark")),
+        _Field("general_ui", "user_experience_mode", "Experience mode", "combo"),
+        _Field("general_ui", "startup_behaviour", "Startup behavior", "combo"),
+        _Field("general_ui", "auto_save_enabled", "Recovery auto-save", "check"),
+        _Field("general_ui", "auto_save_interval_minutes", "Auto-save interval (minutes)", "int", minimum=1, maximum=1440),
         _Field("general_ui", "confirm_before_delete", "Confirm before delete", "check"),
         _Field("general_ui", "show_tooltips", "Show tooltips", "check"),
     ],

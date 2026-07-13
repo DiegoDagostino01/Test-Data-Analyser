@@ -23,6 +23,17 @@ class DatasetUndoSnapshot:
     is_dirty: bool
 
 
+@dataclass(frozen=True)
+class DatasetCellUndo:
+    description: str
+    channel_id: str
+    row_index: int
+    old_value: Any
+    old_dtype: Any
+    old_data_type: str
+    is_dirty: bool
+
+
 class AppStateController:
     """Apply multi-field AppState mutations in one place."""
 
@@ -51,6 +62,26 @@ class AppStateController:
         self.state.limit_lines = deepcopy(snapshot.limit_lines)
         self.state.is_dirty = snapshot.is_dirty
         self.state.invalidate_numeric_cache()
+
+    def restore_dataset_cell(self, undo: DatasetCellUndo) -> bool:
+        df = self.state.df
+        spec = self.state.channel_registry.spec_for_id(undo.channel_id)
+        if df is None or spec is None or spec.display_name not in df.columns:
+            return False
+        if not (0 <= undo.row_index < len(df)):
+            return False
+        name = spec.display_name
+        restored = df[name].copy()
+        restored.at[undo.row_index] = undo.old_value
+        try:
+            restored = restored.astype(undo.old_dtype)
+        except (TypeError, ValueError):
+            return False
+        df[name] = restored
+        spec.data_type = undo.old_data_type
+        self.state.is_dirty = undo.is_dirty
+        self.state.invalidate_numeric_cache(name)
+        return True
 
     def apply_dataframe_payload(self, payload: dict[str, object]) -> bool:
         if "df" not in payload:

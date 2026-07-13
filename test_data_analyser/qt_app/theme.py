@@ -126,6 +126,45 @@ def build_stylesheet(theme_name: str = "light") -> str:
         color: {EATON_WHITE};
         font-size: 9pt;
     }}
+    QWidget#Dashboard {{
+        background-color: {workspace};
+    }}
+    QLabel#DashboardTitle {{
+        color: {accent_hover};
+        font-size: 18pt;
+        font-weight: 600;
+    }}
+    QLabel#DashboardSectionTitle {{
+        color: {secondary};
+        font-size: 10pt;
+        font-weight: 600;
+    }}
+    QLabel#DashboardShortcuts {{
+        color: {secondary};
+        font-size: 9pt;
+    }}
+    QToolButton#DashboardCommandButton {{
+        background-color: {card};
+        color: {text};
+        border: 1px solid {border};
+        border-radius: 6px;
+        padding: 8px 12px;
+        min-width: 120px;
+    }}
+    QToolButton#DashboardCommandButton:hover,
+    QToolButton#DashboardCommandButton:focus {{
+        background-color: {accent_soft};
+        border-color: {accent};
+    }}
+    QFrame#DashboardRecoveryBanner {{
+        background-color: {accent_soft};
+        border: 1px solid {accent};
+        border-radius: 6px;
+    }}
+    QLabel#DashboardRecoveryLabel {{
+        color: {text};
+        font-weight: 600;
+    }}
     QFrame#EatonCard, QFrame#EatonPanel {{
         background-color: {card};
         border: 1px solid {border};
@@ -196,6 +235,15 @@ def build_stylesheet(theme_name: str = "light") -> str:
         background-color: {bg};
         color: {muted};
         border-color: {border_soft};
+    }}
+    QPushButton:focus, QToolButton:focus, QComboBox:focus, QLineEdit:focus,
+    QPlainTextEdit:focus, QTextEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus,
+    QListView:focus, QTreeView:focus, QTableView:focus, QTabBar:focus {{
+        border: 2px solid {accent};
+    }}
+    QCheckBox:focus, QRadioButton:focus {{
+        border: 1px solid {accent};
+        border-radius: 3px;
     }}
     QPushButton#PrimaryButton {{
         background-color: {accent};

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent, QGuiApplication, QPixmap
+from PySide6.QtGui import QActionGroup, QDragEnterEvent, QDropEvent, QGuiApplication, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -40,10 +40,27 @@ from ..core.settings_manager import SettingsManager
 from ..viewmodels import MainWindowViewModel
 from . import theme
 from .adapters import qt_file_dialogs, qt_message_service, qt_widget_helpers
+from .application_status_manager import ApplicationStatusManager, PlotStatus
+from .command_manager import CommandManager
+from .recovery_policy import RecoveryCandidate, find_recovery_candidate
+from .ribbon_manager import RibbonManager
+from .user_experience_mode import (
+    BASIC_HIDDEN_COMMAND_IDS,
+    BASIC_HIDDEN_PANEL_IDS,
+    UserExperienceMode,
+)
+from .workspace import (
+    DockArea,
+    PanelDescriptor,
+    WorkspaceManager,
+    WorkspacePreset,
+    WorkspaceRegistry,
+)
 from .widgets.axis_selection_panel import AxisSelectionPanel
 from .widgets.best_fit_formulas_panel import BestFitFormulasPanel
 from .widgets.cursor_compare_panel import CursorComparePanel
 from .widgets.data_file_panel import DataFilePanel
+from .widgets.dashboard import Dashboard
 from .widgets.engineering_notes_panel import EngineeringNotesPanel
 from .widgets.limits_panel import LimitsPanel
 from .widgets.maths_channels_panel import MathsChannelsPanel
@@ -51,6 +68,7 @@ from .widgets.plot_workspace import PlotWorkspace
 from .widgets.raw_data_panel import RawDataPanel
 from .widgets.runs_comparison_panel import RunsComparisonPanel
 from .widgets.statistics_panel import StatisticsPanel
+from .widgets.command_palette import CommandPalette
 
 if TYPE_CHECKING:
     from .widgets.help_dialog import HelpDialog
@@ -85,6 +103,15 @@ class MainWindow(QMainWindow):
         self._current_session_path: str | None = None
         self._help_dialog: HelpDialog | None = None
         self._last_autosave_epoch: float | None = None
+        self._active_recovery_path: Path | None = None
+        self._recovery_candidate: RecoveryCandidate | None = None
+        self._experience_mode = UserExperienceMode.from_value(
+            self.settings_manager.get("general_ui", "user_experience_mode")
+        )
+        self.app_status = ApplicationStatusManager(self.statusBar())
+        self.command_manager = CommandManager(self)
+        self._command_palette: CommandPalette | None = None
+        self._register_commands()
 
         self.setWindowTitle("Test Data Analyser — Eaton Edition")
         self.resize(1320, 840)
@@ -93,41 +120,135 @@ class MainWindow(QMainWindow):
         self._build_menu()
         self._build_central_layout()
         self._apply_theme()
+        self._apply_user_experience_mode()
 
         self._autosave_timer = QTimer(self)
         self._autosave_timer.setInterval(self.AUTOSAVE_POLL_MS)
         self._autosave_timer.timeout.connect(self._on_autosave_tick)
         self._configure_autosave_timer()
 
-        self.statusBar().showMessage("Ready. Open a data file to begin.")
+        self.app_status.show_message("Ready. Open a data file to begin.")
+        self.app_status.set_plot_status(PlotStatus.NO_PLOT)
+        self.app_status.set_session_dirty(False)
+        if self._startup_behaviour() == "last_session":
+            QTimer.singleShot(0, self._open_last_session_at_startup)
 
     # ------------------------------------------------------------------
     # Construction
     # ------------------------------------------------------------------
     def _build_menu(self) -> None:
-        settings_action = self.menuBar().addAction("&Settings")
-        settings_action.triggered.connect(self.open_settings)
-        self._build_file_shortcuts()
+        settings_action = self.command_manager.action("app.settings")
+        settings_action.setText("&Settings")
+        self.menuBar().addAction(settings_action)
 
-        self.show_ribbon_action = QAction("Show Ribbon", self)
-        self.show_ribbon_action.setCheckable(True)
-        self.show_ribbon_action.setChecked(True)
-        self.show_ribbon_action.toggled.connect(self._set_ribbon_visible)
+        workspace_menu = self.menuBar().addMenu("&Workspace")
+        for command_id in (
+            "workspace.apply.analysis",
+            "workspace.apply.comparison",
+            "workspace.apply.reporting",
+            "workspace.apply.dataEditing",
+        ):
+            workspace_menu.addAction(self.command_manager.action(command_id))
+        workspace_menu.addSeparator()
+        workspace_menu.addAction(self.command_manager.action("workspace.saveCustom"))
+        workspace_menu.addAction(self.command_manager.action("workspace.restoreCustom"))
+        workspace_menu.addSeparator()
+        workspace_menu.addAction(self.command_manager.action("plot.workspace.float"))
+        workspace_menu.addAction(self.command_manager.action("plot.workspace.dock"))
+        self.workspace_menu = workspace_menu
 
-        help_action = self.menuBar().addAction("&Help")
-        help_action.triggered.connect(self.show_workflow_help)
+        mode_menu = self.menuBar().addMenu("&Mode")
+        mode_menu.addAction(self.command_manager.action("view.mode.basic"))
+        mode_menu.addAction(self.command_manager.action("view.mode.advanced"))
+        self.mode_menu = mode_menu
 
-    def _build_file_shortcuts(self) -> None:
-        for text, shortcut, handler in [
-            ("Open Excel", "Ctrl+O", self._open_via_panel),
-            ("Create Session", "Ctrl+N", self._create_manual_session),
-            ("Save Session", "Ctrl+S", self.save_session),
-            ("Load Session", "Ctrl+L", self.load_session),
-        ]:
-            action = QAction(text, self)
-            action.setShortcut(shortcut)
-            action.triggered.connect(handler)
-            self.addAction(action)
+        self.show_ribbon_action = self.command_manager.action("workspace.ribbon.toggle")
+
+        help_action = self.command_manager.action("app.help")
+        help_action.setText("&Help")
+        self.menuBar().addAction(help_action)
+
+    def _register_commands(self) -> None:
+        register = self.command_manager.register
+        advanced_only = {
+            "availability": self._advanced_mode_available,
+            "disabled_reason": "Switch to Advanced mode to use this command.",
+        }
+        register("data.open", "Open Excel", self._open_via_panel, category="Data", aliases=("open csv", "open xlsx"), shortcut="Ctrl+O", tooltip="Open a CSV or Excel data file.")
+        register("session.create", "Create Session", self._create_manual_session, category="Home", aliases=("new session",), shortcut="Ctrl+N", tooltip="Start a blank manual data session.")
+        register("session.save", "Save Session", self.save_session, category="Home", aliases=("save analysis",), shortcut="Ctrl+S", tooltip="Save the current analysis session.")
+        register("session.open", "Load Session", self.load_session, category="Home", aliases=("open session",), shortcut="Ctrl+L", tooltip="Load a saved analysis session.")
+        register("recent.open", "Recent", self._show_recent_menu, category="Home", aliases=("recent files", "recent sessions"), tooltip="Open recent data files and sessions.")
+        register("data.exportSelection", "Export Data", self._export_selected_data, category="Data", aliases=("export table",), tooltip="Export the selected Raw Data view.")
+        register("plot.generate", "Generate Plot", self._on_generate_plot, category="Plot", aliases=("render", "refresh graph"), shortcut="F5", tooltip="Generate the active plot from the selected channels.")
+        register("plot.saveImage", "Save Plot", self._save_plot_png, category="Plot", aliases=("export figure", "save image"), tooltip="Save the current figure.", availability=lambda: self._plot_generated, disabled_reason="Generate a plot first.")
+        register("plot.clear", "Clear Plot", self._clear_plot, category="Plot", tooltip="Clear the active plot canvas.")
+        register("comparison.show", "Runs / Comparison", lambda: self._show_plot_page(0), category="Analysis", aliases=("runs", "compare"), tooltip="Open Runs / Comparison.")
+        register("analysis.statistics.show", "Statistics", lambda: self._show_analysis_page(0), category="Analysis", tooltip="Open Statistics.")
+        register("data.raw.show", "Raw Data", self._show_raw_data, category="Data", aliases=("table", "edit data"), tooltip="Open Raw Data.")
+        register("analysis.maths.show", "Maths Channels", lambda: self._show_analysis_page(2), category="Data", aliases=("calculated channels",), tooltip="Open Maths Channels.", **advanced_only)
+        register("analysis.bestFits.show", "Best Fit Formulas", lambda: self._show_analysis_page(3), category="Analysis", aliases=("regression formulas",), tooltip="Open Best Fit Formulas.")
+        register("analysis.pointCompare.show", "Point Compare", lambda: self._show_plot_page(1), category="Analysis", aliases=("cursor",), tooltip="Open Point Compare.", **advanced_only)
+        register("requirements.limits.show", "Limits", lambda: self._show_requirements_page(0), category="Requirements", tooltip="Open Requirements / Limits.", **advanced_only)
+        register("requirements.margins.show", "Margins", lambda: self._show_requirements_page(1), category="Requirements", tooltip="Open margin-to-limit results.", **advanced_only)
+        register("requirements.refresh", "Refresh", self._refresh_requirements, category="Requirements", tooltip="Refresh limits, margins, and plot overlays.", **advanced_only)
+        register("reporting.notes.show", "Engineering Notes", lambda: self._show_lower_page(self.LOWER_NOTES_INDEX), category="Reporting", aliases=("notes",), tooltip="Open Engineering Notes.", **advanced_only)
+        register("reporting.notes.refresh", "Refresh Report", self._refresh_engineering_notes, category="Reporting", tooltip="Refresh compiled report text.", **advanced_only)
+        register("reporting.notes.copy", "Copy Notes", self._copy_engineering_notes, category="Reporting", tooltip="Copy compiled notes to the clipboard.", **advanced_only)
+        register("reporting.notes.clear", "Clear Notes", self._clear_engineering_notes, category="Reporting", tooltip="Clear Engineering Notes.", **advanced_only)
+        for preset, suffix, label in (
+            (WorkspacePreset.ANALYSIS, "analysis", "Analysis"),
+            (WorkspacePreset.COMPARISON, "comparison", "Comparison"),
+            (WorkspacePreset.REPORTING, "reporting", "Reporting"),
+            (WorkspacePreset.DATA_EDITING, "dataEditing", "Data Editing"),
+        ):
+            register(f"workspace.apply.{suffix}", label, lambda preset=preset: self._apply_workspace_preset(preset), category="Settings", aliases=(f"{label} workspace",), tooltip=f"Apply the {label} workspace layout.", **advanced_only)
+        register("workspace.saveCustom", "Save Custom Layout", self._save_custom_workspace, category="Settings", tooltip="Overwrite the single Custom workspace layout.", **advanced_only)
+        register("workspace.restoreCustom", "Restore Custom Layout", self._restore_custom_workspace, category="Settings", tooltip="Restore the saved Custom workspace layout.", **advanced_only)
+        register("plot.workspace.float", "Float Plot Workspace", self._float_plot_workspace, category="Plot", aliases=("detach plot",), tooltip="Open Plot Workspace in a floating window.")
+        register("plot.workspace.dock", "Bring Plot Back", self._dock_plot_workspace, category="Plot", aliases=("dock plot",), tooltip="Return Plot Workspace to the main window.")
+        ribbon_action = register(
+            "workspace.ribbon.toggle",
+            "Show Ribbon",
+            None,
+            category="Settings",
+            checkable=True,
+            checked=True,
+            tooltip="Show or hide the ribbon.",
+        )
+        ribbon_action.toggled.connect(self._set_ribbon_visible)
+        basic_action = register(
+            "view.mode.basic",
+            "Basic Mode",
+            lambda: self._set_user_experience_mode(UserExperienceMode.BASIC),
+            category="Settings",
+            aliases=("simple view",),
+            tooltip="Show the core data and plotting workflow.",
+            checkable=True,
+            checked=self._experience_mode is UserExperienceMode.BASIC,
+        )
+        advanced_action = register(
+            "view.mode.advanced",
+            "Advanced Mode",
+            lambda: self._set_user_experience_mode(UserExperienceMode.ADVANCED),
+            category="Settings",
+            aliases=("engineering tools",),
+            tooltip="Show all engineering analysis tools.",
+            checkable=True,
+            checked=self._experience_mode is UserExperienceMode.ADVANCED,
+        )
+        self._experience_mode_action_group = QActionGroup(self)
+        self._experience_mode_action_group.setExclusive(True)
+        self._experience_mode_action_group.addAction(basic_action)
+        self._experience_mode_action_group.addAction(advanced_action)
+        register("app.settings", "Settings", self.open_settings, category="Settings", tooltip="Open application settings.")
+        register("app.help", "Help", self.show_workflow_help, category="Settings", aliases=("shortcuts", "workflow help"), tooltip="Open workflow help.")
+        register("palette.open", "Command Palette", self._open_command_palette, category="Home", aliases=("command search",), shortcut="Ctrl+Shift+P", tooltip="Search and execute application commands.")
+        for panel_id, title in (
+            ("plot.controls", "Plot Navigator"), ("plot.legend", "Legend"), ("analysis.statistics", "Statistics"), ("data.raw", "Raw Data"), ("requirements.limits", "Requirements / Limits"), ("notes.engineering", "Engineering Notes"), ("runs.comparison", "Runs / Comparison"), ("compare.points", "Point Compare"), ("maths.channels", "Maths Channels"), ("analysis.best_fit_formulas", "Best Fit Formulas"),
+        ):
+            options = advanced_only if panel_id in BASIC_HIDDEN_PANEL_IDS else {}
+            register(f"panel.show.{panel_id}", f"Show {title}", lambda panel_id=panel_id: self.workspace_manager.show_panel(panel_id), category="View", aliases=(title,), tooltip=f"Show and focus {title}.", **options)
 
     def _build_central_layout(self) -> None:
         central = QWidget()
@@ -138,6 +259,9 @@ class MainWindow(QMainWindow):
 
         self.data_panel = DataFilePanel(self.vm.data_loading)
         self.axis_panel = AxisSelectionPanel()
+        self.axis_panel.plotConfigurationChanged.connect(
+            self._on_plot_configuration_changed
+        )
         self.plot_workspace = PlotWorkspace(self.vm.plot_workspace, self.vm.settings)
         self.plot_workspace.canvas.toolbar.set_axis_reset_controller(self._reset_axis_appearance)
         self.statistics_panel = StatisticsPanel()
@@ -162,78 +286,119 @@ class MainWindow(QMainWindow):
 
         self.data_panel.fileLoaded.connect(self._on_file_loaded)
         self.data_panel.sheetChanged.connect(self._on_sheet_changed)
-        self.data_panel.statusMessage.connect(self.statusBar().showMessage)
+        self.data_panel.statusMessage.connect(self.app_status.show_message)
+        self.maths_panel.channelRenamed.connect(self.axis_panel.rename_channel_selection)
         self.maths_panel.channelsChanged.connect(self._on_channels_changed)
-        self.maths_panel.statusMessage.connect(self.statusBar().showMessage)
+        self.maths_panel.statusMessage.connect(self.app_status.show_message)
         self.limits_panel.limitsChanged.connect(self._on_limits_changed)
-        self.limits_panel.statusMessage.connect(self.statusBar().showMessage)
+        self.limits_panel.statusMessage.connect(self.app_status.show_message)
         self.runs_panel.comparisonRequested.connect(self._on_generate_comparison)
-        self.runs_panel.statusMessage.connect(self.statusBar().showMessage)
+        self.runs_panel.statusMessage.connect(self.app_status.show_message)
 
         root.addWidget(self._build_ribbon())
         root.addWidget(self._build_collapsed_ribbon_bar())
 
-        left = QWidget()
-        left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(8, 8, 8, 8)
-        left_layout.addWidget(self.data_panel)
-        left_layout.addWidget(self.axis_panel, stretch=1)
-        left.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
-
-        left_scroll = QScrollArea()
-        left_scroll.setWidgetResizable(True)
-        left_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        left_scroll.setWidget(left)
-        left_scroll.setMinimumWidth(self.LEFT_RAIL_MINIMUM_WIDTH)
-        left_scroll.setMaximumWidth(self.LEFT_RAIL_MAXIMUM_WIDTH)
-        left_scroll.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
-        self.left_scroll = left_scroll
-
-        # Plot above, analysis notebook below. The lower tabs are attached to
-        # their content while the splitter handles plot/data resizing.
         self.plot_workspace.setMinimumHeight(260)
-        plot_area = QWidget()
-        plot_area_layout = QVBoxLayout(plot_area)
-        plot_area_layout.setContentsMargins(0, 0, 0, 0)
-        plot_area_layout.setSpacing(6)
-        plot_area_layout.addWidget(self._build_plot_tabs_bar())
-        plot_area_layout.addWidget(self.plot_workspace, stretch=1)
-        self.plot_area = plot_area
-
-        lower_panel = self._build_lower_groups()
-        right_splitter = QSplitter(Qt.Orientation.Vertical)
-        right_splitter.setChildrenCollapsible(True)
-        right_splitter.addWidget(plot_area)
-        right_splitter.addWidget(lower_panel)
-        right_splitter.setCollapsible(0, True)
-        right_splitter.setCollapsible(1, True)
-        right_splitter.setStretchFactor(0, 3)
-        right_splitter.setStretchFactor(1, 2)
-        right_splitter.setSizes([520, 260])
-        self.right_splitter = right_splitter
-
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(8, 8, 8, 8)
-        right_layout.setSpacing(6)
-        right_layout.addWidget(right_splitter, stretch=1)
-        self.right_panel = right
-
-        body_splitter = QSplitter(Qt.Orientation.Horizontal)
-        body_splitter.addWidget(left_scroll)
-        body_splitter.addWidget(right)
-        body_splitter.setStretchFactor(0, 1)
-        body_splitter.setStretchFactor(1, 4)
-        body_splitter.setChildrenCollapsible(False)
-        body_splitter.setCollapsible(0, True)
-        body_splitter.setCollapsible(1, False)
-        self.body_splitter = body_splitter
-
-        root.addWidget(body_splitter, stretch=1)
+        self.plot_area = self._build_plot_workspace_panel()
+        self.plot_navigator = self._build_plot_navigator_panel()
+        self.requirements_panel = self._build_requirements_panel()
+        self.workspace_registry = self._build_workspace_registry()
+        self.workspace_manager = WorkspaceManager(
+            self,
+            self.workspace_registry,
+            self.settings_manager,
+        )
+        self.dashboard = Dashboard(self.command_manager)
+        self.dashboard.recentFileRequested.connect(self._open_recent_file)
+        self.dashboard.recentSessionRequested.connect(self._open_recent_session)
+        self.dashboard.recoveryRequested.connect(self._recover_from_dashboard)
+        self.dashboard.recoveryDismissed.connect(self._dismiss_dashboard_recovery)
+        self.content_stack = QStackedWidget()
+        self.content_stack.setObjectName("MainContentStack")
+        self.content_stack.addWidget(self.dashboard)
+        self.content_stack.addWidget(self.workspace_manager.widget)
+        root.addWidget(self.content_stack, stretch=1)
         self.setCentralWidget(central)
-        body_splitter.setSizes([self.LEFT_RAIL_INITIAL_WIDTH, 1020])
-        self.lower_stack.setCurrentIndex(self.LOWER_PLOT_INDEX)
+        self.workspace_manager.build()
+        self._refresh_dashboard()
+        self.content_stack.setCurrentWidget(self.dashboard)
+        self.command_manager.refresh_availability()
+
+    def _build_plot_workspace_panel(self) -> QWidget:
+        panel = QWidget()
+        panel.setObjectName("PlotWorkspacePanel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        layout.addWidget(self._build_plot_tabs_bar())
+        layout.addWidget(self.plot_workspace, stretch=1)
+        return panel
+
+    def _build_plot_navigator_panel(self) -> QScrollArea:
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.addWidget(self.data_panel)
+        layout.addWidget(self.axis_panel, stretch=1)
+        content.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        scroll = QScrollArea()
+        scroll.setObjectName("PlotNavigator")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(content)
+        scroll.setMinimumWidth(self.LEFT_RAIL_MINIMUM_WIDTH)
+        scroll.setMaximumWidth(self.LEFT_RAIL_MAXIMUM_WIDTH)
+        return scroll
+
+    def _build_requirements_panel(self) -> QStackedWidget:
+        stack = self._build_panel_stack([self.limits_panel, self.limits_panel.summary_panel])
+        stack.setObjectName("RequirementsPanelStack")
+        return stack
+
+    def _build_workspace_registry(self) -> WorkspaceRegistry:
+        legend_panel = self.plot_workspace.take_legend_panel()
+        registry = WorkspaceRegistry()
+        descriptors = (
+            PanelDescriptor(
+                "plot.workspace",
+                "Plot Workspace",
+                self.plot_area,
+                DockArea.CENTER,
+                closable=False,
+                pinnable=False,
+                required=True,
+            ),
+            PanelDescriptor("plot.controls", "Plot Navigator", self.plot_navigator, DockArea.LEFT),
+            PanelDescriptor("plot.legend", "Legend", legend_panel, DockArea.RIGHT),
+            PanelDescriptor(
+                "analysis.statistics", "Statistics", self.statistics_panel, DockArea.RIGHT
+            ),
+            PanelDescriptor("data.raw", "Raw Data", self.raw_data_panel, DockArea.BOTTOM),
+            PanelDescriptor(
+                "requirements.limits",
+                "Requirements / Limits",
+                self.requirements_panel,
+                DockArea.BOTTOM,
+            ),
+            PanelDescriptor(
+                "notes.engineering", "Engineering Notes", self.notes_panel, DockArea.RIGHT
+            ),
+            PanelDescriptor(
+                "runs.comparison", "Runs / Comparison", self.runs_panel, DockArea.BOTTOM
+            ),
+            PanelDescriptor("compare.points", "Point Compare", self.cursor_panel, DockArea.BOTTOM),
+            PanelDescriptor("maths.channels", "Maths Channels", self.maths_panel, DockArea.BOTTOM),
+            PanelDescriptor(
+                "analysis.best_fit_formulas",
+                "Best Fit Formulas",
+                self.best_fit_formulas_panel,
+                DockArea.BOTTOM,
+            ),
+        )
+        for descriptor in descriptors:
+            registry.register(descriptor)
+        return registry
 
     def _build_header(self) -> QFrame:
         header = QFrame()
@@ -260,22 +425,40 @@ class MainWindow(QMainWindow):
         return header
 
     def _build_ribbon(self) -> QFrame:
-        ribbon = QFrame()
-        ribbon.setObjectName("RibbonBar")
-        ribbon.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        ribbon_layout = (
+            ("Home", ("session.create", "session.save", "session.open", "recent.open", "palette.open")),
+            ("Data", ("data.open", "data.raw.show", "analysis.maths.show", "data.exportSelection")),
+            ("Plot", ("plot.generate", "plot.saveImage", "plot.clear", "plot.workspace.float")),
+            ("Analysis", ("analysis.statistics.show", "comparison.show", "analysis.bestFits.show", "analysis.pointCompare.show")),
+            ("Requirements", ("requirements.limits.show", "requirements.margins.show", "requirements.refresh")),
+            ("Reporting", ("reporting.notes.show", "reporting.notes.refresh", "reporting.notes.copy", "reporting.notes.clear")),
+            ("Settings", ("app.settings", "view.mode.basic", "view.mode.advanced", "workspace.apply.analysis", "app.help")),
+        )
+        self.ribbon_manager = RibbonManager(
+            self,
+            self.command_manager,
+            ribbon_layout,
+            menu_populators={"recent.open": self._populate_recent_menu},
+        )
+        ribbon = self.ribbon_manager.build()
         self.ribbon = ribbon
-        layout = QHBoxLayout(ribbon)
-        layout.setContentsMargins(12, 5, 12, 5)
-        layout.setSpacing(8)
-
-        self.ribbon_buttons: dict[str, QPushButton] = {}
-        for title, commands in self._ribbon_commands():
-            layout.addWidget(self._build_ribbon_group(title, commands))
-        layout.addStretch(1)
+        self.ribbon_buttons = dict(self.ribbon_manager.buttons)
+        compatibility_keys = {
+            "FILE:Open Excel": "data.open", "FILE:Create Session": "session.create", "FILE:Save Session": "session.save", "FILE:Load Session": "session.open", "FILE:Recent": "recent.open", "FILE:Export Data": "data.exportSelection",
+            "PLOT:Generate Plot": "plot.generate", "PLOT:Save Plot": "plot.saveImage", "PLOT:Clear Plot": "plot.clear", "PLOT:Runs / Comparison": "comparison.show",
+            "ANALYSIS:Statistics": "analysis.statistics.show", "ANALYSIS:Raw Data": "data.raw.show", "ANALYSIS:Maths Channels": "analysis.maths.show", "ANALYSIS:Best Fit Formulas": "analysis.bestFits.show", "ANALYSIS:Cursor": "analysis.pointCompare.show",
+            "REQUIREMENTS:Limits": "requirements.limits.show", "REQUIREMENTS:Margins": "requirements.margins.show", "REQUIREMENTS:Refresh": "requirements.refresh",
+            "NOTES:Engineering Notes": "reporting.notes.show", "NOTES:Refresh Report Text": "reporting.notes.refresh", "NOTES:Clear Notes": "reporting.notes.clear", "NOTES:Copy Notes": "reporting.notes.copy",
+        }
+        for key, command_id in compatibility_keys.items():
+            self.ribbon_buttons[key] = self.ribbon_manager.button_for(command_id)
+        layout = ribbon.layout()
+        assert isinstance(layout, QHBoxLayout)
         self.hide_ribbon_button = QPushButton("Hide Ribbon")
         self.hide_ribbon_button.setObjectName("RibbonButton")
         self.hide_ribbon_button.setFixedHeight(23)
-        self.hide_ribbon_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.hide_ribbon_button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.hide_ribbon_button.setAccessibleName("Hide ribbon")
         self.hide_ribbon_button.setToolTip("Hide the ribbon to give more space to the plot and lower panels.")
         self.hide_ribbon_button.clicked.connect(lambda: self.show_ribbon_action.setChecked(False))
         layout.addWidget(self.hide_ribbon_button, 0, Qt.AlignmentFlag.AlignTop)
@@ -293,131 +476,13 @@ class MainWindow(QMainWindow):
         self.show_ribbon_button = QPushButton("Show Ribbon")
         self.show_ribbon_button.setObjectName("RibbonButton")
         self.show_ribbon_button.setFixedHeight(23)
-        self.show_ribbon_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.show_ribbon_button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.show_ribbon_button.setAccessibleName("Show ribbon")
         self.show_ribbon_button.clicked.connect(lambda: self.show_ribbon_action.setChecked(True))
         layout.addStretch(1)
         layout.addWidget(self.show_ribbon_button, 0, Qt.AlignmentFlag.AlignRight)
         bar.setVisible(False)
         return bar
-
-    def _ribbon_commands(self) -> list[tuple[str, list[tuple[Any, ...]]]]:
-        return [
-            (
-                "FILE",
-                [
-                    ("Open Excel", self._open_via_panel),
-                    ("Create Session", self._create_manual_session),
-                    ("Save Session", self.save_session),
-                    ("Load Session", self.load_session),
-                    ("Recent", None, self._populate_recent_menu),
-                    ("Export Data", self._export_selected_data),
-                ],
-            ),
-            (
-                "PLOT",
-                [
-                    ("Generate Plot", self._on_generate_plot),
-                    ("Save Plot", self._save_plot_png),
-                    ("Clear Plot", self._clear_plot),
-                    ("Runs / Comparison", lambda: self._show_plot_page(0)),
-                ],
-            ),
-            (
-                "ANALYSIS",
-                [
-                    ("Statistics", lambda: self._show_analysis_page(0)),
-                    ("Raw Data", lambda: self._show_analysis_page(1)),
-                    ("Maths Channels", lambda: self._show_analysis_page(2)),
-                    ("Best Fit Formulas", lambda: self._show_analysis_page(3)),
-                    ("Cursor", lambda: self._show_plot_page(1)),
-                ],
-            ),
-            (
-                "REQUIREMENTS",
-                [
-                    ("Limits", lambda: self._show_requirements_page(0)),
-                    ("Margins", lambda: self._show_requirements_page(1)),
-                    ("Refresh", self._refresh_requirements),
-                ],
-            ),
-            (
-                "NOTES",
-                [
-                    ("Engineering Notes", lambda: self._show_lower_page(self.LOWER_NOTES_INDEX)),
-                    ("Refresh Report Text", self._refresh_engineering_notes),
-                    ("Clear Notes", self._clear_engineering_notes),
-                    ("Copy Notes", self._copy_engineering_notes),
-                ],
-            ),
-        ]
-
-    def _build_ribbon_group(
-        self,
-        title: str,
-        commands: list[tuple[Any, ...]],
-    ) -> QFrame:
-        group = QFrame()
-        group.setObjectName("RibbonGroup")
-        group_layout = QVBoxLayout(group)
-        group_layout.setContentsMargins(6, 3, 6, 4)
-        group_layout.setSpacing(3)
-
-        label = QLabel(title)
-        label.setObjectName("RibbonGroupLabel")
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        group_layout.addWidget(label)
-
-        button_grid = QGridLayout()
-        button_grid.setContentsMargins(0, 0, 0, 0)
-        button_grid.setHorizontalSpacing(4)
-        button_grid.setVerticalSpacing(3)
-        column_count = 3 if len(commands) > 4 else 2
-        for index, command in enumerate(commands):
-            text = command[0]
-            handler = command[1] if len(command) > 1 else None
-            menu_populator = command[2] if len(command) > 2 else None
-            button = self._build_ribbon_button(title, text, handler, menu_populator)
-            self.ribbon_buttons[f"{title}:{text}"] = button
-            button_grid.addWidget(button, index // column_count, index % column_count)
-        group_layout.addLayout(button_grid)
-        return group
-
-    def _build_ribbon_button(
-        self,
-        title: str,
-        text: str,
-        handler: Optional[Callable[[], None]],
-        menu_populator: Optional[Callable[[QMenu], None]] = None,
-    ) -> QPushButton:
-        """Build one ribbon button.
-
-        When ``menu_populator`` is provided the button shows a drop-down ``QMenu``
-        that is rebuilt on every ``aboutToShow`` so it always reflects current
-        state (used for the Recent files/sessions menu). Otherwise it is a plain
-        push button wired to ``handler``. A ``QPushButton`` is used in both cases
-        so the existing ``QPushButton#RibbonButton`` styling is preserved.
-        """
-        button = QPushButton(text)
-        button.setObjectName("RibbonButton")
-        if title == "PLOT" and text == "Generate Plot":
-            button.setProperty("ribbonPrimary", "true")
-        button.setFixedHeight(23)
-        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        if menu_populator is not None:
-            menu = QMenu(button)
-            menu.aboutToShow.connect(
-                lambda m=menu, p=menu_populator: self._populate_ribbon_menu(m, p)
-            )
-            button.setMenu(menu)
-        elif handler is not None:
-            button.clicked.connect(handler)
-        return button
-
-    @staticmethod
-    def _populate_ribbon_menu(menu: QMenu, populator: Callable[[QMenu], None]) -> None:
-        """Clear and repopulate a ribbon drop-down menu before it is shown."""
-        menu.clear()
-        populator(menu)
 
     def _build_logo_label(self) -> Optional[QLabel]:
         """Build the Eaton branding logo, or ``None`` if it cannot be decoded.
@@ -553,7 +618,7 @@ class MainWindow(QMainWindow):
             return
         result = self.vm.reorder_plot_profile(from_index, to_index)
         if result.ok:
-            self.statusBar().showMessage(result.message)
+            self._show_status(result.message)
         QTimer.singleShot(0, self._sync_plot_tabs)
 
     def _show_plot_tab_menu(self, position) -> None:
@@ -583,7 +648,7 @@ class MainWindow(QMainWindow):
             return
         self._sync_plot_tabs()
         self._apply_active_plot_profile()
-        self.statusBar().showMessage(result.message)
+        self._show_status(result.message)
 
     def _duplicate_plot_profile(self, index: int | None = None) -> None:
         source_index = self.vm.state.active_plot_profile_index if index is None else index
@@ -596,7 +661,7 @@ class MainWindow(QMainWindow):
             self._insert_plot_snapshot(result.payload, self._plot_profile_snapshots.get(source_index))
         self._sync_plot_tabs()
         self._apply_active_plot_profile()
-        self.statusBar().showMessage(result.message)
+        self._show_status(result.message)
 
     def _rename_plot_profile(self, index: int, name: str | None = None) -> None:
         current = self.vm.state.plot_profiles[index] if 0 <= index < len(self.vm.state.plot_profiles) else {}
@@ -616,7 +681,7 @@ class MainWindow(QMainWindow):
             qt_message_service.warning(self, "Rename Plot", result.message)
             return
         self._sync_plot_tabs()
-        self.statusBar().showMessage(result.message)
+        self._show_status(result.message)
 
     def _delete_plot_profile(self, index: int, confirm: bool = True) -> None:
         current = self.vm.state.plot_profiles[index] if 0 <= index < len(self.vm.state.plot_profiles) else {}
@@ -638,7 +703,7 @@ class MainWindow(QMainWindow):
         self._delete_plot_snapshot(index)
         self._sync_plot_tabs()
         self._apply_active_plot_profile()
-        self.statusBar().showMessage(result.message)
+        self._show_status(result.message)
 
     def _on_plot_tab_changed(self, index: int) -> None:
         if self._syncing_plot_tabs or index < 0:
@@ -657,7 +722,7 @@ class MainWindow(QMainWindow):
             return
         self._active_plot_tab_index = index
         self._apply_active_plot_profile()
-        self.statusBar().showMessage(result.message)
+        self._show_status(result.message)
 
     def _capture_current_plot_profile(self) -> None:
         self.vm.ensure_plot_profiles()
@@ -825,10 +890,10 @@ class MainWindow(QMainWindow):
         """Clear the active plot's manual title/labels/limits/ticks and re-render."""
         result = self.vm.reset_active_axis_appearance()
         if not result.ok:
-            self.statusBar().showMessage(result.message)
+            self._show_status(result.message)
             return
         self._apply_active_plot_profile()
-        self.statusBar().showMessage(result.message)
+        self._show_status(result.message)
         self._refresh_best_fit_formulas()
 
     def _open_via_panel(self) -> None:
@@ -843,6 +908,7 @@ class MainWindow(QMainWindow):
             ):
                 return
         result = self.vm.create_manual_session()
+        self._active_recovery_path = None
         self._current_session_path = None
         self._plot_generated = False
         self._plot_display_frozen = False
@@ -865,7 +931,9 @@ class MainWindow(QMainWindow):
         self.runs_panel.refresh()
         self.raw_data_panel.enter_edit_mode()
         self._show_analysis_page(1)
-        self.statusBar().showMessage(
+        self._show_workspace()
+        self.app_status.set_plot_status(PlotStatus.NO_PLOT)
+        self._show_status(
             f"{result.message} Edit the Raw Data table, then generate a plot."
         )
 
@@ -880,28 +948,94 @@ class MainWindow(QMainWindow):
         self.maths_panel.refresh()
         self.statistics_panel.set_statistics(self.vm.plot_workspace.statistics([]))
         self.vm.state.is_dirty = True
+        self._sync_durable_status()
 
     def _set_ribbon_visible(self, visible: bool) -> None:
         if hasattr(self, "ribbon"):
             self.ribbon.setVisible(visible)
         if hasattr(self, "collapsed_ribbon_bar"):
             self.collapsed_ribbon_bar.setVisible(not visible)
-        self.statusBar().showMessage("Ribbon shown." if visible else "Ribbon hidden.")
+        self._show_status("Ribbon shown." if visible else "Ribbon hidden.")
+
+    def _advanced_mode_available(self) -> bool:
+        return self._experience_mode is UserExperienceMode.ADVANCED
+
+    def _apply_user_experience_mode(self) -> None:
+        is_basic = self._experience_mode is UserExperienceMode.BASIC
+        self.workspace_manager.set_visibility_mask(
+            BASIC_HIDDEN_PANEL_IDS if is_basic else frozenset()
+        )
+        for command_id in BASIC_HIDDEN_COMMAND_IDS:
+            self.command_manager.action(command_id).setVisible(not is_basic)
+        self.command_manager.action("view.mode.basic").setChecked(is_basic)
+        self.command_manager.action("view.mode.advanced").setChecked(not is_basic)
+        self.command_manager.refresh_availability()
+
+    def _set_user_experience_mode(self, mode: UserExperienceMode) -> None:
+        resolved = UserExperienceMode.from_value(mode)
+        if resolved is self._experience_mode:
+            return
+        self._experience_mode = resolved
+        self._apply_user_experience_mode()
+        self.settings_manager.set("general_ui", "user_experience_mode", resolved.value)
+        try:
+            self.settings_manager.save()
+        except RuntimeError:
+            self._show_status(
+                f"{resolved.value.title()} mode applied for this run; settings are read-only."
+            )
+            return
+        self._show_status(f"{resolved.value.title()} mode applied.")
+
+    def _show_status(self, message: object) -> None:
+        self.app_status.show_message(message)
+        self._sync_durable_status()
+        self.command_manager.refresh_availability()
+
+    def _sync_durable_status(self) -> None:
+        self.app_status.set_session_dirty(self.vm.state.is_dirty)
+
+    def _on_plot_configuration_changed(self) -> None:
+        if not self._plot_generated:
+            self.app_status.set_plot_status(PlotStatus.NO_PLOT)
+            return
+        current = self._current_plot_selection_signature()
+        if self._last_plot_selection is not None and current == self._last_plot_selection:
+            self.app_status.set_plot_status(PlotStatus.CURRENT)
+        else:
+            self.app_status.set_plot_status(PlotStatus.STALE)
 
     def _show_lower_page(self, index: int) -> None:
-        self.lower_stack.setCurrentIndex(index)
+        panel_ids = {
+            self.LOWER_PLOT_INDEX: "runs.comparison",
+            self.LOWER_ANALYSIS_INDEX: "analysis.statistics",
+            self.LOWER_REQUIREMENTS_INDEX: "requirements.limits",
+            self.LOWER_NOTES_INDEX: "notes.engineering",
+        }
+        self.workspace_manager.show_panel(panel_ids[index])
 
     def _show_plot_page(self, index: int) -> None:
-        self._show_lower_page(self.LOWER_PLOT_INDEX)
-        self.plot_group.setCurrentIndex(index)
+        self.workspace_manager.show_panel(
+            ("runs.comparison", "compare.points")[index]
+        )
 
     def _show_analysis_page(self, index: int) -> None:
-        self._show_lower_page(self.LOWER_ANALYSIS_INDEX)
-        self.analysis_stack.setCurrentIndex(index)
+        self.workspace_manager.show_panel(
+            (
+                "analysis.statistics",
+                "data.raw",
+                "maths.channels",
+                "analysis.best_fit_formulas",
+            )[index]
+        )
+
+    def _show_raw_data(self) -> None:
+        self.raw_data_panel.refresh()
+        self.workspace_manager.show_panel("data.raw")
 
     def _show_requirements_page(self, index: int) -> None:
-        self._show_lower_page(self.LOWER_REQUIREMENTS_INDEX)
-        self.requirements_stack.setCurrentIndex(index)
+        self.requirements_panel.setCurrentIndex(index)
+        self.workspace_manager.show_panel("requirements.limits")
 
     def _export_selected_data(self) -> None:
         self._show_analysis_page(1)
@@ -912,24 +1046,24 @@ class MainWindow(QMainWindow):
         self.limits_panel.refresh()
         self.limits_panel.refresh_margins()
         self._generate_plot()
-        self.statusBar().showMessage("Requirements and margin summary refreshed.")
+        self._show_status("Requirements and margin summary refreshed.")
 
     def _refresh_engineering_notes(self) -> None:
         self._show_lower_page(self.LOWER_NOTES_INDEX)
         self.notes_panel.refresh_report()
-        self.statusBar().showMessage("Engineering notes report text refreshed.")
+        self._show_status("Engineering notes report text refreshed.")
 
     def _clear_engineering_notes(self) -> None:
         self._show_lower_page(self.LOWER_NOTES_INDEX)
         if self.notes_panel.clear_notes():
-            self.statusBar().showMessage("Engineering notes cleared.")
+            self._show_status("Engineering notes cleared.")
 
     def _copy_engineering_notes(self) -> None:
         self._show_lower_page(self.LOWER_NOTES_INDEX)
         self.notes_panel.refresh_report()
         text = self.notes_panel.report_text.toPlainText()
         QGuiApplication.clipboard().setText(text)
-        self.statusBar().showMessage("Engineering notes copied to the clipboard.")
+        self._show_status("Engineering notes copied to the clipboard.")
 
     def _clear_plot(self) -> None:
         result = self.plot_workspace.clear_plot()
@@ -938,7 +1072,8 @@ class MainWindow(QMainWindow):
         self._plot_profile_snapshots.pop(self.vm.state.active_plot_profile_index, None)
         self.cursor_panel.refresh()
         self._refresh_best_fit_formulas()
-        self.statusBar().showMessage(result.message)
+        self.app_status.set_plot_status(PlotStatus.NO_PLOT)
+        self._show_status(result.message)
 
     def open_settings(self) -> None:
         global SettingsDialog
@@ -949,9 +1084,13 @@ class MainWindow(QMainWindow):
 
         dialog = SettingsDialog(self.vm.settings, self)
         if dialog.exec():
+            self._experience_mode = UserExperienceMode.from_value(
+                self.settings_manager.get("general_ui", "user_experience_mode")
+            )
+            self._apply_user_experience_mode()
             self._apply_theme()
             self._configure_autosave_timer()
-            self.statusBar().showMessage("Settings saved.")
+            self._show_status("Settings saved.")
 
     def show_workflow_help(self) -> None:
         global HelpDialog
@@ -982,9 +1121,21 @@ class MainWindow(QMainWindow):
         if result.ok:
             self._current_session_path = str(getattr(result, "payload", None) or path)
             self.vm.register_recent_session(self._current_session_path)
+            self._retire_active_recovery()
         qt_message_service.show_result(self, "Save Session", result)
-        self.statusBar().showMessage(result.message)
+        self._show_status(result.message)
         return bool(result.ok)
+
+    def _retire_active_recovery(self) -> None:
+        recovery_path = self._active_recovery_path
+        self._active_recovery_path = None
+        if recovery_path is None:
+            return
+        try:
+            recovery_path.unlink(missing_ok=True)
+        except OSError:
+            self.app_status.set_autosave("Recovery cleanup failed", failed=True)
+        self._refresh_dashboard()
 
     def _save_session_initial_path(self) -> str:
         if self._current_session_path:
@@ -996,6 +1147,54 @@ class MainWindow(QMainWindow):
 
     def _has_unsaved_changes(self) -> bool:
         return bool(self.vm.state.has_data and self.vm.state.is_dirty)
+
+    def _save_custom_workspace(self) -> None:
+        self.workspace_manager.save_custom_layout()
+        self.app_status.set_workspace("Custom")
+        self._show_status("Custom workspace layout saved.")
+
+    def _apply_workspace_preset(self, preset: WorkspacePreset) -> None:
+        self.workspace_manager.apply_preset(preset)
+        self.app_status.set_workspace(preset.value.replace("_", " ").title())
+        self.app_status.show_message(
+            f"{preset.value.replace('_', ' ').title()} workspace applied."
+        )
+
+    def _restore_custom_workspace(self) -> None:
+        try:
+            self.workspace_manager.apply_preset(WorkspacePreset.CUSTOM)
+            self.app_status.set_workspace("Custom")
+            self._show_status("Custom workspace applied.")
+        except ValueError as exc:
+            self._show_status(str(exc))
+
+    def _float_plot_workspace(self) -> None:
+        self.workspace_manager.float_panel("plot.workspace")
+        self._show_status("Plot Workspace opened separately.")
+
+    def _dock_plot_workspace(self) -> None:
+        self.workspace_manager.dock_panel("plot.workspace")
+        self._show_status("Plot Workspace returned to the main window.")
+
+    def _open_command_palette(self) -> None:
+        if self._command_palette is None:
+            self._command_palette = CommandPalette(self.command_manager, self)
+        self._command_palette.open_palette()
+
+    def _show_recent_menu(self) -> None:
+        if not hasattr(self, "ribbon_manager"):
+            return
+        button = self.ribbon_manager.button_for("recent.open")
+        menu = button.menu()
+        if menu is None:
+            return
+        self.ribbon_manager._populate_menu(menu, self._populate_recent_menu)
+        menu.popup(button.mapToGlobal(button.rect().bottomLeft()))
+
+    def _accept_close(self, event) -> None:
+        self.workspace_manager.save()
+        self.workspace_manager.begin_shutdown()
+        event.accept()
 
     def closeEvent(self, event) -> None:
         """Warn about unsaved changes before closing.
@@ -1009,7 +1208,7 @@ class MainWindow(QMainWindow):
         if self.vm.state.has_data:
             self._capture_current_plot_profile()
         if not self._has_unsaved_changes():
-            event.accept()
+            self._accept_close(event)
             return
         choice = qt_message_service.confirm_unsaved_changes(
             self,
@@ -1023,7 +1222,7 @@ class MainWindow(QMainWindow):
         if choice == "save" and not self.save_session():
             event.ignore()
             return
-        event.accept()
+        self._accept_close(event)
 
     def load_session(self) -> None:
         initial_dir = qt_widget_helpers.last_session_directory(self.settings_manager)
@@ -1032,22 +1231,31 @@ class MainWindow(QMainWindow):
             return
         self._load_session_path(path)
 
-    def _load_session_path(self, path: str) -> None:
+    def _load_session_path(self, path: str, *, recovery: bool = False) -> bool:
         """Restore a session from ``path`` (shared by the dialog and recent menu)."""
         qt_widget_helpers.remember_session_directory(self.settings_manager, path)
         result, main_data_warning_shown = self._restore_session_with_optional_relink(path)
         if not result.ok:
             qt_message_service.error(self, "Load Session", result.message)
-            self.statusBar().showMessage(result.message)
-            return
-        self._current_session_path = path
-        self.vm.register_recent_session(path)
+            self._show_status(result.message)
+            self._show_dashboard()
+            return False
+        self._current_session_path = None if recovery else path
+        if not recovery:
+            self._active_recovery_path = None
+            self.vm.register_recent_session(path)
         selection = result.payload if isinstance(result.payload, dict) else {}
         self._apply_loaded_session(selection)
+        self._refresh_dashboard()
+        if self.vm.state.has_data:
+            self._show_workspace()
+        else:
+            self._show_dashboard()
         warnings = self._warnings_for_display(result.warnings, main_data_warning_shown)
         if warnings:
             qt_message_service.warning(self, "Load Session", "\n".join(warnings))
-        self.statusBar().showMessage(result.message)
+        self._show_status(result.message)
+        return True
 
     # ------------------------------------------------------------------
     # Recent files / sessions menu
@@ -1089,15 +1297,95 @@ class MainWindow(QMainWindow):
 
     def _open_recent_file(self, path: str) -> None:
         if not Path(path).exists():
-            self.statusBar().showMessage(f"File no longer exists: {path}")
+            self._show_status(f"File no longer exists: {path}")
             return
         self.data_panel.load_path(path)
 
     def _open_recent_session(self, path: str) -> None:
         if not Path(path).exists():
-            self.statusBar().showMessage(f"Session no longer exists: {path}")
+            self._show_status(f"Session no longer exists: {path}")
             return
         self._load_session_path(path)
+
+    def _startup_behaviour(self) -> str:
+        try:
+            return str(self.settings_manager.get("general_ui", "startup_behaviour"))
+        except (KeyError, AttributeError):
+            return "blank"
+
+    def _open_last_session_at_startup(self) -> None:
+        if self.vm.state.has_data:
+            return
+        for path in self.vm.recent_sessions():
+            if Path(path).exists():
+                self._load_session_path(path)
+                return
+        self._show_dashboard()
+
+    def _show_dashboard(self) -> None:
+        if self.vm.state.has_data:
+            return
+        self._refresh_dashboard()
+        self.content_stack.setCurrentWidget(self.dashboard)
+
+    def _show_workspace(self) -> None:
+        self.content_stack.setCurrentWidget(self.workspace_manager.widget)
+
+    def _refresh_dashboard(self) -> None:
+        recent_files = self.vm.recent_files()
+        recent_sessions = self.vm.recent_sessions()
+        self.dashboard.set_recent_items(recent_files, recent_sessions)
+        try:
+            dismissed = self.settings_manager.get("recovery", "dismissed_fingerprints")
+        except (KeyError, AttributeError):
+            dismissed = []
+        dismissed_fingerprints = dismissed if isinstance(dismissed, list) else []
+        self._recovery_candidate = find_recovery_candidate(
+            recent_files,
+            recent_sessions,
+            [str(value) for value in dismissed_fingerprints],
+        )
+        if self._recovery_candidate is None:
+            self.dashboard.set_recovery("")
+            return
+        modified = time.strftime(
+            "%Y-%m-%d %H:%M",
+            time.localtime(self._recovery_candidate.modified_epoch),
+        )
+        self.dashboard.set_recovery(str(self._recovery_candidate.path), modified)
+
+    def _recover_from_dashboard(self, path: str) -> None:
+        candidate = self._recovery_candidate
+        if candidate is None or candidate.path != Path(path) or not candidate.path.exists():
+            self._refresh_dashboard()
+            self._show_status("The recovery file is no longer available.")
+            return
+        if not self._load_session_path(path, recovery=True):
+            return
+        self._active_recovery_path = candidate.path
+        self.vm.state.is_dirty = True
+        self._sync_durable_status()
+        self._show_status("Recovery loaded. Save the session to keep this work.")
+
+    def _dismiss_dashboard_recovery(self, path: str) -> None:
+        candidate = self._recovery_candidate
+        if candidate is None or candidate.path != Path(path):
+            self._refresh_dashboard()
+            return
+        try:
+            dismissed = self.settings_manager.get("recovery", "dismissed_fingerprints")
+        except (KeyError, AttributeError):
+            dismissed = []
+        fingerprints = [str(value) for value in dismissed] if isinstance(dismissed, list) else []
+        fingerprints = [value for value in fingerprints if value != candidate.fingerprint]
+        fingerprints.append(candidate.fingerprint)
+        self.settings_manager.set("recovery", "dismissed_fingerprints", fingerprints[-20:])
+        try:
+            self.settings_manager.save()
+        except RuntimeError:
+            pass
+        self._refresh_dashboard()
+        self._show_status("Recovery dismissed. The recovery file was not deleted.")
 
     # ------------------------------------------------------------------
     # Drag-and-drop file open
@@ -1118,7 +1406,7 @@ class MainWindow(QMainWindow):
             self._load_session_path(path)
         else:
             self.data_panel.load_path(path)
-        self.statusBar().showMessage(f"Opened via drag-and-drop: {path}")
+        self._show_status(f"Opened via drag-and-drop: {path}")
 
     def _first_supported_drop_path(self, event: Any) -> Optional[str]:
         """Return the first dropped local file with a supported extension.
@@ -1188,9 +1476,12 @@ class MainWindow(QMainWindow):
         result = self.vm.save_session(target, mark_clean=False)
         self._last_autosave_epoch = time.time()
         if result.ok:
-            self.statusBar().showMessage(f"Auto-saved at {time.strftime('%H:%M:%S')}")
+            saved_at = time.strftime("%H:%M:%S")
+            self.app_status.set_autosave(f"Recovery saved {saved_at}")
+            self._show_status(f"Auto-saved at {saved_at}")
         else:
-            self.statusBar().showMessage(f"Auto-save failed: {result.message}")
+            self.app_status.set_autosave("Auto-save failed", failed=True)
+            self._show_status(f"Auto-save failed: {result.message}")
 
     def _apply_loaded_session(self, selection: dict) -> None:
         self._plot_profile_snapshots.clear()
@@ -1323,19 +1614,21 @@ class MainWindow(QMainWindow):
         result = self.vm.update_active_legend_channel_override(channel, style)
         if not result.ok:
             qt_message_service.warning(self, "Legend Channel", result.message)
-            self.statusBar().showMessage(result.message)
+            self._show_status(result.message)
             return
         appearance = self.plot_workspace.current_axis_appearance() if self._plot_generated else {}
         plot_result = self._generate_plot(appearance)
         if plot_result is None:
-            self.statusBar().showMessage(result.message)
+            self._show_status(result.message)
             return
         if not plot_result.ok:
             qt_message_service.warning(self, "Legend Channel", plot_result.message)
-            self.statusBar().showMessage(plot_result.message)
+            self.app_status.set_plot_status(PlotStatus.ERROR, plot_result.message)
+            self._show_status(plot_result.message)
             return
         self._plot_generated = True
-        self.statusBar().showMessage(result.message)
+        self.app_status.set_plot_status(PlotStatus.CURRENT)
+        self._show_status(result.message)
 
     def _on_annotations_changed(self) -> None:
         self.vm.ensure_plot_profiles()
@@ -1344,29 +1637,33 @@ class MainWindow(QMainWindow):
             return
         self.vm.state.plot_profiles[index]["annotations"] = self.plot_workspace.current_annotations()
         self.vm.state.is_dirty = True
-        self.statusBar().showMessage("Plot annotations updated.")
+        self.app_status.set_plot_status(PlotStatus.CURRENT)
+        self._show_status("Plot annotations updated.")
 
     def _on_legend_channel_visibility_changed(self, channel: str, hidden: bool) -> None:
         result = self.vm.update_active_legend_channel_override(channel, {"channel": channel, "hidden": hidden})
         if not result.ok:
             qt_message_service.warning(self, "Legend Channel", result.message)
-            self.statusBar().showMessage(result.message)
+            self._show_status(result.message)
             return
         appearance = self.plot_workspace.current_axis_appearance() if self._plot_generated else {}
         plot_result = self._generate_plot(appearance)
         if plot_result is None:
-            self.statusBar().showMessage(result.message)
+            self._show_status(result.message)
             return
         if not plot_result.ok:
             qt_message_service.warning(self, "Legend Channel", plot_result.message)
-            self.statusBar().showMessage(plot_result.message)
+            self.app_status.set_plot_status(PlotStatus.ERROR, plot_result.message)
+            self._show_status(plot_result.message)
             return
         self._plot_generated = True
         action = "Hidden" if hidden else "Shown"
-        self.statusBar().showMessage(f"{action} '{channel}'.")
+        self.app_status.set_plot_status(PlotStatus.CURRENT)
+        self._show_status(f"{action} '{channel}'.")
 
     def _on_file_loaded(self, columns: list[str]) -> None:
         suggested_x = self.vm.data_loading.suggested_x_column(columns)
+        self._active_recovery_path = None
         self._current_session_path = None
         self._plot_generated = False
         self._plot_display_frozen = False
@@ -1388,7 +1685,10 @@ class MainWindow(QMainWindow):
         loaded_path = self.vm.state.filepath
         if loaded_path:
             self.vm.register_recent_file(str(loaded_path))
-        self.statusBar().showMessage(f"Loaded {len(columns)} columns. Select channels and generate a plot.")
+        self._refresh_dashboard()
+        self._show_workspace()
+        self.app_status.set_plot_status(PlotStatus.NO_PLOT)
+        self._show_status(f"Loaded {len(columns)} columns. Select channels and generate a plot.")
 
     def _on_sheet_changed(self, columns: list[str]) -> None:
         self._capture_current_plot_profile()
@@ -1405,7 +1705,7 @@ class MainWindow(QMainWindow):
         self.cursor_panel.refresh()
         self._refresh_best_fit_formulas()
         sheet_name = self.vm.state.sheet_name or "selected sheet"
-        self.statusBar().showMessage(
+        self._show_status(
             f"Loaded sheet '{sheet_name}' with {len(columns)} columns. Existing plots were left unchanged."
         )
 
@@ -1424,7 +1724,8 @@ class MainWindow(QMainWindow):
             return
         if not result.ok:
             qt_message_service.warning(self, "Plot", result.message)
-            self.statusBar().showMessage(result.message)
+            self.app_status.set_plot_status(PlotStatus.ERROR, result.message)
+            self._show_status(result.message)
             return
         self._plot_generated = True
         self._update_statistics(self.axis_panel.all_selected_y())
@@ -1432,7 +1733,8 @@ class MainWindow(QMainWindow):
         self.limits_panel.refresh_margins()
         self.runs_panel.update_statistics()
         self._refresh_best_fit_formulas()
-        self.statusBar().showMessage(result.message)
+        self.app_status.set_plot_status(PlotStatus.CURRENT)
+        self._show_status(result.message)
 
     def _notes_context(self) -> tuple[str, str, str]:
         file_name = self.vm.state.filepath.name if self.vm.state.filepath else ""
@@ -1458,7 +1760,8 @@ class MainWindow(QMainWindow):
         )
         if not result.ok:
             qt_message_service.warning(self, "Comparison Plot", result.message)
-            self.statusBar().showMessage(result.message)
+            self.app_status.set_plot_status(PlotStatus.ERROR, result.message)
+            self._show_status(result.message)
             return
         self._last_plot_selection = None
         self.runs_panel.update_statistics()
@@ -1466,7 +1769,8 @@ class MainWindow(QMainWindow):
         if skipped:
             message += f" Skipped {len(skipped)} missing/non-numeric channel(s)."
         self.runs_panel.set_status(message)
-        self.statusBar().showMessage(message)
+        self.app_status.set_plot_status(PlotStatus.CURRENT)
+        self._show_status(message)
 
     def _generate_plot(
         self,
@@ -1519,6 +1823,10 @@ class MainWindow(QMainWindow):
             self._last_plot_selection = dict(selection)
             self._plot_display_frozen = False
             self._cache_active_plot_snapshot(result)
+            self.app_status.set_plot_status(PlotStatus.CURRENT)
+        else:
+            self.app_status.set_plot_status(PlotStatus.ERROR, result.message)
+        self._sync_durable_status()
         return result
 
     def _current_plot_selection_signature(self) -> dict[str, Any] | None:
@@ -1599,7 +1907,8 @@ class MainWindow(QMainWindow):
         self.axis_panel.xmax_edit.setText(f"{xmax:g}")
         result = self._generate_plot()
         if result is not None and result.ok:
-            self.statusBar().showMessage(
+            self.app_status.set_plot_status(PlotStatus.CURRENT)
+            self._show_status(
                 f"Analysis window set from locked points: {xmin:g} to {xmax:g}."
             )
 
@@ -1613,9 +1922,9 @@ class MainWindow(QMainWindow):
         result = self.plot_workspace.save_plot_png(path)
         if not result.ok:
             qt_message_service.warning(self, "Save Plot", result.message)
-            self.statusBar().showMessage(result.message)
+            self._show_status(result.message)
             return
-        self.statusBar().showMessage(result.message)
+        self._show_status(result.message)
 
     def _update_statistics(self, y_cols: list[str]) -> None:
         decimals = int(self.vm.settings.get("axis_scaling", "decimal_places_statistics", 4) or 4)

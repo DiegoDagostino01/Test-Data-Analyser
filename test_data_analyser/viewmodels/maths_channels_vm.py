@@ -7,12 +7,13 @@ calculated-channel definitions on ``AppState`` are mutated in place.
 """
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
 import pandas as pd
 
 from ..core.naming import natural_sort_key
-from ..services import maths_channel_service
+from ..services import column_reference_service, maths_channel_service
 from ..services.maths_channel_service import MathsChannelEvaluator
 from ..services.results import OperationResult
 from .app_state import AppState
@@ -103,25 +104,55 @@ class MathsChannelsViewModel:
             return OperationResult.failure(
                 f"'{channel_name}' already exists as a source data column. Choose a different name."
             )
+        if channel_name in self.state.calculated_channels and channel_name != selected_name:
+            return OperationResult.failure(
+                f"Maths Channel '{channel_name}' already exists. Choose a different name."
+            )
         try:
             series, referenced_columns = self._evaluator().evaluate(formula, blocked_names={channel_name})
         except Exception as exc:
             return OperationResult.failure(str(exc))
 
-        if selected_name and selected_name != channel_name:
-            self.state.calculated_channels.pop(selected_name, None)
-            if selected_name in self.state.df.columns:
-                del self.state.df[selected_name]
-
-        self.state.df[channel_name] = series
-        self.state.invalidate_numeric_cache()
-        self.state.calculated_channels[channel_name] = {
+        candidate_definitions = deepcopy(self.state.calculated_channels)
+        candidate_definitions[channel_name] = {
             "name": channel_name,
             "formula": formula,
             "description": str(description).strip(),
             "enabled": True,
             "created_from_columns": referenced_columns,
         }
+        renamed_from = selected_name if selected_name and selected_name != channel_name else None
+        if renamed_from is not None:
+            column_reference_service.propagate_column_rename(
+                current_x_axis=self.state.current_x_axis,
+                plot_profiles=[],
+                calculated_channels=candidate_definitions,
+                limit_lines=[],
+                old_name=renamed_from,
+                new_name=channel_name,
+            )
+            candidate_definitions.pop(renamed_from, None)
+        try:
+            maths_channel_service.calculated_channel_evaluation_order(candidate_definitions)
+        except ValueError as exc:
+            return OperationResult.failure(str(exc))
+
+        if renamed_from is not None:
+            update = column_reference_service.propagate_column_rename(
+                current_x_axis=self.state.current_x_axis,
+                plot_profiles=self.state.plot_profiles,
+                calculated_channels={},
+                limit_lines=self.state.limit_lines,
+                old_name=renamed_from,
+                new_name=channel_name,
+            )
+            self.state.current_x_axis = update.current_x_axis
+            if renamed_from in self.state.df.columns:
+                del self.state.df[renamed_from]
+
+        self.state.df[channel_name] = series
+        self.state.invalidate_numeric_cache()
+        self.state.calculated_channels = candidate_definitions
         self.state.is_dirty = True
         return OperationResult.success(
             f"Maths Channel '{channel_name}' saved.",
@@ -140,13 +171,32 @@ class MathsChannelsViewModel:
         if not self.state.calculated_channels:
             return OperationResult.success("No Maths Channels have been defined.", payload={"errors": [], "changed": False})
 
+        try:
+            evaluation_order = maths_channel_service.calculated_channel_evaluation_order(
+                self.state.calculated_channels
+            )
+        except ValueError as exc:
+            message = str(exc)
+            return OperationResult.failure(
+                message,
+                errors=[message],
+                payload={"errors": [message], "changed": False},
+            )
+
         errors: list[str] = []
         changed = False
-        for channel_name, definition in list(self.state.calculated_channels.items()):
+        disabled_names = [
+            name
+            for name, definition in self.state.calculated_channels.items()
+            if not bool(definition.get("enabled", True))
+        ]
+        for channel_name in disabled_names:
+            if channel_name in self.state.df.columns:
+                del self.state.df[channel_name]
+                changed = True
+        for channel_name in evaluation_order:
+            definition = self.state.calculated_channels[channel_name]
             if not bool(definition.get("enabled", True)):
-                if channel_name in self.state.df.columns:
-                    del self.state.df[channel_name]
-                    changed = True
                 continue
             formula = str(definition.get("formula") or "").strip()
             if not formula:

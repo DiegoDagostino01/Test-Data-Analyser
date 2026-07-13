@@ -14,6 +14,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -249,25 +250,98 @@ class SettingsViewModelTests(unittest.TestCase):
 
 
 class SettingsManagerPathTests(unittest.TestCase):
-    def test_default_settings_path_uses_config_folder(self) -> None:
+    FIXTURE_ROOT = PROJECT_ROOT / "tests" / "fixtures" / "v103_migration"
+
+    def test_new_settings_store_defaults_to_basic_mode(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = SettingsManager.default_settings_path(Path(directory))
+            manager = SettingsManager(Path(directory) / "settings.json")
 
-        self.assertEqual(path, Path(directory) / "config" / "settings.json")
+        self.assertEqual(manager.get("general_ui", "user_experience_mode"), "basic")
 
-    def test_default_settings_path_migrates_legacy_root_settings(self) -> None:
+    def test_default_settings_path_uses_local_app_data(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "repo"
+            app_data = Path(directory) / "appdata"
+            path = SettingsManager.default_settings_path(root, app_data)
+
+        self.assertEqual(
+            path,
+            app_data / "Eaton" / "Test Data Analyser" / "settings.json",
+        )
+
+    def test_default_settings_path_copies_historical_root_settings_without_deleting_source(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            app_data = root / "appdata"
             legacy_path = root / "settings.json"
             legacy_path.write_text('{"general_ui": {"theme": "dark"}}', encoding="utf-8")
 
-            path = SettingsManager.default_settings_path(root)
+            path = SettingsManager.default_settings_path(root, app_data)
             manager = SettingsManager(path)
 
-            self.assertEqual(path, root / "config" / "settings.json")
-            self.assertFalse(legacy_path.exists())
+            self.assertEqual(
+                path,
+                app_data / "Eaton" / "Test Data Analyser" / "settings.json",
+            )
+            self.assertTrue(legacy_path.exists())
             self.assertTrue(path.exists())
             self.assertEqual(manager.get("general_ui", "theme"), "dark")
+            self.assertEqual(manager.get("general_ui", "user_experience_mode"), "advanced")
+
+    def test_existing_app_data_settings_take_precedence_over_legacy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app_data = root / "appdata"
+            target = app_data / "Eaton" / "Test Data Analyser" / "settings.json"
+            target.parent.mkdir(parents=True)
+            target.write_text('{"general_ui": {"theme": "light"}}', encoding="utf-8")
+            legacy = root / "settings.json"
+            legacy.write_text('{"general_ui": {"theme": "dark"}}', encoding="utf-8")
+
+            path = SettingsManager.default_settings_path(root, app_data)
+            manager = SettingsManager(path)
+
+        self.assertEqual(manager.get("general_ui", "theme"), "light")
+
+    def test_explicit_experience_mode_is_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings_path = Path(directory) / "settings.json"
+            settings_path.write_text(
+                '{"general_ui": {"user_experience_mode": "basic"}}',
+                encoding="utf-8",
+            )
+
+            manager = SettingsManager(settings_path)
+
+        self.assertEqual(manager.get("general_ui", "user_experience_mode"), "basic")
+
+    def test_corrupt_settings_are_preserved_and_store_becomes_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings_path = Path(directory) / "settings.json"
+            corrupt = "{not valid json"
+            settings_path.write_text(corrupt, encoding="utf-8")
+
+            manager = SettingsManager(settings_path)
+
+            self.assertTrue(manager.is_read_only)
+            self.assertEqual(manager.get("general_ui", "theme"), "light")
+            with self.assertRaisesRegex(RuntimeError, "read-only"):
+                manager.save()
+            self.assertEqual(settings_path.read_text(encoding="utf-8"), corrupt)
+
+    def test_sanitized_current_settings_fixture_preserves_user_values(self) -> None:
+        fixture = (self.FIXTURE_ROOT / "current_settings.json").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as directory:
+            settings_path = Path(directory) / "settings.json"
+            settings_path.write_text(fixture, encoding="utf-8")
+
+            manager = SettingsManager(settings_path)
+
+        self.assertEqual(manager.get("general_ui", "theme"), "dark")
+        self.assertEqual(manager.get("plot_appearance", "default_line_width"), 2.0)
+        self.assertEqual(manager.get("recent", "recent_files"), [])
+        self.assertEqual(manager.get("data_import", "last_data_directory"), "")
+        self.assertEqual(manager.get("general_ui", "last_session_directory"), "")
 
 
 class PlotWorkspaceViewModelTests(unittest.TestCase):
@@ -457,6 +531,27 @@ class RawDataViewModelTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.message, "Nothing to undo")
 
+    def test_replace_match_uses_compact_undo(self) -> None:
+        self.state.channel_registry = dataset_service.build_registry_for_dataframe(self.state.df)
+        channel_id = self.state.channel_id_for_name("A")
+        original_dtype = self.state.df["A"].dtype
+        original_data_type = self.state.channel_registry.spec_for_id(channel_id).data_type
+
+        with patch.object(self.vm._controller, "capture_dataset_snapshot") as capture:
+            result = self.vm.replace_match(0, "A", "10.0", "invalid")
+
+        self.assertTrue(result.ok, result.message)
+        capture.assert_not_called()
+        self.assertEqual(self.state.df.at[0, "A"], "invalid")
+        self.assertTrue(self.state.is_dirty)
+
+        undo = self.vm.undo_last_edit()
+        self.assertTrue(undo.ok, undo.message)
+        self.assertEqual(self.state.df.at[0, "A"], 10.0)
+        self.assertEqual(self.state.df["A"].dtype, original_dtype)
+        self.assertEqual(self.state.channel_registry.spec_for_id(channel_id).data_type, original_data_type)
+        self.assertFalse(self.state.is_dirty)
+
     def test_export_selected_frame_csv(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "selected.csv"
@@ -535,6 +630,51 @@ class MathsChannelsViewModelTests(unittest.TestCase):
         self.assertNotIn("Old", self.state.calculated_channels)
         self.assertIn("New", self.state.df.columns)
 
+    def test_apply_channel_rename_propagates_references(self) -> None:
+        self.assertTrue(self.vm.apply_channel("Old", "A + B").ok)
+        self.assertTrue(self.vm.apply_channel("Dependent", "`Old` * 2").ok)
+        old_key = plot_render_service.normalise_channel_name("Old")
+        self.state.current_x_axis = "Old"
+        self.state.plot_profiles = [
+            {
+                "name": "Plot 1",
+                "x_column": "Old",
+                "y_columns": ["Old"],
+                "secondary_y_columns": [],
+                "best_fit_lines": [{"channel": "Old", "fit_type": "Linear", "order": 1}],
+                "legend": {"channel_overrides": {old_key: {"channel": "Old"}}},
+                "limit_lines": [{"name": "Profile Limit", "applies_to": "Old", "points": []}],
+            }
+        ]
+        self.state.limit_lines = [{"name": "Top Limit", "applies_to": "Old", "points": []}]
+
+        result = self.vm.apply_channel("Renamed", "A + B", selected_name="Old")
+
+        self.assertTrue(result.ok, result.message)
+        self.assertEqual(self.state.current_x_axis, "Renamed")
+        self.assertEqual(self.state.calculated_channels["Dependent"]["formula"], "`Renamed` * 2")
+        self.assertEqual(
+            self.state.calculated_channels["Dependent"]["created_from_columns"], ["Renamed"]
+        )
+        profile = self.state.plot_profiles[0]
+        self.assertEqual(profile["x_column"], "Renamed")
+        self.assertEqual(profile["y_columns"], ["Renamed"])
+        self.assertEqual(profile["best_fit_lines"][0]["channel"], "Renamed")
+        self.assertEqual(profile["limit_lines"][0]["applies_to"], "Renamed")
+        new_key = plot_render_service.normalise_channel_name("Renamed")
+        self.assertIn(new_key, profile["legend"]["channel_overrides"])
+        self.assertEqual(self.state.limit_lines[0]["applies_to"], "Renamed")
+
+    def test_apply_channel_rename_does_not_overwrite_another_channel(self) -> None:
+        self.assertTrue(self.vm.apply_channel("First", "A + 1").ok)
+        self.assertTrue(self.vm.apply_channel("Second", "B + 1").ok)
+
+        result = self.vm.apply_channel("Second", "A + B", selected_name="First")
+
+        self.assertFalse(result.ok)
+        self.assertIn("already exists", result.message)
+        self.assertIn("First", self.state.calculated_channels)
+
     def test_apply_channel_blocks_source_column_name(self) -> None:
         self.assertFalse(self.vm.apply_channel("A", "B + 1").ok)
 
@@ -552,6 +692,37 @@ class MathsChannelsViewModelTests(unittest.TestCase):
         self.assertEqual(len(result.payload["errors"]), 1)
         self.assertNotIn("Bad", self.state.df.columns)
         self.assertIn("Good", self.state.df.columns)
+
+    def test_recalculate_orders_calculated_channel_dependencies(self) -> None:
+        self.state.calculated_channels = {
+            "Second": {
+                "name": "Second",
+                "formula": "First + 1",
+                "enabled": True,
+                "created_from_columns": ["First"],
+            },
+            "First": {
+                "name": "First",
+                "formula": "A + 1",
+                "enabled": True,
+                "created_from_columns": ["A"],
+            },
+        }
+
+        result = self.vm.recalculate()
+
+        self.assertTrue(result.ok, result.message)
+        self.assertEqual(list(self.state.df["Second"]), [12.0, 22.0, 32.0, 42.0])
+
+    def test_apply_channel_rejects_circular_dependency(self) -> None:
+        self.assertTrue(self.vm.apply_channel("First", "A + 1").ok)
+        self.assertTrue(self.vm.apply_channel("Second", "First + 1").ok)
+
+        result = self.vm.apply_channel("First", "Second + 1", selected_name="First")
+
+        self.assertFalse(result.ok)
+        self.assertIn("Circular Maths Channel dependency", result.message)
+        self.assertEqual(self.state.calculated_channels["First"]["formula"], "A + 1")
 
     def test_disabled_channel_column_removed(self) -> None:
         self.vm.apply_channel("Calc", "A + B")
@@ -1961,16 +2132,36 @@ class DatasetViewModelTests(unittest.TestCase):
     def test_undo_dataset_cell_edit(self) -> None:
         vm = self._manual_vm()
         channel_id = vm.state.channel_registry.id_for_name("Pressure")
+        original_dtype = vm.state.df["Pressure"].dtype
+        original_data_type = vm.state.channel_registry.spec_for_id(channel_id).data_type
+        vm.state.is_dirty = False
 
         self.assertFalse(vm.dataset.can_undo)
-        self.assertTrue(vm.dataset.set_cell(channel_id, 0, "42").ok)
-        self.assertEqual(vm.state.df.at[0, "Pressure"], 42.0)
+        with patch.object(vm.dataset._state_controller, "capture_dataset_snapshot") as capture:
+            self.assertTrue(vm.dataset.set_cell(channel_id, 0, "invalid").ok)
+        capture.assert_not_called()
+        self.assertEqual(vm.state.df.at[0, "Pressure"], "invalid")
         self.assertTrue(vm.dataset.can_undo)
 
         undo = vm.dataset.undo_last_edit()
         self.assertTrue(undo.ok, undo.message)
         self.assertTrue(pd.isna(vm.state.df.at[0, "Pressure"]))
+        self.assertEqual(vm.state.df["Pressure"].dtype, original_dtype)
+        self.assertEqual(vm.state.channel_registry.spec_for_id(channel_id).data_type, original_data_type)
+        self.assertFalse(vm.state.is_dirty)
         self.assertFalse(vm.dataset.can_undo)
+
+    def test_failed_compact_undo_keeps_dataframe_and_undo_entry(self) -> None:
+        vm = self._manual_vm()
+        channel_id = vm.state.channel_registry.id_for_name("Pressure")
+        self.assertTrue(vm.dataset.set_cell(channel_id, 0, "invalid").ok)
+        vm.state.df.at[1, "Pressure"] = "another invalid value"
+
+        result = vm.dataset.undo_last_edit()
+
+        self.assertFalse(result.ok)
+        self.assertEqual(vm.state.df.at[0, "Pressure"], "invalid")
+        self.assertTrue(vm.dataset.can_undo)
 
     def test_undo_dataset_structural_edits(self) -> None:
         vm = self._manual_vm()

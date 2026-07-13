@@ -8,8 +8,16 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont, QMouseEvent
+from PySide6.QtCore import QSortFilterProxyModel, Qt, Signal
+from PySide6.QtGui import (
+    QFont,
+    QKeyEvent,
+    QKeySequence,
+    QMouseEvent,
+    QShortcut,
+    QStandardItem,
+    QStandardItemModel,
+)
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -18,11 +26,11 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QLabel,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
+    QListView,
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -34,10 +42,60 @@ from .no_wheel_combo_box import NoWheelComboBox
 
 PLOT_KINDS = ("Line", "Scatter", "Line + Markers")
 _GROUP_HEADER_ROLE = "channel_group_header"
+_SEARCH_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 
 
-class CheckableChannelListWidget(QListWidget):
-    """QListWidget whose checkable rows toggle from any click position."""
+class CheckableChannelListWidget(QListView):
+    """Model-backed checkable channel list with fast proxy filtering."""
+
+    itemChanged = Signal(object)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._source_model = QStandardItemModel(self)
+        self._proxy_model = QSortFilterProxyModel(self)
+        self._proxy_model.setSourceModel(self._source_model)
+        self._proxy_model.setFilterRole(_SEARCH_ROLE)
+        self._proxy_model.setFilterCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.setModel(self._proxy_model)
+        self.setUniformItemSizes(True)
+        self._source_model.itemChanged.connect(self.itemChanged.emit)
+
+    def clear(self) -> None:
+        self._source_model.clear()
+
+    def addItem(self, item: QStandardItem) -> None:
+        self._source_model.appendRow(item)
+
+    def count(self) -> int:
+        return self._proxy_model.rowCount()
+
+    def item(self, row: int) -> QStandardItem:
+        proxy_index = self._proxy_model.index(row, 0)
+        return self._source_model.itemFromIndex(self._proxy_model.mapToSource(proxy_index))
+
+    def itemAt(self, point) -> QStandardItem | None:
+        proxy_index = self.indexAt(point)
+        if not proxy_index.isValid():
+            return None
+        return self._source_model.itemFromIndex(self._proxy_model.mapToSource(proxy_index))
+
+    def currentItem(self) -> QStandardItem | None:
+        proxy_index = self.currentIndex()
+        if not proxy_index.isValid():
+            return None
+        return self._source_model.itemFromIndex(self._proxy_model.mapToSource(proxy_index))
+
+    def setCurrentItem(self, item: QStandardItem) -> None:
+        proxy_index = self._proxy_model.mapFromSource(item.index())
+        if proxy_index.isValid():
+            self.setCurrentIndex(proxy_index)
+
+    def visualItemRect(self, item: QStandardItem):
+        return self.visualRect(self._proxy_model.mapFromSource(item.index()))
+
+    def set_search_text(self, text: str) -> None:
+        self._proxy_model.setFilterFixedString(text)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         item = self.itemAt(event.position().toPoint())
@@ -52,22 +110,43 @@ class CheckableChannelListWidget(QListWidget):
             return
         super().mousePressEvent(event)
 
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        item = self.currentItem()
+        if (
+            event.key() == Qt.Key.Key_Space
+            and item is not None
+            and item.flags() & Qt.ItemFlag.ItemIsUserCheckable
+        ):
+            item.setCheckState(
+                Qt.CheckState.Unchecked
+                if item.checkState() == Qt.CheckState.Checked
+                else Qt.CheckState.Checked
+            )
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
 
 class AxisSelectionPanel(QFrame):
+    plotConfigurationChanged = Signal()
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("EatonPanel")
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         self._columns: list[str] = []
         self._channel_groups: dict[str, str] = {}
+        self._group_search_text: dict[str, str] = {}
+        self._ordered_columns: list[str] = []
         self._checked_primary: set[str] = set()
         self._checked_secondary: set[str] = set()
+        self.section_buttons: dict[str, QToolButton] = {}
 
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(8)
 
-        heading = QLabel("Plot Controls")
+        heading = QLabel("Plot Navigator")
         heading.setObjectName("PanelHeading")
         root.addWidget(heading)
 
@@ -82,9 +161,9 @@ class AxisSelectionPanel(QFrame):
         controls.setContentsMargins(0, 0, 0, 0)
         controls.setSpacing(10)
 
-        # --- Axes & Channels -------------------------------------------------
-        axes_group = QGroupBox("Axes & Channels")
-        self._make_shrinkable_group(axes_group, vertical_policy=QSizePolicy.Policy.Expanding)
+        # --- Axes ------------------------------------------------------------
+        axes_group = QGroupBox("Axes")
+        self._make_shrinkable_group(axes_group)
         axes_layout = QVBoxLayout(axes_group)
         axes_layout.setSpacing(4)
         axes_layout.addWidget(QLabel("X-axis column:"))
@@ -92,19 +171,38 @@ class AxisSelectionPanel(QFrame):
         self._make_shrinkable_combo(self.x_combo)
         self.x_combo.currentTextChanged.connect(self._refresh_channel_lists)
         axes_layout.addWidget(self.x_combo)
-        axes_layout.addWidget(QLabel("Channel group:"))
+        self._add_collapsible_section(controls, axes_group)
+
+        # --- Channels --------------------------------------------------------
+        channels_group = QGroupBox("Channels")
+        self._make_shrinkable_group(
+            channels_group, vertical_policy=QSizePolicy.Policy.Expanding
+        )
+        channels_layout = QVBoxLayout(channels_group)
+        channels_layout.setSpacing(4)
+        channels_layout.addWidget(QLabel("Channel group:"))
         self.group_combo = NoWheelComboBox()
         self._make_shrinkable_combo(self.group_combo)
         self.group_combo.addItems(channel_group_options())
         self.group_combo.currentTextChanged.connect(self._refresh_channel_lists)
-        axes_layout.addWidget(self.group_combo)
-        axes_layout.addWidget(QLabel("Primary Y-axis channels:"))
+        channels_layout.addWidget(self.group_combo)
+        channels_layout.addWidget(QLabel("Search channels:"))
+        self.channel_search_edit = QLineEdit()
+        self.channel_search_edit.setObjectName("ChannelSearchEdit")
+        self.channel_search_edit.setPlaceholderText("Name or classification group")
+        self.channel_search_edit.setClearButtonEnabled(True)
+        self.channel_search_edit.textChanged.connect(self._set_channel_search)
+        channels_layout.addWidget(self.channel_search_edit)
+        self.channel_search_shortcut = QShortcut(QKeySequence.StandardKey.Find, self)
+        self.channel_search_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.channel_search_shortcut.activated.connect(self.channel_search_edit.setFocus)
+        channels_layout.addWidget(QLabel("Primary Y-axis channels:"))
         self.y_list = CheckableChannelListWidget()
         self._make_shrinkable_list(self.y_list)
-        self.y_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        self.y_list.setSelectionMode(QListView.SelectionMode.SingleSelection)
         self.y_list.setMinimumHeight(160)
         self.y_list.itemChanged.connect(self._on_primary_item_changed)
-        axes_layout.addWidget(self.y_list, stretch=1)
+        channels_layout.addWidget(self.y_list, stretch=1)
         self.primary_select_all_button = QPushButton("Select All")
         self.primary_select_all_button.setToolTip("Select all visible primary Y channels in the current group.")
         self.primary_select_all_button.clicked.connect(self._select_visible_primary)
@@ -112,14 +210,14 @@ class AxisSelectionPanel(QFrame):
         self.primary_clear_all_button.setToolTip("Clear every selected primary Y channel.")
         self.primary_clear_all_button.clicked.connect(self._clear_primary)
         primary_buttons = self._button_row(self.primary_select_all_button, self.primary_clear_all_button)
-        axes_layout.addLayout(primary_buttons)
-        axes_layout.addWidget(QLabel("Secondary Y-axis channels (right):"))
+        channels_layout.addLayout(primary_buttons)
+        channels_layout.addWidget(QLabel("Secondary Y-axis channels (right):"))
         self.secondary_y_list = CheckableChannelListWidget()
         self._make_shrinkable_list(self.secondary_y_list)
-        self.secondary_y_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        self.secondary_y_list.setSelectionMode(QListView.SelectionMode.SingleSelection)
         self.secondary_y_list.setMinimumHeight(160)
         self.secondary_y_list.itemChanged.connect(self._on_secondary_item_changed)
-        axes_layout.addWidget(self.secondary_y_list, stretch=1)
+        channels_layout.addWidget(self.secondary_y_list, stretch=1)
         self.secondary_select_all_button = QPushButton("Select All")
         self.secondary_select_all_button.setToolTip("Select all visible secondary Y channels in the current group.")
         self.secondary_select_all_button.clicked.connect(self._select_visible_secondary)
@@ -127,11 +225,11 @@ class AxisSelectionPanel(QFrame):
         self.secondary_clear_all_button.setToolTip("Clear every selected secondary Y channel.")
         self.secondary_clear_all_button.clicked.connect(self._clear_secondary)
         secondary_buttons = self._button_row(self.secondary_select_all_button, self.secondary_clear_all_button)
-        axes_layout.addLayout(secondary_buttons)
-        controls.addWidget(axes_group, stretch=1)
+        channels_layout.addLayout(secondary_buttons)
+        self._add_collapsible_section(controls, channels_group, stretch=1)
 
         # --- Plot Options ----------------------------------------------------
-        options_group = QGroupBox("Plot Options")
+        options_group = QGroupBox("Plot Type")
         self._make_shrinkable_group(options_group)
         options_layout = QVBoxLayout(options_group)
         options_layout.setSpacing(4)
@@ -140,7 +238,7 @@ class AxisSelectionPanel(QFrame):
         self.plot_kind_combo.addItems(PLOT_KINDS)
         self._make_shrinkable_combo(self.plot_kind_combo)
         options_layout.addWidget(self.plot_kind_combo)
-        controls.addWidget(options_group)
+        self._add_collapsible_section(controls, options_group)
 
         # --- Analysis Window -------------------------------------------------
         window_group = QGroupBox("Analysis Window")
@@ -161,7 +259,7 @@ class AxisSelectionPanel(QFrame):
         window_layout.addWidget(self.xmax_edit, 2, 1)
         window_layout.setColumnStretch(0, 1)
         window_layout.setColumnStretch(1, 1)
-        controls.addWidget(window_group)
+        self._add_collapsible_section(controls, window_group)
 
         # --- Filter ----------------------------------------------------------
         filter_group = QGroupBox("Filter")
@@ -182,13 +280,60 @@ class AxisSelectionPanel(QFrame):
         filter_layout.addWidget(self.order_edit, 2, 1)
         filter_layout.setColumnStretch(0, 1)
         filter_layout.setColumnStretch(1, 1)
-        controls.addWidget(filter_group)
+        self._add_collapsible_section(controls, filter_group)
 
         controls.addStretch(0)
         scroll.setWidget(container)
         root.addWidget(scroll, stretch=1)
 
         self.setMinimumWidth(220)
+        self.x_combo.currentTextChanged.connect(self.plotConfigurationChanged)
+        self.y_list.itemChanged.connect(lambda _item: self.plotConfigurationChanged.emit())
+        self.secondary_y_list.itemChanged.connect(
+            lambda _item: self.plotConfigurationChanged.emit()
+        )
+        self.plot_kind_combo.currentTextChanged.connect(self.plotConfigurationChanged)
+        self.xmin_edit.editingFinished.connect(self.plotConfigurationChanged)
+        self.xmax_edit.editingFinished.connect(self.plotConfigurationChanged)
+        self.filter_check.toggled.connect(self.plotConfigurationChanged)
+        self.cutoff_edit.editingFinished.connect(self.plotConfigurationChanged)
+        self.order_edit.editingFinished.connect(self.plotConfigurationChanged)
+
+    def _add_collapsible_section(
+        self,
+        layout: QVBoxLayout,
+        group: QGroupBox,
+        *,
+        stretch: int = 0,
+    ) -> None:
+        title = group.title()
+        button = QToolButton()
+        button.setObjectName("NavigatorSectionButton")
+        button.setText(title)
+        button.setCheckable(True)
+        button.setChecked(True)
+        button.setArrowType(Qt.ArrowType.DownArrow)
+        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        button.toggled.connect(
+            lambda expanded, group=group, button=button: self._set_section_expanded(
+                group, button, expanded
+            )
+        )
+        self.section_buttons[title] = button
+        layout.addWidget(button)
+        layout.addWidget(group, stretch=stretch)
+
+    @staticmethod
+    def _set_section_expanded(
+        group: QGroupBox,
+        button: QToolButton,
+        expanded: bool,
+    ) -> None:
+        group.setVisible(expanded)
+        button.setArrowType(
+            Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow
+        )
 
     @staticmethod
     def _button_row(left_button: QPushButton, right_button: QPushButton) -> QGridLayout:
@@ -223,7 +368,7 @@ class AxisSelectionPanel(QFrame):
         combo.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
 
     @staticmethod
-    def _make_shrinkable_list(widget: QListWidget) -> None:
+    def _make_shrinkable_list(widget: QListView) -> None:
         widget.setMinimumWidth(0)
         widget.setTextElideMode(Qt.TextElideMode.ElideRight)
         widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -232,7 +377,12 @@ class AxisSelectionPanel(QFrame):
     # ------------------------------------------------------------------
     # Population
     # ------------------------------------------------------------------
-    def _populate_checklist(self, widget: QListWidget, columns: list[str], checked: set[str]) -> None:
+    def _populate_checklist(
+        self,
+        widget: CheckableChannelListWidget,
+        columns: list[str],
+        checked: set[str],
+    ) -> None:
         widget.blockSignals(True)
         widget.clear()
         if self.group_combo.currentText() == "All":
@@ -248,17 +398,22 @@ class AxisSelectionPanel(QFrame):
                 widget.addItem(self._channel_item(column, checked))
         widget.blockSignals(False)
 
-    @staticmethod
-    def _channel_item(column: str, checked: set[str]) -> QListWidgetItem:
-        item = QListWidgetItem(column)
+    def _channel_item(self, column: str, checked: set[str]) -> QStandardItem:
+        item = QStandardItem(column)
         item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
         item.setCheckState(Qt.CheckState.Checked if column in checked else Qt.CheckState.Unchecked)
+        item.setData(
+            self._normalise_search_text(
+                f"{column} {self._channel_groups.get(column, 'Other Numeric')}"
+            ),
+            _SEARCH_ROLE,
+        )
         return item
 
-    @staticmethod
-    def _group_header_item(group: str) -> QListWidgetItem:
-        item = QListWidgetItem(group)
-        item.setData(Qt.ItemDataRole.UserRole, _GROUP_HEADER_ROLE)
+    def _group_header_item(self, group: str) -> QStandardItem:
+        item = QStandardItem(group)
+        item.setData(_GROUP_HEADER_ROLE, Qt.ItemDataRole.UserRole)
+        item.setData(self._group_search_text.get(group, group.casefold()), _SEARCH_ROLE)
         item.setFlags(Qt.ItemFlag.ItemIsEnabled)
         font = QFont()
         font.setBold(True)
@@ -273,6 +428,8 @@ class AxisSelectionPanel(QFrame):
     ) -> None:
         self._columns = list(columns)
         self._channel_groups = self._build_channel_groups(self._columns, maths_channel_names)
+        self._rebuild_search_metadata()
+        self._rebuild_ordered_columns()
         self._checked_primary.clear()
         self._checked_secondary.clear()
         self.x_combo.blockSignals(True)
@@ -285,6 +442,7 @@ class AxisSelectionPanel(QFrame):
         self.group_combo.blockSignals(True)
         self.group_combo.setCurrentText("All")
         self.group_combo.blockSignals(False)
+        self.channel_search_edit.clear()
 
         self._refresh_channel_lists()
 
@@ -297,6 +455,8 @@ class AxisSelectionPanel(QFrame):
         current_x = self.x_column()
         self._columns = list(columns)
         self._channel_groups = self._build_channel_groups(self._columns, maths_channel_names)
+        self._rebuild_search_metadata()
+        self._rebuild_ordered_columns()
         available = set(self._columns)
         self._checked_primary &= available
         self._checked_secondary &= available
@@ -310,6 +470,18 @@ class AxisSelectionPanel(QFrame):
 
         self._refresh_channel_lists()
 
+    def rename_channel_selection(self, old_name: str, new_name: str) -> None:
+        """Remap live selections before a renamed channel list is refreshed."""
+        if old_name in self._checked_primary:
+            self._checked_primary.remove(old_name)
+            self._checked_primary.add(new_name)
+        if old_name in self._checked_secondary:
+            self._checked_secondary.remove(old_name)
+            self._checked_secondary.add(new_name)
+        index = self.x_combo.findText(old_name)
+        if index >= 0:
+            self.x_combo.setItemText(index, new_name)
+
     def apply_selection(
         self,
         columns: list[str],
@@ -321,6 +493,8 @@ class AxisSelectionPanel(QFrame):
         """Populate the columns and restore a saved X / Y / secondary-Y selection."""
         self._columns = list(columns)
         self._channel_groups = self._build_channel_groups(self._columns, maths_channel_names)
+        self._rebuild_search_metadata()
+        self._rebuild_ordered_columns()
         available = set(self._columns)
         self._checked_primary = set(y_columns) & available
         self._checked_secondary = set(secondary_y_columns) & available
@@ -357,26 +531,26 @@ class AxisSelectionPanel(QFrame):
         visible_columns = self._filtered_y_columns(self.x_column())
         self._populate_checklist(self.y_list, visible_columns, self._checked_primary)
         self._populate_checklist(self.secondary_y_list, visible_columns, self._checked_secondary)
+        self._set_channel_search(self.channel_search_edit.text())
 
     def _filtered_y_columns(self, skip: str) -> list[str]:
         group = self.group_combo.currentText() if hasattr(self, "group_combo") else "All"
         available = [column for column in self._columns if column != skip]
         if group != "All":
-            return self._sort_columns(
+            available = self._sort_columns(
                 [column for column in available if self._channel_groups.get(column) == group]
             )
-        return self._ordered_y_columns(skip)
+        else:
+            available = self._ordered_y_columns(skip)
+        return available
+
+    def _set_channel_search(self, value: str) -> None:
+        query = self._normalise_search_text(value)
+        self.y_list.set_search_text(query)
+        self.secondary_y_list.set_search_text(query)
 
     def _ordered_y_columns(self, skip: str) -> list[str]:
-        available = [column for column in self._columns if column != skip]
-        ordered: list[str] = []
-        for group_name in channel_group_options()[1:]:
-            ordered.extend(
-                self._sort_columns(
-                    [column for column in available if self._channel_groups.get(column) == group_name]
-                )
-            )
-        return ordered
+        return [column for column in self._ordered_columns if column != skip]
 
     @staticmethod
     def _sort_columns(columns: list[str]) -> list[str]:
@@ -393,12 +567,40 @@ class AxisSelectionPanel(QFrame):
             for column in columns
         }
 
-    def _on_primary_item_changed(self, item: QListWidgetItem) -> None:
+    def _rebuild_search_metadata(self) -> None:
+        grouped_terms: dict[str, list[str]] = {}
+        for column in self._columns:
+            group = self._channel_groups.get(column, "Other Numeric")
+            grouped_terms.setdefault(group, [group]).append(column)
+        self._group_search_text = {
+            group: self._normalise_search_text(" ".join(terms))
+            for group, terms in grouped_terms.items()
+        }
+
+    def _rebuild_ordered_columns(self) -> None:
+        by_group: dict[str, list[str]] = {
+            group: [] for group in channel_group_options()[1:]
+        }
+        for column in self._columns:
+            by_group.setdefault(
+                self._channel_groups.get(column, "Other Numeric"), []
+            ).append(column)
+        self._ordered_columns = [
+            column
+            for group in channel_group_options()[1:]
+            for column in self._sort_columns(by_group.get(group, []))
+        ]
+
+    @staticmethod
+    def _normalise_search_text(value: object) -> str:
+        return " ".join(str(value).split()).casefold()
+
+    def _on_primary_item_changed(self, item: QStandardItem) -> None:
         if item.data(Qt.ItemDataRole.UserRole) == _GROUP_HEADER_ROLE:
             return
         self._set_checked(self._checked_primary, item)
 
-    def _on_secondary_item_changed(self, item: QListWidgetItem) -> None:
+    def _on_secondary_item_changed(self, item: QStandardItem) -> None:
         if item.data(Qt.ItemDataRole.UserRole) == _GROUP_HEADER_ROLE:
             return
         self._set_checked(self._checked_secondary, item)
@@ -417,7 +619,7 @@ class AxisSelectionPanel(QFrame):
         self._checked_secondary.clear()
         self._sync_checklist_checks(self.secondary_y_list, self._checked_secondary)
 
-    def _select_visible_channels(self, widget: QListWidget, target: set[str]) -> None:
+    def _select_visible_channels(self, widget: CheckableChannelListWidget, target: set[str]) -> None:
         for row in range(widget.count()):
             item = widget.item(row)
             if item.flags() & Qt.ItemFlag.ItemIsUserCheckable:
@@ -425,7 +627,7 @@ class AxisSelectionPanel(QFrame):
         self._sync_checklist_checks(widget, target)
 
     @staticmethod
-    def _sync_checklist_checks(widget: QListWidget, checked: set[str]) -> None:
+    def _sync_checklist_checks(widget: CheckableChannelListWidget, checked: set[str]) -> None:
         widget.blockSignals(True)
         for row in range(widget.count()):
             item = widget.item(row)
@@ -435,7 +637,7 @@ class AxisSelectionPanel(QFrame):
         widget.blockSignals(False)
 
     @staticmethod
-    def _set_checked(target: set[str], item: QListWidgetItem) -> None:
+    def _set_checked(target: set[str], item: QStandardItem) -> None:
         if item.checkState() == Qt.CheckState.Checked:
             target.add(item.text())
         else:

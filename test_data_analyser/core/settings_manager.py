@@ -5,8 +5,13 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 import json
 import logging
+import os
 
 logger = logging.getLogger(__name__)
+
+SETTINGS_VENDOR = "Eaton"
+SETTINGS_APPLICATION = "Test Data Analyser"
+MAX_SETTINGS_BYTES = 4 * 1024 * 1024
 
 
 DEFAULT_SETTINGS: dict[str, dict[str, Any]] = {
@@ -57,6 +62,8 @@ DEFAULT_SETTINGS: dict[str, dict[str, Any]] = {
         "legend_threshold": 1,
         "startup_behaviour": "blank",
         "available_startup_behaviours": ["blank", "last_session", "prompt"],
+        "user_experience_mode": "basic",
+        "available_user_experience_modes": ["basic", "advanced"],
         "auto_save_enabled": False,
         "auto_save_interval_minutes": 10,
         "confirm_before_delete": True,
@@ -80,6 +87,12 @@ DEFAULT_SETTINGS: dict[str, dict[str, Any]] = {
         "recent_files": [],
         "recent_sessions": [],
     },
+    "recovery": {
+        "dismissed_fingerprints": [],
+    },
+    "workspace": {
+        "payload": {},
+    },
 }
 
 SettingsCallback = Callable[[dict[str, dict[str, Any]]], None]
@@ -91,17 +104,29 @@ class SettingsManager:
     def __init__(self, settings_path: Optional[str | Path] = None) -> None:
         self.settings_path = Path(settings_path) if settings_path is not None else self.default_settings_path()
         self._callbacks: list[SettingsCallback] = []
+        self.is_read_only = False
         self._settings = self._load_or_create_settings()
 
-    @staticmethod
-    def default_settings_path(repo_root: Path | None = None) -> Path:
-        """Return the default settings path, migrating the legacy root file."""
+    @classmethod
+    def default_settings_path(
+        cls,
+        repo_root: Path | None = None,
+        local_app_data: Path | None = None,
+    ) -> Path:
+        """Return the per-user settings path, copying a valid legacy file once."""
         root = repo_root or Path(__file__).resolve().parent.parent.parent
-        settings_path = root / "config" / "settings.json"
+        app_data = local_app_data
+        if app_data is None:
+            local_app_data_text = os.environ.get("LOCALAPPDATA", "").strip()
+            if not local_app_data_text:
+                raise RuntimeError("LOCALAPPDATA is required to store application settings.")
+            app_data = Path(local_app_data_text)
+        settings_path = app_data / SETTINGS_VENDOR / SETTINGS_APPLICATION / "settings.json"
+        if settings_path.exists():
+            return settings_path
         legacy_path = root / "settings.json"
-        if not settings_path.exists() and legacy_path.exists():
-            settings_path.parent.mkdir(parents=True, exist_ok=True)
-            legacy_path.replace(settings_path)
+        if legacy_path.exists():
+            cls._copy_valid_legacy_settings(legacy_path, settings_path)
         return settings_path
 
     def get(self, section: str, key: str) -> Any:
@@ -134,11 +159,11 @@ class SettingsManager:
 
     def save(self) -> None:
         """Write settings to disk and notify registered observers."""
-        self.settings_path.parent.mkdir(parents=True, exist_ok=True)
-        self.settings_path.write_text(
-            json.dumps(self._settings, indent=2),
-            encoding="utf-8",
-        )
+        if self.is_read_only:
+            raise RuntimeError(
+                "Settings are read-only because the existing settings file could not be loaded."
+            )
+        self._write_settings(self.settings_path, self._settings)
         self._notify_callbacks()
 
     def add_callback(self, callback: SettingsCallback) -> None:
@@ -162,24 +187,52 @@ class SettingsManager:
     def _load_or_create_settings(self) -> dict[str, dict[str, Any]]:
         if not self.settings_path.exists():
             settings = deepcopy(DEFAULT_SETTINGS)
-            self.settings_path.parent.mkdir(parents=True, exist_ok=True)
-            self.settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+            self._write_settings(self.settings_path, settings)
             return settings
 
         try:
+            if self.settings_path.stat().st_size > MAX_SETTINGS_BYTES:
+                raise ValueError("settings.json exceeds the supported size limit")
             loaded = json.loads(self.settings_path.read_text(encoding="utf-8"))
             if not isinstance(loaded, dict):
                 raise ValueError("settings.json root must be an object")
         except Exception as exc:
-            logger.warning("Could not load settings from %s; using defaults. %s", self.settings_path, exc)
-            settings = deepcopy(DEFAULT_SETTINGS)
-            self.settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
-            return settings
+            logger.warning("Could not load application settings; using in-memory defaults. %s", exc)
+            self.is_read_only = True
+            return deepcopy(DEFAULT_SETTINGS)
 
         settings, changed = self._merge_with_defaults(loaded)
+        loaded_general_ui = loaded.get("general_ui", {})
+        if not isinstance(loaded_general_ui, dict) or "user_experience_mode" not in loaded_general_ui:
+            # Preserve the full toolset for existing or migrated users; only a
+            # genuinely new settings store starts in Basic mode.
+            settings["general_ui"]["user_experience_mode"] = "advanced"
+            changed = True
         if changed:
-            self.settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+            self._write_settings(self.settings_path, settings)
         return settings
+
+    @classmethod
+    def _copy_valid_legacy_settings(cls, source: Path, target: Path) -> bool:
+        try:
+            if source.stat().st_size > MAX_SETTINGS_BYTES:
+                return False
+            loaded = json.loads(source.read_text(encoding="utf-8"))
+            if not isinstance(loaded, dict):
+                return False
+            if target.exists():
+                return True
+            cls._write_settings(target, loaded)
+            return True
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+            return False
+
+    @staticmethod
+    def _write_settings(path: Path, settings: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.tmp")
+        temporary.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+        temporary.replace(path)
 
     def _merge_with_defaults(self, loaded: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], bool]:
         changed = False

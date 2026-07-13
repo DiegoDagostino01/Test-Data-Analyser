@@ -16,7 +16,7 @@ from typing import Any, Optional, cast
 from cycler import cycler
 from matplotlib.ticker import MultipleLocator
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QCursor
+from PySide6.QtGui import QColor, QCursor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...core.config import EATON_DARK_BLUE
+from ...core.channel_classification import channel_group_options, classify_channel_name
 from ...core.naming import natural_sort_key
 from ...domain.annotations import normalise_annotations
 from ...services import annotation_geometry_service, axis_limits_computer, legend_metadata_service, plot_render_service
@@ -106,6 +107,7 @@ class PlotWorkspace(QWidget):
         self._annotation_drag: dict[str, Any] | None = None
         self._annotation_id_counter = 1
         self._annotation_buttons: dict[str, QPushButton] = {}
+        self._legend_panel_external = False
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -740,8 +742,24 @@ class PlotWorkspace(QWidget):
         heading.setObjectName("PanelHeading")
         layout.addWidget(heading)
 
-        self.legend_table = QTableWidget(0, 3)
-        self.legend_table.setHorizontalHeaderLabels(["", "Series", "Hide/Show"])
+        self.legend_search_edit = QLineEdit()
+        self.legend_search_edit.setObjectName("LegendSearchEdit")
+        self.legend_search_edit.setPlaceholderText("Search channels")
+        self.legend_search_edit.setClearButtonEnabled(True)
+        self.legend_search_edit.textChanged.connect(self._apply_legend_filter)
+        layout.addWidget(self.legend_search_edit)
+        self.legend_search_shortcut = QShortcut(QKeySequence.StandardKey.Find, panel)
+        self.legend_search_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.legend_search_shortcut.activated.connect(self.legend_search_edit.setFocus)
+
+        self.legend_group_combo = NoWheelComboBox()
+        self.legend_group_combo.setObjectName("LegendGroupFilter")
+        self.legend_group_combo.addItems(channel_group_options())
+        self.legend_group_combo.currentTextChanged.connect(self._apply_legend_filter)
+        layout.addWidget(self.legend_group_combo)
+
+        self.legend_table = QTableWidget(0, 4)
+        self.legend_table.setHorizontalHeaderLabels(["Colour", "Series", "Hide/Show", "Style"])
         self.legend_table.verticalHeader().setVisible(False)
         self.legend_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.legend_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
@@ -752,6 +770,8 @@ class PlotWorkspace(QWidget):
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
         header.resizeSection(2, 82)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        header.resizeSection(3, 54)
         layout.addWidget(self.legend_table, stretch=1)
         return panel
 
@@ -761,6 +781,18 @@ class PlotWorkspace(QWidget):
     def set_legend_display(self, display: str) -> None:
         self._legend_display = LEGEND_DISPLAY_GRAPH if display == LEGEND_DISPLAY_GRAPH else LEGEND_DISPLAY_PANEL
         self._refresh_current_legend()
+
+    def take_legend_panel(self) -> QWidget:
+        """Detach the existing Legend widget for registration as a workspace panel."""
+        if not self._legend_panel_external:
+            self.legend_panel.setParent(None)
+            self.legend_panel.setMaximumWidth(16777215)
+            self._legend_panel_external = True
+        return self.legend_panel
+
+    def _sync_legend_panel_visibility(self) -> None:
+        if not self._legend_panel_external:
+            self.legend_panel.setVisible(self._legend_display == LEGEND_DISPLAY_PANEL)
 
     def axis_tick_setting_texts(self) -> dict[str, object]:
         return dict(self._axis_tick_settings)
@@ -878,7 +910,7 @@ class PlotWorkspace(QWidget):
         self._clear_annotation_artists()
         self.canvas.clear()
         self._update_legend_table([], [])
-        self.legend_panel.setVisible(self._legend_display == LEGEND_DISPLAY_PANEL)
+        self._sync_legend_panel_visibility()
         self.canvas.draw()
         self.bestFitFormulasChanged.emit()
         return OperationResult.success("Plot cleared.")
@@ -1330,6 +1362,8 @@ class PlotWorkspace(QWidget):
             self.legend_table.setItem(row, 1, text)
             if metadata:
                 self.legend_table.setCellWidget(row, 2, self._legend_visibility_cell(metadata))
+                self.legend_table.setCellWidget(row, 3, self._legend_style_button(metadata))
+        self._apply_legend_filter()
 
     @staticmethod
     def _set_legend_artist_metadata(artist, channel: str, plot_kind: str, style: dict[str, object]) -> None:
@@ -1355,7 +1389,7 @@ class PlotWorkspace(QWidget):
         checkbox = QCheckBox()
         checkbox.setObjectName("LegendVisibilityCheckBox")
         checkbox.setChecked(not hidden)
-        checkbox.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        checkbox.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         checkbox.setToolTip(("Show" if hidden else "Hide") + f" '{metadata.get('label', channel)}' on the plot.")
         checkbox.toggled.connect(lambda checked, channel=channel: self.legendChannelVisibilityChanged.emit(channel, not checked))
         cell = QWidget()
@@ -1368,16 +1402,62 @@ class PlotWorkspace(QWidget):
         return cell
 
     def _on_legend_cell_clicked(self, row: int, _column: int) -> None:
-        if _column != 1:
+        if _column not in {0, 1}:
             return
         item = self.legend_table.item(row, 1)
         metadata = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
         if not isinstance(metadata, dict) or not metadata.get("channel"):
             return
+        if _column == 0:
+            self._choose_legend_colour(metadata)
+            return
+        self._edit_legend_channel(metadata)
+
+    def _edit_legend_channel(self, metadata: dict[str, object]) -> None:
         channel = str(metadata.get("channel", ""))
         dialog = LegendChannelStyleDialog(channel, metadata, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.legendChannelStyleChanged.emit(channel, dialog.values())
+
+    def _choose_legend_colour(self, metadata: dict[str, object]) -> None:
+        channel = str(metadata.get("channel", ""))
+        current = QColor(str(metadata.get("colour", EATON_DARK_BLUE)))
+        chosen = QColorDialog.getColor(current, self, "Select Channel Colour")
+        if chosen.isValid():
+            self.legendChannelStyleChanged.emit(
+                channel,
+                {"channel": channel, "colour": chosen.name()},
+            )
+
+    def _legend_style_button(self, metadata: dict[str, object]) -> QPushButton:
+        button = QPushButton("Edit")
+        button.setObjectName("LegendStyleButton")
+        button.setToolTip(f"Edit style for '{metadata.get('label', metadata.get('channel', 'channel'))}'.")
+        button.clicked.connect(
+            lambda _checked=False, metadata=dict(metadata): self._edit_legend_channel(metadata)
+        )
+        return button
+
+    def _apply_legend_filter(self, *_args) -> None:
+        query = " ".join(self.legend_search_edit.text().split()).casefold()
+        selected_group = self.legend_group_combo.currentText()
+        self.legend_table.setUpdatesEnabled(False)
+        try:
+            for row in range(self.legend_table.rowCount()):
+                item = self.legend_table.item(row, 1)
+                metadata = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+                if not isinstance(metadata, dict):
+                    self.legend_table.setRowHidden(row, bool(query) or selected_group != "All")
+                    continue
+                channel = str(metadata.get("channel", ""))
+                label = str(metadata.get("label", channel))
+                group = classify_channel_name(channel)
+                search_text = " ".join(f"{channel} {label} {group}".split()).casefold()
+                matches_query = not query or query in search_text
+                matches_group = selected_group == "All" or selected_group == group
+                self.legend_table.setRowHidden(row, not (matches_query and matches_group))
+        finally:
+            self.legend_table.setUpdatesEnabled(True)
 
     @staticmethod
     def _legend_swatch(colour: str) -> QWidget:
@@ -1396,7 +1476,7 @@ class PlotWorkspace(QWidget):
 
     def _apply_legend_display(self, axes, handles, labels) -> None:
         self._update_legend_table(handles, labels)
-        self.legend_panel.setVisible(self._legend_display == LEGEND_DISPLAY_PANEL)
+        self._sync_legend_panel_visibility()
         self._remove_canvas_legends()
         if self._legend_display == LEGEND_DISPLAY_GRAPH and handles:
             graph_handles, graph_labels = self._legend_handles_and_labels(axes, self._secondary_axes(), include_hidden=False)

@@ -1,0 +1,151 @@
+{
+  "version": "1.02.03",
+  "root_file_directory": "C:\\Engineering\\TDA Fixtures",
+  "file_path": "C:\\Engineering\\TDA Fixtures\\current-data.csv",
+  "sheet_name": "",
+  "data_source_type": "manual",
+  "channel_registry": {
+    "columns": [
+      {
+        "id": "ch_001",
+        "display_name": "Time",
+        "data_type": "numeric"
+      },
+      {
+        "id": "ch_002",
+        "display_name": "Pressure",
+        "data_type": "numeric"
+      },
+      {
+        "id": "ch_003",
+        "display_name": "Power",
+        "data_type": "numeric"
+      }
+    ],
+    "next_id": 4
+  },
+  "dataset_rows": [
+    {
+      "Time": 0.0,
+      "Pressure": 10.0,
+      "Power": 20.0
+    },
+    {
+      "Time": 1.0,
+      "Pressure": 12.0,
+      "Power": 24.0
+    }
+  ],
+  "runs": [
+    {
+      "name": "Comparison Run",
+      "filepath": "C:\\Engineering\\TDA Fixtures\\comparison.csv",
+      "sheet_name": "",
+      "enabled": true,
+      "colour": "#007AC2"
+    }
+  ],
+  "active_run_index": 0,
+  "comparison_mode_enabled": true,
+  "comparison_common_x_range": true,
+  "comparison_prefix_legend": true,
+  "active_plot_profile_index": 0,
+  "plot_profiles": [
+    {
+      "name": "Pressure Review",
+      "x_column": "Time",
+      "y_columns": [
+        "Pressure"
+      ],
+      "secondary_y_columns": [
+        "Power"
+      ],
+      "title": "Fixture Plot",
+      "x_label": "Time (s)",
+      "y_label": "Pressure (bar)",
+      "secondary_y_label": "Power (W)",
+      "plot_kind": "Line",
+      "grid": true,
+      "auto_fit_axes": false,
+      "axis_limits": {
+        "xmin": "0",
+        "xmax": "1",
+        "ymin": "0",
+        "ymax": "20",
+        "y2min": "0",
+        "y2max": "30"
+      },
+      "axis_ticks": {
+        "x_major_tick": "0.5",
+        "y_major_tick": "5",
+        "y2_major_tick": "10",
+        "align_secondary_y_axis_grid": true
+      },
+      "legend": {
+        "display_mode": "panel",
+        "channel_overrides": {
+          "pressure": {
+            "channel": "Pressure",
+            "label": "Outlet Pressure",
+            "colour": "#007AC2",
+            "hidden": false
+          }
+        }
+      },
+      "engineering_notes": {
+        "objective": "Compatibility fixture",
+        "observations": "Pressure remained stable."
+      },
+      "limit_lines": [
+        {
+          "name": "Pressure Maximum",
+          "type": "Upper Limit",
+          "applies_to": "Pressure",
+          "color": "#DA291C",
+          "points": [
+            {
+              "x": 0.0,
+              "y": 15.0
+            },
+            {
+              "x": 1.0,
+              "y": 15.0
+            }
+          ]
+        }
+      ],
+      "annotations": [
+        {
+          "id": "fixture-note",
+          "type": "text",
+          "text": "Nominal point",
+          "x": 1.0,
+          "y": 12.0
+        }
+      ],
+      "generated": true,
+      "workspace": {
+        "panel_id": "plot.workspace"
+      }
+    }
+  ],
+  "calculated_channels": {
+    "Power": {
+      "name": "Power",
+      "formula": "Pressure * 2",
+      "description": "Valid calculated channel",
+      "enabled": true,
+      "created_from_columns": [
+        "Pressure"
+      ]
+    },
+    "Broken": {
+      "name": "Broken"
+    }
+  },
+  "workspace_layout_version": 99,
+  "workspace": {
+    "active_preset": "analysis",
+    "dock_state_b64": "must-not-round-trip"
+  }
+}

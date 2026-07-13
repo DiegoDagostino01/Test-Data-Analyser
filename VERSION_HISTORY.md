@@ -19,6 +19,88 @@ current release format.
 When releasing an update, change `__version__` and add a new entry at the top of
 this file.
 
+## 1.03.00 - In-Work
+
+Full-system optimization and reliability pass started from the released
+1.02.02 baseline.
+
+**Performance**
+
+- Replaced full-dataframe undo snapshots for individual **Edit dataset** cell
+  edits and single-cell Find/Replace operations with compact cell-level undo
+  records. Structural and block edits continue to use full snapshots so their
+  wider state changes remain reversible.
+
+**Workspace modernization**
+
+- Added the V1.03 dockable workspace using Qt Advanced Docking System, with
+  stable singleton panel IDs, floating/tabbed panels, auto-hide, built-in
+  Analysis/Comparison/Reporting/Data Editing layouts, one Custom layout,
+  restart persistence, and missing-monitor recovery.
+- Made the complete Plot Workspace detachable while preserving one
+  authoritative plot-profile tab bar, Matplotlib canvas, annotation/cursor
+  wiring, and export path. Closing the floating Plot Workspace returns the same
+  widget to the main window.
+- Moved mutable settings and workspace geometry to per-user Local AppData with
+  copy-first migration from existing repository settings. Workspace state stays
+  separate from analysis sessions and plot profiles.
+- Reworked Plot Controls into a dockable Plot Navigator with collapsible Axes,
+  Channels, Plot Type, Analysis Window, and Filter sections; added keyboard
+  channel toggling and fast name/classification search that preserves hidden
+  primary/secondary selections and natural group order.
+- Modernized the docked Legend with name and classification filters, accessible
+  visibility toggles, an explicit style shortcut, and a direct colour shortcut.
+  Legend filtering remains panel-only, preserving profile and figure-export
+  behavior.
+- Centralized application commands behind stable IDs and shared Qt actions;
+  added the `Ctrl+Shift+P` command palette for actions, panels, and workspace
+  layouts, including disabled-command reasons and keyboard execution.
+- Replaced the five legacy ribbon groups with Home, Data, Plot, Analysis,
+  Requirements, Reporting, and Settings groups rendered by `RibbonManager`,
+  while preserving existing shortcuts and Recent menu behavior.
+- Added durable status indicators for plot currency, saved/unsaved analysis
+  state, recovery auto-save, and the active workspace. Recovery auto-save
+  remains recovery-only and never clears the Unsaved state.
+- Added the no-data Dashboard with shared commands, recent data/session lists,
+  startup behavior, and a bounded recovery lifecycle that never silently
+  deletes stale or dismissed recovery files.
+- Added persisted Basic and Advanced modes. Basic masks advanced commands and
+  panels without changing engineering state; Advanced restores the unmasked
+  workspace arrangement and protects the Custom layout.
+- Added keyboard focus treatment, accessible status names, polite screen-reader
+  announcements, and automated 125%/150%/200% light/dark scaling checks.
+- Increased the on-screen Matplotlib canvas base resolution from 100 to 150 DPI
+  while retaining independently configured export DPI.
+- Added a sanitized PyInstaller `onedir` release pipeline with ADS notices and
+  license, artifact path/state scanning, shortcut creation, and packaged startup
+  smoke testing. Mutable settings remain exclusively in Local AppData.
+- Removed the obsolete repository `config/settings.json` template. New installs
+  create Local AppData defaults directly; the historical root `settings.json`
+  migration remains available for older source deployments.
+
+**Fixes**
+
+- Made Maths Channel recalculation follow dependency order, so dependent
+  channels restore correctly regardless of definition order, and reject
+  circular dependencies before changing the dataset.
+- Made Maths Channel renames preserve dependent formulas, plot selections,
+  best-fit settings, legend overrides, Requirements / Limits references, and
+  live primary/secondary axis selections.
+- Hardened saved major-tick handling so zero, negative, non-finite, or invalid
+  values fall back to automatic ticks instead of reaching Matplotlib.
+- Fixed ribbon groups hiding all commands during initial construction.
+- Fixed panel commands opening behind another ADS tab; Raw Data now becomes the
+  current tab and refreshes its selected frame when opened.
+
+**Tests**
+
+- Added regression coverage for compact single-cell undo, dependency-ordered
+  Maths Channel recalculation, circular dependency rejection, rename reference
+  propagation, invalid major-tick values, live Qt axis-selection remapping,
+  dashboard/mode behavior, accessibility metadata, display scaling, release
+  sanitization, ribbon visibility, ADS tab selection, Raw Data display, and plot
+  display resolution.
+
 ## 1.02.02 - 2026-07-13
 
 Large-file performance update: faster loading, plotting, and axis auto-fit for

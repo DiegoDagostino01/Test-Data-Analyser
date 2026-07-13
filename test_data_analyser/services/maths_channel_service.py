@@ -365,3 +365,46 @@ def normalise_calculated_channel_definitions(raw: Any) -> dict[str, dict[str, An
         if definition.is_valid:
             normalised[definition.name] = definition.to_dict()
     return normalised
+
+
+def calculated_channel_evaluation_order(definitions: dict[str, dict[str, Any]]) -> list[str]:
+    """Return enabled calculated channels with dependencies before consumers.
+
+    ``created_from_columns`` is captured from the validated formula and persisted
+    with each definition. References to source columns are ignored; references
+    to other enabled calculated channels form the dependency graph.
+    """
+    enabled = {
+        str(name): definition
+        for name, definition in definitions.items()
+        if isinstance(definition, dict) and bool(definition.get("enabled", True))
+    }
+    dependencies = {
+        name: [
+            str(reference)
+            for reference in definition.get("created_from_columns", [])
+            if str(reference) in enabled
+        ]
+        for name, definition in enabled.items()
+    }
+    order: list[str] = []
+    visiting: list[str] = []
+    visited: set[str] = set()
+
+    def visit(name: str) -> None:
+        if name in visited:
+            return
+        if name in visiting:
+            cycle_start = visiting.index(name)
+            cycle = visiting[cycle_start:] + [name]
+            raise ValueError(f"Circular Maths Channel dependency: {' -> '.join(cycle)}.")
+        visiting.append(name)
+        for dependency in dependencies[name]:
+            visit(dependency)
+        visiting.pop()
+        visited.add(name)
+        order.append(name)
+
+    for name in enabled:
+        visit(name)
+    return order

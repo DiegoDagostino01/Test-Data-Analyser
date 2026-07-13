@@ -17,14 +17,14 @@ from typing import Iterable, Optional
 from ..services import clipboard_service, column_reference_service, dataset_service, fill_series_service
 from ..services.results import OperationResult, payload_dict
 from .app_state import AppState
-from .state_controller import AppStateController, DatasetUndoSnapshot
+from .state_controller import AppStateController, DatasetCellUndo, DatasetUndoSnapshot
 
 
 class DatasetViewModel:
     def __init__(self, state: AppState) -> None:
         self.state = state
         self._state_controller = AppStateController(state)
-        self._undo_stack: list[DatasetUndoSnapshot] = []
+        self._undo_stack: list[DatasetUndoSnapshot | DatasetCellUndo] = []
 
     # ------------------------------------------------------------------
     # Views
@@ -46,15 +46,20 @@ class DatasetViewModel:
     def _capture_undo(self, description: str) -> DatasetUndoSnapshot:
         return self._state_controller.capture_dataset_snapshot(description)
 
-    def _push_undo(self, snapshot: DatasetUndoSnapshot) -> None:
-        self._undo_stack.append(snapshot)
+    def _push_undo(self, undo: DatasetUndoSnapshot | DatasetCellUndo) -> None:
+        self._undo_stack.append(undo)
 
     def undo_last_edit(self) -> OperationResult:
         if not self._undo_stack:
             return OperationResult.failure("Nothing to undo")
-        snapshot = self._undo_stack.pop()
-        self._state_controller.restore_dataset_snapshot(snapshot)
-        return OperationResult.success(f"Undid {snapshot.description}.")
+        undo = self._undo_stack.pop()
+        if isinstance(undo, DatasetCellUndo):
+            if not self._state_controller.restore_dataset_cell(undo):
+                self._undo_stack.append(undo)
+                return OperationResult.failure("The edited cell could not be restored.")
+        else:
+            self._state_controller.restore_dataset_snapshot(undo)
+        return OperationResult.success(f"Undid {undo.description}.")
 
     # ------------------------------------------------------------------
     # Column operations
@@ -174,12 +179,26 @@ class DatasetViewModel:
         return result
 
     def set_cell(self, channel_id: str, row_index: int, text: object) -> OperationResult:
-        undo = self._capture_undo("cell edit")
+        df = self.state.df
+        spec = self.state.channel_registry.spec_for_id(channel_id)
+        undo = None
+        if df is not None and spec is not None and spec.display_name in df.columns:
+            row = int(row_index)
+            if 0 <= row < len(df):
+                undo = DatasetCellUndo(
+                    description="cell edit",
+                    channel_id=channel_id,
+                    row_index=row,
+                    old_value=df.at[row, spec.display_name],
+                    old_dtype=df[spec.display_name].dtype,
+                    old_data_type=spec.data_type,
+                    is_dirty=self.state.is_dirty,
+                )
         result = dataset_service.set_cell(
             self.state.df, self.state.channel_registry, channel_id, row_index, text
         )
         payload = payload_dict(result)
-        if result.ok and payload:
+        if result.ok and payload and undo is not None:
             self._state_controller.apply_dataframe_payload(payload)
             self._state_controller.mark_dirty()
             self._push_undo(undo)

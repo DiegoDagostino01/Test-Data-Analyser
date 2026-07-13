@@ -1,0 +1,67 @@
+{
+  "plot_appearance": {
+    "default_line_width": 2.0,
+    "colour_cycle": "eaton",
+    "default_marker_style": "None",
+    "grid_visible": true,
+    "font_size_title": 14,
+    "font_size_axis_label": 12,
+    "font_size_tick_label": 10,
+    "font_size_legend": 10,
+    "plot_background_colour": "#FFFFFF"
+  },
+  "axis_scaling": {
+    "auto_scale_mode": "padded",
+    "auto_scale_pad_percent": 5,
+    "pad_x_axis": true,
+    "pad_x_percent": 5,
+    "pad_y_axis": true,
+    "pad_y_percent": 5,
+    "scientific_notation_enabled": true,
+    "scientific_notation_threshold": 10000.0,
+    "decimal_places_statistics": 4,
+    "decimal_places_cursor": 4
+  },
+  "data_import": {
+    "default_delimiter": "auto",
+    "default_encoding": "utf-8",
+    "header_row_index": 0,
+    "skip_rows": 0,
+    "decimal_separator": ".",
+    "last_data_directory": ""
+  },
+  "export": {
+    "default_image_format": "png",
+    "default_dpi": 150,
+    "default_export_directory": "",
+    "include_statistics_in_export": false,
+    "auto_timestamp_filenames": true
+  },
+  "general_ui": {
+    "theme": "dark",
+    "legend_threshold": 1,
+    "startup_behaviour": "blank",
+    "auto_save_enabled": false,
+    "auto_save_interval_minutes": 10,
+    "confirm_before_delete": true,
+    "show_tooltips": true,
+    "last_session_directory": ""
+  },
+  "engineering_analysis": {
+    "default_statistics_columns": [
+      "Count",
+      "Min",
+      "Max",
+      "Mean",
+      "Median",
+      "Std Dev",
+      "RMS",
+      "Peak-to-Peak"
+    ],
+    "significant_figures_maths": 6
+  },
+  "recent": {
+    "recent_files": [],
+    "recent_sessions": []
+  }
+}

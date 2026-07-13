@@ -166,6 +166,11 @@ class AxisLimitsComputerTests(unittest.TestCase):
     def test_safe_major_tick_none_step(self) -> None:
         self.assertIsNone(axis_limits_computer.safe_major_tick(None, (0.0, 100.0)))
 
+    def test_safe_major_tick_rejects_invalid_steps(self) -> None:
+        for step in (0.0, -1.0, float("nan"), float("inf"), "invalid"):
+            with self.subTest(step=step):
+                self.assertIsNone(axis_limits_computer.safe_major_tick(step, (0.0, 100.0)))
+
     def test_mapped_secondary_ticks_linear(self) -> None:
         ticks = axis_limits_computer.mapped_secondary_ticks([0.0, 5.0, 10.0], 0.0, 10.0, 0.0, 100.0)
         self.assertEqual(ticks, [0.0, 50.0, 100.0])
@@ -589,6 +594,25 @@ class MathsChannelServiceTests(unittest.TestCase):
         self.assertIn("Power", normalised)
         self.assertNotIn("Broken", normalised)
         self.assertEqual(normalised["Power"]["enabled"], True)
+
+    def test_calculated_channel_evaluation_order_sorts_dependencies(self) -> None:
+        definitions = {
+            "Second": {"enabled": True, "created_from_columns": ["First"]},
+            "First": {"enabled": True, "created_from_columns": ["A"]},
+        }
+
+        order = maths_channel_service.calculated_channel_evaluation_order(definitions)
+
+        self.assertEqual(order, ["First", "Second"])
+
+    def test_calculated_channel_evaluation_order_rejects_cycles(self) -> None:
+        definitions = {
+            "First": {"enabled": True, "created_from_columns": ["Second"]},
+            "Second": {"enabled": True, "created_from_columns": ["First"]},
+        }
+
+        with self.assertRaisesRegex(ValueError, "First -> Second -> First"):
+            maths_channel_service.calculated_channel_evaluation_order(definitions)
 
 
 class PlottingDataServiceTests(unittest.TestCase):

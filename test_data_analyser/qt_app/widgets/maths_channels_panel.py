@@ -54,6 +54,7 @@ _FORMULA_BUTTONS = (
 
 class MathsChannelsPanel(QWidget):
     channelsChanged = Signal()
+    channelRenamed = Signal(str, str)
     statusMessage = Signal(str)
 
     def __init__(self, view_model: MathsChannelsViewModel, parent: QWidget | None = None) -> None:
@@ -284,11 +285,12 @@ class MathsChannelsPanel(QWidget):
         qt_message_service.info(self, "Maths Channels", message)
 
     def _apply(self) -> None:
+        selected_name = self._selected_name
         result = self.vm.apply_channel(
             self.name_edit.text(),
             self.formula_edit.toPlainText(),
             self.description_edit.text(),
-            selected_name=self._selected_name,
+            selected_name=selected_name,
         )
         if not result.ok:
             self.validation_status_label.setText(f"Invalid formula: {result.message}")
@@ -299,6 +301,8 @@ class MathsChannelsPanel(QWidget):
         applied_name = (result.payload or {}).get("name", self.name_edit.text().strip())
         self.refresh()
         self._select_channel(applied_name)
+        if selected_name and selected_name != applied_name:
+            self.channelRenamed.emit(selected_name, applied_name)
         self.channelsChanged.emit()
         self.statusMessage.emit(result.message)
 

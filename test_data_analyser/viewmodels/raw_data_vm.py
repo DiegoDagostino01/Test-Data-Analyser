@@ -18,14 +18,14 @@ from ..core.data_io import numeric_series
 from ..services import dataset_service, find_replace_service, raw_data_service
 from ..services.results import OperationResult, payload_dict
 from .app_state import AppState
-from .state_controller import AppStateController
+from .state_controller import AppStateController, DatasetCellUndo
 
 
 class RawDataViewModel:
     def __init__(self, state: AppState) -> None:
         self.state = state
         self._controller = AppStateController(state)
-        self._undo_stack: list[tuple] = []
+        self._undo_stack: list[tuple | DatasetCellUndo] = []
 
     def _numeric(self, column: str) -> pd.Series:
         if self.state.df is None or column not in self.state.df.columns:
@@ -169,6 +169,12 @@ class RawDataViewModel:
         if not self._undo_stack:
             return OperationResult.failure("Nothing to undo")
         entry = self._undo_stack.pop()
+        if isinstance(entry, DatasetCellUndo):
+            column_name = self.state.name_for_channel_id(entry.channel_id) or entry.channel_id
+            if not self._controller.restore_dataset_cell(entry):
+                self._undo_stack.append(entry)
+                return OperationResult.failure("The edited cell could not be restored.")
+            return OperationResult.success(f"Reverted the last edit to '{column_name}'.")
         if entry[0] == "snapshot":
             self._controller.restore_dataset_snapshot(entry[1])
             return OperationResult.success("Reverted the last replace.")
@@ -296,7 +302,18 @@ class RawDataViewModel:
             return OperationResult.failure(f"Invalid regular expression: {exc}")
         if new_text == text:
             return OperationResult.success("No change.", payload={"replaced": 0})
-        snapshot = self._controller.capture_dataset_snapshot("replace")
+        spec = self.state.channel_registry.spec_for_id(channel_id)
+        if spec is None:
+            return OperationResult.failure("The column is no longer available.")
+        undo = DatasetCellUndo(
+            description="replace",
+            channel_id=channel_id,
+            row_index=int(row),
+            old_value=current,
+            old_dtype=df[column].dtype,
+            old_data_type=spec.data_type,
+            is_dirty=self.state.is_dirty,
+        )
         result = dataset_service.set_cell(
             self.state.df, self.state.channel_registry, channel_id, int(row), new_text
         )
@@ -304,7 +321,7 @@ class RawDataViewModel:
             return result
         self._controller.apply_dataframe_payload(payload_dict(result))
         self._controller.mark_dirty()
-        self._undo_stack.append(("snapshot", snapshot))
+        self._undo_stack.append(undo)
         return OperationResult.success("Replaced 1 occurrence.", warnings=result.warnings, payload={"replaced": 1})
 
     # ------------------------------------------------------------------

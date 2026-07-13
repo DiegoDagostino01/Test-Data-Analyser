@@ -11,18 +11,15 @@ Test Data Analyser.
 ## Packaging Position
 
 - Keep PyInstaller `--onedir` as the default build engine for this app.
-- Do not switch to `--onefile` unless the settings/config path behavior has been
-  reviewed again; the app expects bundled files such as `config/settings.json`
-  and Qt assets to exist beside the frozen app.
+- Do not switch to `--onefile` unless the Local AppData settings behavior and
+  bundled Qt assets have been reviewed again.
 - Treat the generated launch folder as a frozen release artifact. Python source
   edits in the repo do not update the existing `.exe` automatically.
 - Rebuild the bundle after Python code, dependency, version, icon, import, or
   packaging changes.
-- Replacing individual files in `_internal/` is acceptable only for files that
-  are not compiled or linked code: specifically, config files such as
-  `config/settings.json` and image/icon assets such as `app_icon.png` or
-  `app_icon.ico`; and only after a smoke test confirms the packaged app still
-  starts correctly.
+- Replacing individual files in `_internal/` is acceptable only for image/icon
+  assets such as `app_icon.png` or `app_icon.ico`, and only after a smoke test
+  confirms the packaged app still starts correctly.
 
 ## Pre-Build Checks
 
@@ -44,7 +41,6 @@ Use this PyInstaller shape from the repo root:
 python -m PyInstaller --noconfirm --clean --onedir --windowed `
   --name "Test Data Analyser" `
   --icon "test_data_analyser\qt_app\assets\app_icon.ico" `
-  --add-data "config\settings.json;config" `
   --add-data "test_data_analyser\qt_app\assets;test_data_analyser\qt_app\assets" `
   --hidden-import openpyxl `
   --hidden-import xlrd `

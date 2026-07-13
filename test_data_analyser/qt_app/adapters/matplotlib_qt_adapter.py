@@ -32,6 +32,7 @@ from ...services import plot_render_service
 
 LEGEND_DISPLAY_PANEL = "panel"
 LEGEND_DISPLAY_GRAPH = "graph"
+DISPLAY_DPI = 150
 LEGEND_DISPLAY_CHOICES = (
     (LEGEND_DISPLAY_PANEL, "Right-side Legend panel"),
     (LEGEND_DISPLAY_GRAPH, "Inside graph"),
@@ -770,7 +771,7 @@ class MatplotlibCanvas(QWidget):
         super().__init__(parent)
         self.setObjectName("MatplotlibCanvas")
         self._theme_name = "light"
-        self.figure = Figure(figsize=(8.0, 5.0), dpi=100)
+        self.figure = Figure(figsize=(8.0, 5.0), dpi=DISPLAY_DPI)
         self.canvas = FigureCanvasQTAgg(self.figure)
         self.canvas.setObjectName("MatplotlibFigureCanvas")
         self.toolbar = LegendAwareNavigationToolbar(self.canvas, self)

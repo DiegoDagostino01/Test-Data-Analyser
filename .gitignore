@@ -16,6 +16,9 @@ env/
 build/
 dist/
 *.egg-info/
+*.spec
+Test Data Analyser Launch/
+Test Data Analyser.lnk
 
 # Test/cache output
 .pytest_cache/
@@ -35,6 +38,7 @@ tmp/
 temp/
 outputs/
 exports/
+autosave.json
 
 # Excel temp files
 ~$*.xlsx
@@ -46,13 +50,8 @@ Thumbs.db
 
 # .graphifyignore
 node_modules/
-dist/
 *.generated.py
 
-# only index src/, ignore everything else
-*
-!src/
-!src/**
-
-graphify-out/cost.json        # local only
-graphify-out/cache/         # optional: commit for speed, skip to keep repo small
+# Local analysis output
+graphify-out/
+test_data_analyser_gpt_sol_5_6_master_prompt.md

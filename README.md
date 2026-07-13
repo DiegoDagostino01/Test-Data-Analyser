@@ -60,9 +60,73 @@ run without it (the Qt tests skip automatically when PySide6 is absent).
 
 ## User settings
 
-Application settings are stored in `config/settings.json`. If an older checkout
-still has `settings.json` in the repository root, the app migrates it into the
-`config/` folder on startup.
+Application settings are stored per Windows user at
+`%LOCALAPPDATA%\Eaton\Test Data Analyser\settings.json`. On first V1.03 launch,
+a valid historical root `settings.json` is copied into Local AppData without
+deleting the source. An existing Local AppData settings file always takes
+precedence. New installations create defaults directly in Local AppData.
+
+When no data is active, the start dashboard provides the shared **Create
+Session**, **Open Excel**, **Load Session**, and **Recent** commands plus recent
+data/session lists. The **Startup behavior** setting can keep this blank start
+or attempt the newest existing recent session. A recent recovery auto-save is
+offered without deleting stale or dismissed files; loading recovery marks the
+session Unsaved, and the recovery file is removed only after a successful
+explicit save.
+
+## Workspace
+
+The analysis panels use a dockable workspace. Panels can be docked, tabbed,
+floated, hidden, auto-hidden, and reopened while retaining their analysis
+state. Use the **Workspace** menu to apply the built-in **Analysis**,
+**Comparison**, **Reporting**, or **Data Editing** layout, save or restore the
+single **Custom** layout, float Plot Workspace, or bring it back.
+
+Plot Workspace is one persistent widget containing the plot-profile tabs and
+Matplotlib canvas. Floating or re-docking it does not duplicate the figure or
+change session/profile data. Workspace layouts are stored in user settings and
+are intentionally separate from analysis sessions.
+
+Use the **Mode** menu or **Experience mode** setting to choose **Basic** or
+**Advanced**. Basic keeps the core data, plot, statistics, and export workflow
+visible while hiding Maths Channels, Point Compare, Requirements / Limits, and
+Engineering Notes. Switching modes does not clear those features' data.
+Returning to Advanced restores the workspace arrangement that existed before
+Basic was applied. New settings stores start in Basic; existing or migrated
+users remain in Advanced unless they choose otherwise.
+
+The dockable **Plot Navigator** contains separate collapsible Axes, Channels,
+Plot Type, Analysis Window, and Filter sections. **Search channels** matches
+channel names and engineering classification groups without clearing selected
+primary or secondary Y channels. Search results retain engineering group order
+and natural channel ordering.
+
+The dockable **Legend** can filter plotted channels by name or classification
+group. Use the visibility checkbox to hide/show a channel, **Edit** for the full
+style dialog, or click the colour swatch for a direct colour shortcut. Legend
+filters affect only the panel view; plot profiles, hidden state, and exported
+figure legends continue to use the complete plotted-channel set.
+
+## Commands and status
+
+Press **Ctrl+Shift+P** to open the command palette. It searches commands,
+aliases, panel names, and workspace layouts, and uses the same actions as the
+ribbon and keyboard shortcuts. Disabled commands remain visible with a reason,
+such as requiring a generated plot before saving an image.
+
+The ribbon is organized into **Home**, **Data**, **Plot**, **Analysis**,
+**Requirements**, **Reporting**, and **Settings** groups. Existing file
+shortcuts remain available, and **F5** generates the active plot.
+
+The status bar keeps operation messages separate from durable indicators for
+plot currency, saved/unsaved session state, recovery auto-save, and the active
+workspace. Recovery auto-save never changes an Unsaved session to Saved.
+
+Keyboard focus is indicated across buttons, inputs, lists, tables, and tabs.
+Operation status messages request polite Qt accessibility announcements for
+screen readers. Fractional display scaling is supported; automated shell checks
+cover 125%, 150%, and 200% in light and dark themes. The Workspace and Commands
+sections above cover docking, presets, modes, and keyboard workflows.
 
 ## Tests
 
@@ -78,6 +142,27 @@ python -m unittest discover -s tests
 
 Qt panel/adapter tests (`tests/test_qt_adapters.py`) run under the Qt offscreen
 platform and are skipped automatically if PySide6 is not installed.
+
+## Windows release build
+
+Install the separate build dependency and run the checked release script:
+
+```powershell
+& ".\.venv\Scripts\python.exe" -m pip install -r requirements-build.txt
+& ".\tools\build_windows_release.ps1"
+```
+
+The script runs the suite, builds a PyInstaller `onedir` application, includes
+README plus the ADS notices and license, excludes mutable `settings.json`, scans
+the bundle for paths/recents/monitor/layout state, creates
+`Test Data Analyser.lnk`, and smoke-tests packaged startup. Distribute the
+shortcut together with the complete `Test Data Analyser Launch/` folder; the
+executable does not run standalone.
+
+Before promoting a release version, physically verify mixed-DPI multi-monitor
+docking and reconnect behavior, Windows Narrator announcements, light/dark
+focus contrast, and packaged keyboard-only CSV/XLSX/XLS load, plot, Raw Data,
+session, recovery, save, and export workflows.
 
 ## Runs / Comparison
 
@@ -153,10 +238,14 @@ clip(`Pressure`, 0, 500)
 ```
 
 Calculated channel definitions are saved in analysis sessions and recalculated
-from the refreshed source data when a session is loaded. Channel lists are
-sorted naturally throughout the app, so numbered names such as `TC2` and `TC10`
-appear in engineering-friendly order; where channel groups are shown, the group
-order is preserved and each group is sorted internally.
+from the refreshed source data when a session is loaded. Dependencies between
+calculated channels are evaluated in prerequisite order, and circular
+dependencies are rejected before they can change the dataset. Renaming a Maths
+Channel preserves dependent formulas, plot selections, best-fit settings,
+legends, and requirement references. Channel lists are sorted naturally
+throughout the app, so numbered names such as `TC2` and `TC10` appear in
+engineering-friendly order; where channel groups are shown, the group order is
+preserved and each group is sorted internally.
 
 ## Plot options
 

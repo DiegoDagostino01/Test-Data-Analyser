@@ -46,8 +46,8 @@ Low-level, cross-cutting modules every other layer can use:
   (Butterworth) filter used by the plot canvas.
 - `settings_manager.py` — `SettingsManager`, the persisted user-settings store
   (now also carrying axis-padding defaults and the remembered data/session
-  import directories), stored by default at `config/settings.json` with a
-  one-time migration from the legacy root `settings.json` path.
+  import directories), stored per user under Local AppData with a one-time
+  migration from the historical root `settings.json`.
 - `naming.py` — safe names and natural sorting for engineering channel labels.
 - `indexing.py` — shared active-index clamping helpers.
 - `column_matching.py` — grouped-column X/Y pairing and keyword-based column
@@ -109,7 +109,8 @@ must not embed in a canvas or show dialogs; they return values or an
   channel-specific X data, first-failure reporting, and WARN severity for tight
   PASS margins.
 - `maths_channel_service.py` — the restricted-AST `MathsChannelEvaluator`, the
-  allowed-function set, and calculated-channel definition normalisation.
+  allowed-function set, calculated-channel definition normalisation, and
+  dependency ordering/cycle detection for calculated-channel recalculation.
 - `plotting_data_service.py` — analysis-window data preparation plus cleaned,
   drawable plot/comparison series preparation (NaN dropping, low-pass
   filtering, and secondary-axis labelling), returned as plain arrays so Qt
@@ -183,8 +184,10 @@ message boxes.
   export.
 - `maths_channels_vm.py` — validate/apply/recalculate/delete calculated
   channels plus table-display data for the Qt panel, mutating the state's
-  dataframe/definitions in place. Formula validation and calculation remain in
-  the shared Maths Channel evaluator; the Qt builder only inserts formula text.
+  dataframe/definitions in place. Recalculation follows dependency order;
+  renames propagate through formulas and plot/session references. Formula
+  validation and calculation remain in the shared Maths Channel evaluator; the
+  Qt builder only inserts formula text.
 - `limits_vm.py` — limit-line + point CRUD, colour-preset helpers, active
   ranges, table-display data, and the margin-to-limit summary.
 - `runs_comparison_vm.py` — run CRUD (load/remove/duplicate/rename/set-active/
@@ -208,16 +211,39 @@ The only package that imports PySide6.
 
 - `main_qt.py` — the `QApplication` entry point.
 - `main_window.py` — `MainWindow`: the Eaton-branded header and logo, the
-  grouped ribbon command bar, the axis/data controls, the Matplotlib plot
-  canvas, multiple plot-profile tabs (new/duplicate/rename/delete), the lower
-  analysis tabs, the direct Settings and Help menu-bar actions, and the wiring
-  between every panel and the viewmodels.
+  grouped ribbon command bar, multiple plot-profile tabs
+  (new/duplicate/rename/delete), the dashboard/workspace content stack,
+  Settings/Workspace/Mode/Help actions, and the wiring between every panel and
+  the viewmodels. Panel placement, visibility, floating, presets, and layout
+  persistence are delegated to the workspace manager.
 - `theme.py` — the centralised Eaton Qt stylesheet/palette, sourced from
   `core/config.py` and honouring light/dark.
+- `workspace/` — the stable singleton panel registry, Advanced Docking System
+  adapter, built-in workspace presets, versioned JSON-safe state serializer,
+  floating-window recovery, and coordinating `WorkspaceManager`. This package
+  is Qt-only; no docking type or layout state crosses into viewmodels, services,
+  domain models, analysis sessions, or plot profiles.
+- `command_manager.py` — the central registry of stable command IDs and shared
+  `QAction` instances. Menus, shortcuts, ribbon buttons, panel navigation, and
+  the command palette execute these same actions.
+- `ribbon_manager.py` — renders the Home, Data, Plot, Analysis, Requirements,
+  Reporting, and Settings groups from registered commands.
+- `application_status_manager.py` — presents transient operation messages and
+  durable plot/session/auto-save/workspace indicators without owning analysis
+  state. Operation messages also request polite Qt accessibility announcements.
+- `recovery_policy.py` — bounded discovery of recent `autosave.json` candidates,
+  including the 30-day display window and path/mtime/size dismissal
+  fingerprints. It never deletes recovery files.
+- `user_experience_mode.py` — the Qt-only Basic/Advanced policy listing the
+  commands and workspace panels masked in Basic mode.
+- `widgets/command_palette.py` — modeless `Ctrl+Shift+P` command search with
+  aliases, panel/workspace navigation, disabled reasons, keyboard execution,
+  and focus restoration.
 - `widgets/` — one thin panel per feature: `data_file_panel`,
   `axis_selection_panel`, `plot_workspace`, `statistics_panel`, `raw_data_panel`,
   `maths_channels_panel`, `limits_panel`, `engineering_notes_panel`,
-  `runs_comparison_panel`, `cursor_compare_panel`, `settings_dialog`, and the
+  `runs_comparison_panel`, `cursor_compare_panel`, `dashboard`,
+  `settings_dialog`, and the
   shared `no_wheel_combo_box` (a `QComboBox` that ignores the mouse wheel so
   scrolling a panel never changes a selection). `axis_selection_panel` groups
   channels by engineering type and keeps primary/secondary Y selections in
@@ -235,6 +261,20 @@ The only package that imports PySide6.
   `qt_file_dialogs`, `qt_message_service`, and `qt_widget_helpers` (remembers
   the last data/session directories in settings).
 
+### Release tooling
+
+- `tools/build_windows_release.ps1` — the Windows PyInstaller `onedir` release
+  pipeline. It excludes mutable settings, stages the launch folder atomically,
+  copies ADS notices/licenses, creates the shortcut, scans artifacts, and runs a
+  packaged startup smoke test.
+- `tools/scan_release_artifacts.py` — release-tree guard for bundled
+  `settings.json`, local user paths, recents, monitor identifiers, and workspace
+  geometry/state.
+- `tools/smoke_ui_scaling.py` — fresh-process Qt shell check used at 125%, 150%,
+  and 200% scaling in light and dark themes.
+- `requirements-build.txt` — pinned build-only dependencies; these are not
+  application runtime requirements.
+
 ## Key flows
 
 - **Data sources.** The File ribbon offers **Open Excel** (load a CSV/XLSX/XLS
@@ -243,8 +283,9 @@ The only package that imports PySide6.
   in `AppState.df`, so plotting, Maths Channels, axis selectors, and sessions
   work identically regardless of source. The Raw Data tab's *Edit dataset* mode
   edits columns/rows/cells in either mode; edits are session-only and never
-  rewrite the original Excel file. Plot selectors offer only numeric-compatible
-  channels.
+  rewrite the original Excel file. Single-cell undo stores only the prior cell
+  value/type metadata, while structural and block edits retain full snapshots.
+  Plot selectors offer only numeric-compatible channels.
 - **Plotting.** `MainWindow._generate_plot()` reads the axis panel (X, primary &
   secondary Y, plot kind, analysis window, filter), asks `PlotWorkspace` to
   render prepared series from `PlotWorkspaceViewModel`, applies persistent
@@ -271,6 +312,39 @@ The only package that imports PySide6.
   (`fileLoaded`, `channelsChanged`, `limitsChanged`, `comparisonRequested`,
   `cursorPointsChanged`, `analysisWindowRequested`, `statusMessage`); the main
   window owns cross-panel refreshes.
+- **Workspace.** Eleven stable panel IDs wrap the existing singleton widgets.
+  Plot Workspace contains the plot-profile tabs and single Matplotlib canvas;
+  it can dock or float without recreating plot state, and closing its floating
+  window returns the same widget to the main workspace. Analysis, Comparison,
+  Reporting, and Data Editing presets plus one Custom layout are persisted in
+  user settings, independently of analysis state. Missing-screen recovery
+  clamps floating windows onto the primary display. Basic mode applies a
+  reversible visibility mask: `WorkspaceManager` snapshots the unmasked ADS
+  state, blocks masked panels and preset/Custom mutations, persists the
+  unmasked state, and restores it when Advanced mode returns.
+- **Dashboard and recovery.** A `QStackedWidget` selects either the no-data
+  Dashboard or the existing ADS manager. Successful data/manual/session loads
+  reveal that same workspace widget; cancelled, failed, or data-less restores
+  remain on the Dashboard. Dashboard buttons reuse `CommandManager` actions.
+  Recovery discovery searches only the working directory and parents of recent
+  data/session entries, ignores candidates older than 30 days, and stores
+  bounded fingerprints for dismissal. Recovery is retired only after a
+  successful explicit session save.
+- **Navigator and Legend.** `AxisSelectionPanel` provides the Plot Navigator's
+  collapsible sections and model/proxy channel search. Channel classification,
+  grouped natural order, and check state are cached when columns change, so a
+  search updates Qt proxy filters without dataframe work or model rebuilding.
+  The external Legend remains a projection of live Matplotlib artist metadata;
+  its name/group filters only hide table rows and never change profile state or
+  figure-export inputs. Visibility and style changes continue through the
+  existing explicit Qt signals to `MainWindow`.
+- **Commands and status.** `MainWindow` registers command IDs against its
+  existing orchestration methods. `CommandManager` owns each action once;
+  `RibbonManager`, menus, shortcuts, and `CommandPalette` reuse it, preventing
+  duplicate callbacks. Plot currency is derived from the active Navigator
+  configuration versus the last successful render. Session status mirrors
+  `AppState.is_dirty`; recovery auto-save is displayed independently and does
+  not mark the session clean.
 - **Cursor.** `PlotWorkspace` owns the Matplotlib click/key wiring and the
   locked-point markers; `CursorCompareViewModel` owns the point list and table
   data, so the logic stays GUI-free.

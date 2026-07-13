@@ -1,0 +1,56 @@
+{
+  "version": "1.00.00",
+  "file_path": "C:\\Engineering\\TDA Fixtures\\legacy-data.csv",
+  "sheet_name": "",
+  "runs": [],
+  "active_run_index": -1,
+  "comparison_mode_enabled": false,
+  "comparison_common_x_range": false,
+  "comparison_prefix_legend": true,
+  "active_plot_profile_index": 0,
+  "plot_profiles": [
+    {
+      "name": "Legacy Plot",
+      "x_column": "Time",
+      "y_columns": [
+        "Pressure"
+      ],
+      "secondary_y_columns": [
+        "Temperature"
+      ],
+      "legend": {
+        "display_mode": "graph"
+      },
+      "generated": true
+    }
+  ],
+  "calculated_channels": {
+    "Pressure Delta": {
+      "formula": "Outlet - Inlet",
+      "enabled": true,
+      "created_from_columns": [
+        "Outlet",
+        "Inlet"
+      ]
+    }
+  },
+  "engineering_notes": "Legacy top-level note",
+  "limit_lines": [
+    {
+      "name": "Legacy Maximum",
+      "type": "Upper Limit",
+      "applies_to": "Pressure",
+      "color": "#DA291C",
+      "points": [
+        {
+          "x": 0.0,
+          "y": 100.0
+        },
+        {
+          "x": 1.0,
+          "y": 100.0
+        }
+      ]
+    }
+  ]
+}

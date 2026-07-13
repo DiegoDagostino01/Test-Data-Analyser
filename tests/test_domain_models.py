@@ -10,6 +10,7 @@ Run with:
 """
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -261,6 +262,8 @@ class PlotProfileTests(unittest.TestCase):
 
 
 class SessionStateTests(unittest.TestCase):
+    FIXTURE_ROOT = PROJECT_ROOT / "tests" / "fixtures" / "v103_migration"
+
     def _sample_session(self) -> dict:
         return {
             "version": "1.00.00",
@@ -328,6 +331,37 @@ class SessionStateTests(unittest.TestCase):
         restored = SessionState.from_dict(session).to_dict()
         self.assertIn("Power", restored["calculated_channels"])
         self.assertNotIn("Broken", restored["calculated_channels"])
+
+    def test_current_fixture_keeps_workspace_state_out_of_analysis_models(self) -> None:
+        fixture = json.loads(
+            (self.FIXTURE_ROOT / "current_session.json").read_text(encoding="utf-8")
+        )
+
+        restored = SessionState.from_dict(fixture).to_dict()
+
+        self.assertNotIn("workspace", restored)
+        self.assertNotIn("workspace_layout_version", restored)
+        self.assertNotIn("workspace", restored["plot_profiles"][0])
+        self.assertEqual(restored["plot_profiles"][0]["secondary_y_columns"], ["Power"])
+        self.assertTrue(restored["plot_profiles"][0]["generated"])
+        self.assertIn("Power", restored["calculated_channels"])
+        self.assertNotIn("Broken", restored["calculated_channels"])
+
+    def test_legacy_fixture_normalises_without_new_workspace_or_registry_state(self) -> None:
+        fixture = json.loads(
+            (self.FIXTURE_ROOT / "legacy_session.json").read_text(encoding="utf-8")
+        )
+
+        restored = SessionState.from_dict(fixture).to_dict()
+
+        self.assertEqual(restored["root_file_directory"], r"C:\Engineering\TDA Fixtures")
+        self.assertEqual(restored["channel_registry"], {"columns": [], "next_id": 1})
+        self.assertEqual(restored["plot_profiles"][0]["secondary_y_columns"], ["Temperature"])
+        self.assertEqual(restored["plot_profiles"][0]["legend"]["display_mode"], "graph")
+        self.assertIn("Pressure Delta", restored["calculated_channels"])
+        self.assertNotIn("engineering_notes", restored)
+        self.assertNotIn("limit_lines", restored)
+        self.assertNotIn("workspace", restored)
 
     def test_non_dict_input_is_handled(self) -> None:
         restored = SessionState.from_dict(None).to_dict()

@@ -25,7 +25,7 @@ import pandas as pd
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
-    from PySide6.QtCore import QItemSelectionModel, Qt
+    from PySide6.QtCore import QByteArray, QItemSelectionModel, QRect, Qt
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -34,6 +34,7 @@ try:
         QGroupBox,
         QHeaderView,
         QLabel,
+        QMainWindow,
         QMenu,
         QPushButton,
         QScrollArea,
@@ -43,6 +44,7 @@ try:
         QStackedWidget,
         QTabBar,
         QTabWidget,
+        QWidget,
     )
     from PySide6.QtTest import QTest
 
@@ -54,7 +56,29 @@ try:
     from test_data_analyser.qt_app.adapters.editable_raw_data_model import EditableRawDataTableModel
     from test_data_analyser.qt_app.adapters.pandas_table_model import PandasTableModel
     from test_data_analyser.qt_app.main_qt import _app_icon_path
+    from test_data_analyser.qt_app.main_qt import _high_dpi_rounding_policy
     from test_data_analyser.qt_app.main_window import MainWindow
+    from test_data_analyser.qt_app.command_manager import CommandManager
+    from test_data_analyser.qt_app.application_status_manager import (
+        ApplicationStatusManager,
+        PlotStatus,
+    )
+    from test_data_analyser.qt_app.user_experience_mode import (
+        BASIC_HIDDEN_COMMAND_IDS,
+        BASIC_HIDDEN_PANEL_IDS,
+    )
+    from test_data_analyser.qt_app.widgets.command_palette import CommandPalette
+    from test_data_analyser.qt_app.workspace import (
+        AdsDockBackend,
+        DockArea,
+        PanelDescriptor,
+        SideBarLocation,
+        WorkspaceManager,
+        WorkspacePreset,
+        WorkspaceRegistry,
+        WorkspaceSerializer,
+    )
+    from test_data_analyser.qt_app.workspace.workspace_serializer import WORKSPACE_LAYOUT_VERSION
     from test_data_analyser.qt_app.widgets.help_dialog import HelpDialog
     from test_data_analyser.qt_app.widgets.no_wheel_combo_box import NoWheelComboBox
     from test_data_analyser.qt_app.widgets.raw_data_panel import RawDataPanel
@@ -82,6 +106,512 @@ def setUpModule() -> None:
     global _app
     if PYSIDE_AVAILABLE:
         _app = QApplication.instance() or QApplication([])
+
+
+@unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
+class CommandManagerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.parent = QWidget()
+        self.manager = CommandManager(self.parent)
+
+    def test_register_search_and_trigger_share_one_action(self) -> None:
+        calls: list[str] = []
+        action = self.manager.register(
+            "plot.generate",
+            "Generate Plot",
+            lambda: calls.append("plot"),
+            category="Plot",
+            aliases=("render", "refresh graph"),
+            shortcut="F5",
+        )
+
+        self.assertIs(self.manager.action("plot.generate"), action)
+        self.assertEqual(self.manager.search("render")[0].command_id, "plot.generate")
+        self.assertEqual(action.shortcut().toString(), "F5")
+        action.trigger()
+        self.assertEqual(calls, ["plot"])
+
+    def test_duplicate_ids_and_shortcuts_are_rejected(self) -> None:
+        self.manager.register(
+            "data.open",
+            "Open Excel",
+            lambda: None,
+            category="Data",
+            shortcut="Ctrl+O",
+        )
+        with self.assertRaisesRegex(ValueError, "Duplicate or empty command ID"):
+            self.manager.register(
+                "data.open", "Open Again", lambda: None, category="Data"
+            )
+        with self.assertRaisesRegex(ValueError, "already assigned"):
+            self.manager.register(
+                "session.open",
+                "Open Session",
+                lambda: None,
+                category="Home",
+                shortcut="Ctrl+O",
+            )
+
+    def test_availability_exposes_disabled_reason_and_searches_disabled_last(self) -> None:
+        available = {"plot": False}
+        self.manager.register(
+            "plot.saveImage",
+            "Save Plot",
+            lambda: None,
+            category="Plot",
+            aliases=("export figure",),
+            availability=lambda: available["plot"],
+            disabled_reason="Generate a plot first.",
+        )
+        self.manager.register(
+            "data.exportSelection",
+            "Export Data",
+            lambda: None,
+            category="Data",
+            aliases=("export table",),
+        )
+
+        self.assertFalse(self.manager.action("plot.saveImage").isEnabled())
+        self.assertEqual(
+            self.manager.disabled_reason("plot.saveImage"), "Generate a plot first."
+        )
+        self.assertEqual(
+            [definition.command_id for definition in self.manager.search("export")],
+            ["data.exportSelection", "plot.saveImage"],
+        )
+        available["plot"] = True
+        self.manager.refresh_availability("plot.saveImage")
+        self.assertTrue(self.manager.action("plot.saveImage").isEnabled())
+
+
+@unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
+class ApplicationStatusManagerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.window = QMainWindow()
+        self.manager = ApplicationStatusManager(self.window.statusBar())
+
+    def test_transient_and_durable_statuses_are_independent(self) -> None:
+        self.manager.set_plot_status(PlotStatus.STALE)
+        self.manager.set_session_dirty(True)
+        self.manager.set_autosave("Recovery saved 10:15")
+        self.manager.set_workspace("Comparison")
+        self.manager.show_message("Channels changed")
+
+        self.assertEqual(self.window.statusBar().currentMessage(), "Channels changed")
+        self.assertEqual(self.manager.plot_label.text(), "Plot: Needs regeneration")
+        self.assertEqual(self.manager.session_label.text(), "Session: Unsaved")
+        self.assertEqual(self.manager.autosave_label.text(), "Recovery saved 10:15")
+        self.assertEqual(self.manager.workspace_label.text(), "Comparison")
+
+    def test_status_labels_publish_accessible_names(self) -> None:
+        self.manager.set_plot_status(PlotStatus.STALE)
+        self.manager.set_session_dirty(True)
+        self.manager.set_workspace("Reporting")
+
+        self.assertEqual(self.manager.plot_label.accessibleName(), "Plot: Needs regeneration")
+        self.assertEqual(self.manager.session_label.accessibleName(), "Session: Unsaved")
+        self.assertEqual(self.manager.workspace_label.accessibleName(), "Workspace: Reporting")
+
+    def test_operation_status_requests_polite_screen_reader_announcement(self) -> None:
+        from test_data_analyser.qt_app import application_status_manager as status_module
+
+        events = []
+        original_update = status_module.QAccessible.updateAccessibility
+        status_module.QAccessible.updateAccessibility = lambda event: events.append(event)
+        try:
+            self.manager.show_message("Plot generated.")
+        finally:
+            status_module.QAccessible.updateAccessibility = original_update
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].message(), "Plot generated.")
+        self.assertEqual(
+            events[0].politeness(),
+            status_module.QAccessible.AnnouncementPoliteness.Polite,
+        )
+
+
+@unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
+class CommandPaletteTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.parent = QWidget()
+        self.manager = CommandManager(self.parent)
+
+    def test_search_executes_one_enabled_action(self) -> None:
+        calls: list[str] = []
+        self.manager.register(
+            "plot.generate",
+            "Generate Plot",
+            lambda: calls.append("plot"),
+            category="Plot",
+            aliases=("render",),
+        )
+        palette = CommandPalette(self.manager, self.parent)
+        palette.search_edit.setText("render")
+
+        self.assertEqual(palette.results.count(), 1)
+        self.assertTrue(palette.execute_current())
+        self.assertEqual(calls, ["plot"])
+
+    def test_disabled_command_shows_reason_and_does_not_execute(self) -> None:
+        calls: list[str] = []
+        self.manager.register(
+            "plot.saveImage",
+            "Save Plot",
+            lambda: calls.append("save"),
+            category="Plot",
+            availability=lambda: False,
+            disabled_reason="Generate a plot first.",
+        )
+        palette = CommandPalette(self.manager, self.parent)
+
+        self.assertFalse(palette.execute_current())
+        self.assertEqual(calls, [])
+        self.assertEqual(palette.reason_label.text(), "Generate a plot first.")
+
+
+@unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
+class WorkspaceRegistryTests(unittest.TestCase):
+    def test_registry_rejects_duplicate_ids_and_widgets(self) -> None:
+        registry = WorkspaceRegistry()
+        widget = QLabel("Plot")
+        registry.register(
+            PanelDescriptor(
+                "plot.workspace",
+                "Plot Workspace",
+                widget,
+                DockArea.CENTER,
+                closable=False,
+                pinnable=False,
+                required=True,
+            )
+        )
+
+        with self.assertRaisesRegex(ValueError, "Duplicate workspace panel ID"):
+            registry.register(
+                PanelDescriptor(
+                    "plot.workspace",
+                    "Duplicate Plot",
+                    QLabel("Other"),
+                    DockArea.CENTER,
+                    closable=False,
+                    required=True,
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "already registered"):
+            registry.register(
+                PanelDescriptor("plot.duplicate", "Duplicate Widget", widget, DockArea.LEFT)
+            )
+
+        self.assertEqual(registry.panel_ids(), ("plot.workspace",))
+        self.assertIs(registry.widget("plot.workspace"), widget)
+
+    def test_required_panel_must_be_non_closable(self) -> None:
+        with self.assertRaisesRegex(ValueError, "cannot be closable"):
+            PanelDescriptor(
+                "plot.workspace",
+                "Plot Workspace",
+                QLabel("Plot"),
+                DockArea.CENTER,
+                required=True,
+            )
+
+
+@unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
+class AdsDockBackendTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.window = QMainWindow()
+        self.registry = WorkspaceRegistry()
+        self.plot = QLabel("Plot")
+        self.statistics = QLabel("Statistics")
+        self.navigator = QLabel("Navigator")
+        self.registry.register(
+            PanelDescriptor(
+                "plot.workspace",
+                "Plot Workspace",
+                self.plot,
+                DockArea.CENTER,
+                closable=False,
+                pinnable=False,
+                required=True,
+            )
+        )
+        self.registry.register(
+            PanelDescriptor(
+                "analysis.statistics",
+                "Statistics",
+                self.statistics,
+                DockArea.RIGHT,
+            )
+        )
+        self.registry.register(
+            PanelDescriptor(
+                "plot.controls",
+                "Plot Navigator",
+                self.navigator,
+                DockArea.LEFT,
+            )
+        )
+        self.backend = AdsDockBackend(self.window, self.registry)
+        self.window.setCentralWidget(self.backend.manager)
+
+    def tearDown(self) -> None:
+        self.window.close()
+        QApplication.processEvents()
+
+    def test_panel_features_never_enable_content_deletion(self) -> None:
+        import PySide6QtAds as QtAds
+
+        plot_dock = self.backend.add_panel("plot.workspace")
+        statistics_dock = self.backend.add_panel("analysis.statistics")
+
+        self.assertFalse(bool(plot_dock.features() & QtAds.CDockWidget.DockWidgetClosable))
+        self.assertTrue(bool(plot_dock.features() & QtAds.CDockWidget.DockWidgetFloatable))
+        self.assertFalse(bool(plot_dock.features() & QtAds.CDockWidget.DockWidgetPinnable))
+        for dock in (plot_dock, statistics_dock):
+            self.assertFalse(bool(dock.features() & QtAds.CDockWidget.DockWidgetDeleteOnClose))
+            self.assertFalse(bool(dock.features() & QtAds.CDockWidget.DeleteContentOnClose))
+
+    def test_tab_float_hide_show_and_restore_preserve_widget_identity(self) -> None:
+        self.backend.add_panel("plot.workspace")
+        self.backend.add_panel("analysis.statistics", tab_with="plot.workspace")
+        self.window.show()
+        QApplication.processEvents()
+        state = self.backend.save_state(1)
+
+        self.backend.hide_panel("analysis.statistics")
+        self.backend.show_panel("analysis.statistics")
+        self.backend.float_panel("plot.workspace")
+        QApplication.processEvents()
+
+        self.assertTrue(self.backend.dock_widget("plot.workspace").isInFloatingContainer())
+        self.assertTrue(self.backend.restore_state(state, 1))
+        self.assertIs(self.backend.dock_widget("plot.workspace").widget(), self.plot)
+        self.assertIs(
+            self.backend.dock_widget("analysis.statistics").widget(), self.statistics
+        )
+        with self.assertRaisesRegex(ValueError, "cannot be hidden"):
+            self.backend.hide_panel("plot.workspace")
+
+    def test_show_panel_selects_the_requested_dock_tab(self) -> None:
+        plot_dock = self.backend.add_panel("plot.workspace")
+        statistics_dock = self.backend.add_panel(
+            "analysis.statistics", tab_with="plot.workspace"
+        )
+        self.window.show()
+        QApplication.processEvents()
+
+        self.backend.show_panel("plot.workspace")
+
+        self.assertTrue(plot_dock.isCurrentTab())
+        self.assertIs(plot_dock.dockAreaWidget().currentDockWidget(), plot_dock)
+        self.assertFalse(statistics_dock.isCurrentTab())
+
+    def test_auto_hide_round_trip_preserves_widget_identity(self) -> None:
+        dock = self.backend.add_auto_hide_panel("plot.controls", SideBarLocation.LEFT)
+        self.window.show()
+        QApplication.processEvents()
+        state = self.backend.save_state(1)
+
+        self.assertTrue(dock.isAutoHide())
+        self.assertTrue(self.backend.restore_state(state, 1))
+        self.assertIs(dock.widget(), self.navigator)
+
+    def test_closing_required_floating_panel_redocks_same_widget(self) -> None:
+        dock = self.backend.add_panel("plot.workspace")
+        self.window.setCentralWidget(self.backend.manager)
+        self.window.show()
+        self.backend.float_panel("plot.workspace")
+        QApplication.processEvents()
+
+        floating = self.backend.floating_widgets()[0]
+        floating.close()
+        QApplication.processEvents()
+        QApplication.processEvents()
+
+        self.assertFalse(dock.isInFloatingContainer())
+        self.assertFalse(dock.isClosed())
+        self.assertIs(dock.widget(), self.plot)
+        self.assertEqual(self.backend.floating_widgets(), ())
+
+
+@unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
+class WorkspaceManagerTests(unittest.TestCase):
+    def _manager(self):
+        directory = tempfile.mkdtemp()
+        settings = SettingsManager(os.path.join(directory, "settings.json"))
+        window = QMainWindow()
+        registry = WorkspaceRegistry()
+        panels = {
+            "plot.workspace": QLabel("Plot"),
+            "plot.controls": QLabel("Controls"),
+            "plot.legend": QLabel("Legend"),
+            "analysis.statistics": QLabel("Statistics"),
+            "requirements.limits": QLabel("Limits"),
+            "runs.comparison": QLabel("Runs"),
+            "notes.engineering": QLabel("Notes"),
+            "analysis.best_fit_formulas": QLabel("Fits"),
+            "data.raw": QLabel("Raw"),
+        }
+        for panel_id, widget in panels.items():
+            required = panel_id == "plot.workspace"
+            registry.register(
+                PanelDescriptor(
+                    panel_id,
+                    panel_id,
+                    widget,
+                    DockArea.CENTER if required or panel_id == "data.raw" else DockArea.RIGHT,
+                    closable=not required,
+                    pinnable=not required,
+                    required=required,
+                )
+            )
+        manager = WorkspaceManager(window, registry, settings)
+        window.setCentralWidget(manager.widget)
+        manager.build()
+        return window, manager, settings
+
+    def test_serializer_rejects_wrong_backend_version_and_invalid_base64(self) -> None:
+        serializer = WorkspaceSerializer()
+        valid = serializer.serialize(
+            dock_state=QByteArray(b"dock"),
+            main_geometry=QByteArray(b"geometry"),
+            active_preset=WorkspacePreset.ANALYSIS,
+        )
+        self.assertIsNotNone(serializer.restore(valid))
+        self.assertIsNone(serializer.restore({**valid, "backend": "qdock"}))
+        self.assertIsNone(serializer.restore({**valid, "workspace_layout_version": 99}))
+        self.assertIsNone(serializer.restore({**valid, "dock_state_b64": "not base64"}))
+
+    def test_builtin_presets_keep_plot_visible_and_change_tool_visibility(self) -> None:
+        window, manager, _settings = self._manager()
+        window.show()
+        QApplication.processEvents()
+
+        manager.apply_preset(WorkspacePreset.COMPARISON)
+        QApplication.processEvents()
+        self.assertFalse(manager.backend.dock_widget("plot.workspace").isClosed())
+        self.assertFalse(manager.backend.dock_widget("runs.comparison").isClosed())
+        self.assertTrue(manager.backend.dock_widget("notes.engineering").isClosed())
+
+        manager.apply_preset(WorkspacePreset.REPORTING)
+        QApplication.processEvents()
+        self.assertFalse(manager.backend.dock_widget("plot.workspace").isClosed())
+        self.assertFalse(manager.backend.dock_widget("notes.engineering").isClosed())
+        self.assertTrue(manager.backend.dock_widget("runs.comparison").isClosed())
+        window.close()
+
+    def test_visibility_mask_restores_the_unmasked_panel_arrangement(self) -> None:
+        window, manager, _settings = self._manager()
+        window.show()
+        manager.apply_preset(WorkspacePreset.REPORTING)
+        QApplication.processEvents()
+        self.assertFalse(manager.backend.dock_widget("notes.engineering").isClosed())
+
+        manager.set_visibility_mask({"notes.engineering"})
+        self.assertTrue(manager.backend.dock_widget("notes.engineering").isClosed())
+        manager.show_panel("notes.engineering")
+        self.assertTrue(manager.backend.dock_widget("notes.engineering").isClosed())
+
+        manager.set_visibility_mask(set())
+        QApplication.processEvents()
+        self.assertFalse(manager.backend.dock_widget("notes.engineering").isClosed())
+        window.close()
+
+    def test_masked_workspace_save_uses_unmasked_dock_state(self) -> None:
+        window, manager, settings = self._manager()
+        window.show()
+        manager.apply_preset(WorkspacePreset.REPORTING)
+        QApplication.processEvents()
+        expected = manager.backend.save_state(WORKSPACE_LAYOUT_VERSION)
+
+        manager.set_visibility_mask({"notes.engineering"})
+        manager.save()
+
+        restored = manager.serializer.restore(settings.get("workspace", "payload"))
+        self.assertIsNotNone(restored)
+        assert restored is not None
+        self.assertEqual(restored.dock_state, expected)
+        window.close()
+
+    def test_visibility_mask_rejects_unknown_and_required_panels(self) -> None:
+        window, manager, _settings = self._manager()
+        with self.assertRaises(KeyError):
+            manager.set_visibility_mask({"missing.panel"})
+        with self.assertRaises(ValueError):
+            manager.set_visibility_mask({"plot.workspace"})
+        window.close()
+
+    def test_visibility_mask_blocks_workspace_preset_changes(self) -> None:
+        window, manager, _settings = self._manager()
+        manager.set_visibility_mask({"notes.engineering"})
+
+        with self.assertRaises(RuntimeError):
+            manager.apply_preset(WorkspacePreset.COMPARISON)
+        with self.assertRaises(RuntimeError):
+            manager.save_custom_layout()
+        window.close()
+
+    def test_custom_layout_and_restart_restore_round_trip(self) -> None:
+        window, manager, settings = self._manager()
+        window.show()
+        QApplication.processEvents()
+        manager.apply_preset(WorkspacePreset.DATA_EDITING)
+        manager.float_panel("plot.workspace")
+        manager.save_custom_layout()
+        payload = settings.get("workspace", "payload")
+        self.assertEqual(payload["active_preset"], "custom")
+
+        restored_window = QMainWindow()
+        restored_registry = WorkspaceRegistry()
+        for descriptor in manager.registry.descriptors():
+            restored_registry.register(
+                PanelDescriptor(
+                    descriptor.panel_id,
+                    descriptor.title,
+                    QLabel(descriptor.title),
+                    descriptor.default_area,
+                    allowed_areas=descriptor.allowed_areas,
+                    closable=descriptor.closable,
+                    movable=descriptor.movable,
+                    floatable=descriptor.floatable,
+                    pinnable=descriptor.pinnable,
+                    serializable=descriptor.serializable,
+                    required=descriptor.required,
+                )
+            )
+        restored_manager = WorkspaceManager(restored_window, restored_registry, settings)
+        restored_window.setCentralWidget(restored_manager.widget)
+        restored_manager.build()
+
+        self.assertEqual(restored_manager.active_preset, WorkspacePreset.CUSTOM)
+        self.assertIsNotNone(restored_manager._custom_layout)
+        self.assertIs(
+            restored_manager.backend.dock_widget("plot.workspace").widget(),
+            restored_registry.widget("plot.workspace"),
+        )
+        window.close()
+        restored_window.close()
+
+    def test_latest_rapid_preset_request_wins(self) -> None:
+        window, manager, _settings = self._manager()
+        window.show()
+        manager.apply_preset(WorkspacePreset.COMPARISON)
+        manager.apply_preset(WorkspacePreset.REPORTING)
+        QApplication.processEvents()
+
+        self.assertEqual(manager.active_preset, WorkspacePreset.REPORTING)
+        self.assertFalse(manager.backend.dock_widget("notes.engineering").isClosed())
+        self.assertTrue(manager.backend.dock_widget("runs.comparison").isClosed())
+        window.close()
+
+    def test_missing_monitor_geometry_is_clamped_to_available_screen(self) -> None:
+        recovered = WorkspaceManager.recover_geometry(
+            QRect(5000, -2000, 1600, 1200),
+            QRect(0, 0, 1920, 1040),
+        )
+
+        self.assertEqual(recovered, QRect(320, 0, 1600, 1040))
 
 
 @unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is not installed")
@@ -991,6 +1521,15 @@ class AxisSelectionPanelTests(unittest.TestCase):
         ]
 
     @staticmethod
+    def _visible_checkable_texts(widget) -> list[str]:
+        return [
+            widget.item(row).text()
+            for row in range(widget.count())
+            if not widget.isRowHidden(row)
+            and widget.item(row).flags() & Qt.ItemFlag.ItemIsUserCheckable
+        ]
+
+    @staticmethod
     def _checked_texts(widget) -> list[str]:
         return [
             widget.item(row).text()
@@ -1011,6 +1550,31 @@ class AxisSelectionPanelTests(unittest.TestCase):
         items = [self.panel.x_combo.itemText(index) for index in range(self.panel.x_combo.count())]
 
         self.assertEqual(items, ["A2", "A10", "alpha", "Beta", "Time", "Zeta"])
+
+    def test_rename_channel_selection_preserves_live_axis_choices(self) -> None:
+        self.panel.apply_selection(
+            ["Time", "A", "B", "C"],
+            "A",
+            ["B"],
+            ["C"],
+        )
+
+        self.panel.rename_channel_selection("A", "Renamed X")
+        self.panel.update_columns(["Time", "Renamed X", "B", "C"], maths_channel_names=["Renamed X"])
+        self.panel.rename_channel_selection("B", "Renamed Primary")
+        self.panel.update_columns(
+            ["Time", "Renamed X", "Renamed Primary", "C"],
+            maths_channel_names=["Renamed X", "Renamed Primary"],
+        )
+        self.panel.rename_channel_selection("C", "Renamed Secondary")
+        self.panel.update_columns(
+            ["Time", "Renamed X", "Renamed Primary", "Renamed Secondary"],
+            maths_channel_names=["Renamed X", "Renamed Primary", "Renamed Secondary"],
+        )
+
+        self.assertEqual(self.panel.x_column(), "Renamed X")
+        self.assertEqual(self.panel.selected_y(), ["Renamed Primary"])
+        self.assertEqual(self.panel.selected_secondary_y(), ["Renamed Secondary"])
 
     def test_selected_y_accessors_return_display_order(self) -> None:
         self.panel.set_columns(["Time", "TC10", "Outlet Pressure", "TC2"], "Time")
@@ -1042,6 +1606,10 @@ class AxisSelectionPanelTests(unittest.TestCase):
         for combo in [self.panel.x_combo, self.panel.group_combo, self.panel.plot_kind_combo]:
             self.assertEqual(combo.minimumWidth(), 0)
             self.assertEqual(combo.sizePolicy().horizontalPolicy(), QSizePolicy.Policy.Ignored)
+        self.assertEqual(
+            self.panel.channel_search_shortcut.context(),
+            Qt.ShortcutContext.WidgetWithChildrenShortcut,
+        )
 
     def test_long_channel_names_do_not_force_wide_controls(self) -> None:
         self.panel.resize(260, 700)
@@ -1136,6 +1704,33 @@ class AxisSelectionPanelTests(unittest.TestCase):
         self.assertNotIn("Filter / FFT", group_titles)
         self.assertIn("Filter", group_titles)
 
+    def test_navigator_sections_collapse_without_changing_values(self) -> None:
+        self.panel.apply_selection(["Time", "A", "B"], "Time", ["A"], ["B"])
+
+        for title in ("Axes", "Channels", "Plot Type", "Analysis Window", "Filter"):
+            button = self.panel.section_buttons[title]
+            button.setChecked(False)
+            self.assertEqual(button.arrowType(), Qt.ArrowType.RightArrow)
+            button.setChecked(True)
+            self.assertEqual(button.arrowType(), Qt.ArrowType.DownArrow)
+
+        self.assertEqual(self.panel.x_column(), "Time")
+        self.assertEqual(self.panel.selected_y(), ["A"])
+        self.assertEqual(self.panel.selected_secondary_y(), ["B"])
+
+    def test_space_toggles_focused_channel(self) -> None:
+        self.panel.show()
+        QApplication.processEvents()
+        for row in range(self.panel.y_list.count()):
+            item = self.panel.y_list.item(row)
+            if item.text() == "A":
+                self.panel.y_list.setCurrentItem(item)
+                self.panel.y_list.setFocus()
+                QTest.keyClick(self.panel.y_list, Qt.Key.Key_Space)
+                break
+
+        self.assertEqual(self.panel.selected_y(), ["A"])
+
     def test_channel_group_filter_preserves_checked_items(self) -> None:
         self.panel.set_columns(["Time", "Outlet Pressure", "Current on Phase A", "Voltage"], "Time")
         for row in range(self.panel.y_list.count()):
@@ -1156,6 +1751,51 @@ class AxisSelectionPanelTests(unittest.TestCase):
             if self.panel.y_list.item(row).checkState() == Qt.CheckState.Checked
         ]
         self.assertEqual(checked, ["Current on Phase A"])
+
+    def test_channel_search_matches_name_and_group_without_losing_selection(self) -> None:
+        self.panel.set_columns(
+            ["Time", "TC10", "Outlet Pressure", "TC2", "Current on Phase A"],
+            "Time",
+        )
+        for row in range(self.panel.y_list.count()):
+            item = self.panel.y_list.item(row)
+            if item.text() == "Current on Phase A":
+                item.setCheckState(Qt.CheckState.Checked)
+
+        self.panel.channel_search_edit.setText("tc")
+        self.assertEqual(self._visible_checkable_texts(self.panel.y_list), ["TC2", "TC10"])
+        self.panel.channel_search_edit.setText("PRESSURE")
+        self.assertEqual(
+            self._visible_checkable_texts(self.panel.y_list), ["Outlet Pressure"]
+        )
+        self.assertEqual(self.panel.selected_y(), ["Current on Phase A"])
+
+        self.panel.channel_search_edit.clear()
+        self.assertEqual(self.panel.selected_y(), ["Current on Phase A"])
+        self.assertEqual(self._checked_texts(self.panel.y_list), ["Current on Phase A"])
+
+    def test_channel_search_composes_with_classification_filter(self) -> None:
+        self.panel.set_columns(
+            ["Time", "Outlet Pressure", "Inlet Pressure", "TC1"],
+            "Time",
+        )
+        self.panel.group_combo.setCurrentText("Pressure")
+        self.panel.channel_search_edit.setText("outlet")
+
+        self.assertEqual(
+            self._visible_checkable_texts(self.panel.y_list), ["Outlet Pressure"]
+        )
+
+    def test_channel_search_reuses_cached_classification(self) -> None:
+        from unittest.mock import patch
+
+        with patch(
+            "test_data_analyser.qt_app.widgets.axis_selection_panel.classify_channel_name"
+        ) as classify, patch.object(self.panel, "_populate_checklist") as populate:
+            self.panel.channel_search_edit.setText("a")
+
+        classify.assert_not_called()
+        populate.assert_not_called()
 
     def test_maths_channels_use_dedicated_group(self) -> None:
         self.panel.set_columns(
@@ -1632,6 +2272,85 @@ class PlotWorkspaceParityTests(unittest.TestCase):
         table_labels = [self.panel.legend_table.item(row, 1).text() for row in range(self.panel.legend_table.rowCount())]
         self.assertEqual(table_labels, ["TC1", "TC2", "TC10"])
 
+    def test_legend_search_and_group_filter_are_ui_only(self) -> None:
+        self.state.df["Outlet Pressure"] = self.state.df["A"]
+        self.state.df["TC2"] = self.state.df["A"] + 1.0
+        self.state.df["TC10"] = self.state.df["A"] + 2.0
+        result = self.panel.generate_plot(
+            "Time",
+            ["Outlet Pressure", "TC2", "TC10"],
+        )
+        self.assertTrue(result.ok, result.message)
+
+        self.panel.legend_search_edit.setText("tc")
+        visible_labels = [
+            self.panel.legend_table.item(row, 1).text()
+            for row in range(self.panel.legend_table.rowCount())
+            if not self.panel.legend_table.isRowHidden(row)
+        ]
+        self.assertEqual(visible_labels, ["TC2", "TC10"])
+        self.assertEqual(len(self.panel.canvas.axes.get_lines()), 3)
+
+        self.panel.legend_search_edit.clear()
+        self.panel.legend_group_combo.setCurrentText("Pressure")
+        visible_labels = [
+            self.panel.legend_table.item(row, 1).text()
+            for row in range(self.panel.legend_table.rowCount())
+            if not self.panel.legend_table.isRowHidden(row)
+        ]
+        self.assertEqual(visible_labels, ["Outlet Pressure"])
+        self.assertEqual(len(self.panel.canvas.axes.get_lines()), 3)
+
+    def test_legend_style_button_uses_existing_style_dialog_path(self) -> None:
+        from test_data_analyser.qt_app.widgets import plot_workspace as plot_workspace_module
+
+        self.panel.generate_plot("Time", ["A"])
+        emitted: list[tuple[str, dict]] = []
+        self.panel.legendChannelStyleChanged.connect(
+            lambda channel, style: emitted.append((channel, style))
+        )
+
+        class _FakeLegendDialog:
+            def __init__(self, channel: str, style: dict, parent=None) -> None:
+                self.channel = channel
+
+            def exec(self):
+                return QDialog.DialogCode.Accepted
+
+            def values(self) -> dict:
+                return {"channel": self.channel, "line_width": "3"}
+
+        original_dialog = plot_workspace_module.LegendChannelStyleDialog
+        try:
+            plot_workspace_module.LegendChannelStyleDialog = _FakeLegendDialog
+            button = self.panel.legend_table.cellWidget(0, 3)
+            self.assertIsInstance(button, QPushButton)
+            button.click()
+        finally:
+            plot_workspace_module.LegendChannelStyleDialog = original_dialog
+
+        self.assertEqual(emitted, [("A", {"channel": "A", "line_width": "3"})])
+
+    def test_legend_colour_swatch_emits_only_colour_override(self) -> None:
+        from PySide6.QtGui import QColor
+        from test_data_analyser.qt_app.widgets import plot_workspace as plot_workspace_module
+
+        self.panel.generate_plot("Time", ["A"])
+        emitted: list[tuple[str, dict]] = []
+        self.panel.legendChannelStyleChanged.connect(
+            lambda channel, style: emitted.append((channel, style))
+        )
+        original_get_colour = plot_workspace_module.QColorDialog.getColor
+        try:
+            plot_workspace_module.QColorDialog.getColor = lambda *args, **kwargs: QColor(
+                "#123456"
+            )
+            self.panel._on_legend_cell_clicked(0, 0)
+        finally:
+            plot_workspace_module.QColorDialog.getColor = original_get_colour
+
+        self.assertEqual(emitted, [("A", {"channel": "A", "colour": "#123456"})])
+
     def test_legend_panel_is_resizable_and_collapsible(self) -> None:
         splitter = self.panel.plot_legend_splitter
         self.assertIsInstance(splitter, QSplitter)
@@ -1642,9 +2361,14 @@ class PlotWorkspaceParityTests(unittest.TestCase):
         self.assertEqual(header.sectionResizeMode(0), QHeaderView.ResizeMode.Fixed)
         self.assertEqual(header.sectionResizeMode(1), QHeaderView.ResizeMode.Stretch)
         self.assertEqual(header.sectionResizeMode(2), QHeaderView.ResizeMode.Fixed)
+        self.assertEqual(header.sectionResizeMode(3), QHeaderView.ResizeMode.Fixed)
         self.assertLessEqual(header.sectionSize(0), 34)
         self.assertGreaterEqual(header.sectionSize(2), 80)
         self.assertLessEqual(header.sectionSize(2), 90)
+        self.assertEqual(
+            self.panel.legend_search_shortcut.context(),
+            Qt.ShortcutContext.WidgetWithChildrenShortcut,
+        )
 
         self.panel.resize(900, 420)
         self.panel.show()
@@ -2201,6 +2925,17 @@ class SettingsDialogTests(unittest.TestCase):
         self.assertIn(("axis_scaling", "pad_y_axis"), self.dialog._editors)
         self.assertIn(("axis_scaling", "pad_y_percent"), self.dialog._editors)
 
+    def test_general_startup_and_mode_fields_are_persisted(self) -> None:
+        mode = self.dialog._editors[("general_ui", "user_experience_mode")]
+        startup = self.dialog._editors[("general_ui", "startup_behaviour")]
+        mode.setCurrentText("advanced")
+        startup.setCurrentText("last_session")
+
+        self.dialog._on_save()
+
+        self.assertEqual(self.vm.get("general_ui", "user_experience_mode"), "advanced")
+        self.assertEqual(self.vm.get("general_ui", "startup_behaviour"), "last_session")
+
     def test_save_persists_axis_padding_and_combo_fields(self) -> None:
         self.dialog._editors[("axis_scaling", "pad_x_axis")].setChecked(False)
         self.dialog._editors[("axis_scaling", "pad_y_percent")].setValue(12.0)
@@ -2482,12 +3217,207 @@ class _FakeDropEvent:
 
 
 class MainWindowLayoutTests(unittest.TestCase):
-    """The main window builds offscreen with a ribbon and smooth splitter."""
+    """The main window builds offscreen with a ribbon and dockable workspace."""
 
     def _window(self) -> "MainWindow":
         directory = tempfile.mkdtemp()
         manager = SettingsManager(os.path.join(directory, "settings.json"))
-        return MainWindow(manager)
+        manager.set("general_ui", "user_experience_mode", "advanced")
+        window = MainWindow(manager)
+        window._show_workspace()
+        return window
+
+    def test_no_data_starts_on_dashboard_with_shared_commands(self) -> None:
+        directory = tempfile.mkdtemp()
+        manager = SettingsManager(os.path.join(directory, "settings.json"))
+        window = MainWindow(manager)
+
+        self.assertIs(window.content_stack.currentWidget(), window.dashboard)
+        for command_id in ("session.create", "data.open", "session.open", "recent.open"):
+            with self.subTest(command_id=command_id):
+                self.assertIs(
+                    window.dashboard.command_button(command_id).defaultAction(),
+                    window.command_manager.action(command_id),
+                )
+
+    def test_successful_data_load_reveals_same_workspace_instance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manager = SettingsManager(os.path.join(directory, "settings.json"))
+            window = MainWindow(manager)
+            plot_workspace = window.plot_workspace
+            csv_path = os.path.join(directory, "sample.csv")
+            pd.DataFrame({"Time": [0.0, 1.0], "A": [1.0, 2.0]}).to_csv(
+                csv_path, index=False
+            )
+
+            window.data_panel.load_path(csv_path)
+
+            self.assertIs(window.content_stack.currentWidget(), window.workspace_manager.widget)
+            self.assertIs(window.plot_workspace, plot_workspace)
+
+    def test_create_session_reveals_workspace_but_cancelled_opens_do_not(self) -> None:
+        directory = tempfile.mkdtemp()
+        manager = SettingsManager(os.path.join(directory, "settings.json"))
+        window = MainWindow(manager)
+        original_data_dialog = qt_file_dialogs.open_data_file
+        original_session_dialog = qt_file_dialogs.open_session_file
+        qt_file_dialogs.open_data_file = lambda *args, **kwargs: ""
+        qt_file_dialogs.open_session_file = lambda *args, **kwargs: ""
+        try:
+            window.dashboard.command_button("data.open").click()
+            window.dashboard.command_button("session.open").click()
+        finally:
+            qt_file_dialogs.open_data_file = original_data_dialog
+            qt_file_dialogs.open_session_file = original_session_dialog
+
+        self.assertIs(window.content_stack.currentWidget(), window.dashboard)
+        window.dashboard.command_button("session.create").click()
+        self.assertIs(window.content_stack.currentWidget(), window.workspace_manager.widget)
+
+    def test_failed_session_load_stays_on_dashboard(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manager = SettingsManager(os.path.join(directory, "settings.json"))
+            window = MainWindow(manager)
+            broken_path = os.path.join(directory, "broken.json")
+            Path(broken_path).write_text("{not json", encoding="utf-8")
+            original_error = qt_message_service.error
+            qt_message_service.error = lambda *args, **kwargs: None
+            try:
+                loaded = window._load_session_path(broken_path)
+            finally:
+                qt_message_service.error = original_error
+
+            self.assertFalse(loaded)
+            self.assertIs(window.content_stack.currentWidget(), window.dashboard)
+
+    def test_session_restore_without_available_data_stays_on_dashboard(self) -> None:
+        directory = tempfile.mkdtemp()
+        manager = SettingsManager(os.path.join(directory, "settings.json"))
+        window = MainWindow(manager)
+
+        class _Result:
+            ok = True
+            message = "Session loaded with missing data."
+            payload = {"main_data_loaded": False}
+            warnings: list[str] = []
+
+        window._restore_session_with_optional_relink = lambda path: (_Result(), False)
+        window._apply_loaded_session = lambda selection: None
+
+        loaded = window._load_session_path(os.path.join(directory, "session.json"))
+
+        self.assertTrue(loaded)
+        self.assertFalse(window.vm.state.has_data)
+        self.assertIs(window.content_stack.currentWidget(), window.dashboard)
+
+    def test_recovery_dismissal_keeps_file_and_successful_save_retires_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            recovery_path = root / "autosave.json"
+            source = MainWindow(SettingsManager(root / "source_settings.json"))
+            source.vm.create_manual_session()
+            self.assertTrue(source.vm.save_session(recovery_path, mark_clean=False).ok)
+
+            manager = SettingsManager(root / "target_settings.json")
+            manager.set("recent", "recent_sessions", [str(root / "analysis.json")])
+            window = MainWindow(manager)
+            candidate = window._recovery_candidate
+            self.assertIsNotNone(candidate)
+            assert candidate is not None
+            self.assertEqual(candidate.path, recovery_path)
+
+            window._dismiss_dashboard_recovery(str(recovery_path))
+            self.assertTrue(recovery_path.exists())
+            if window._recovery_candidate is not None:
+                self.assertNotEqual(window._recovery_candidate.path, recovery_path)
+
+            recovery_path.write_text(
+                recovery_path.read_text(encoding="utf-8") + "\n",
+                encoding="utf-8",
+            )
+            window._refresh_dashboard()
+            self.assertIsNotNone(window._recovery_candidate)
+            assert window._recovery_candidate is not None
+            self.assertEqual(window._recovery_candidate.path, recovery_path)
+            window._recover_from_dashboard(str(recovery_path))
+            self.assertIs(window.content_stack.currentWidget(), window.workspace_manager.widget)
+            self.assertTrue(window.vm.state.is_dirty)
+
+            saved_path = root / "saved.json"
+            original_save_dialog = qt_file_dialogs.save_session_file
+            original_show_result = qt_message_service.show_result
+            qt_file_dialogs.save_session_file = lambda *args, **kwargs: str(saved_path)
+            qt_message_service.show_result = lambda *args, **kwargs: None
+            try:
+                self.assertTrue(window.save_session())
+            finally:
+                qt_file_dialogs.save_session_file = original_save_dialog
+                qt_message_service.show_result = original_show_result
+
+            self.assertTrue(saved_path.exists())
+            self.assertFalse(recovery_path.exists())
+
+    def test_last_session_startup_loads_newest_existing_session(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            session_path = root / "last.json"
+            source = MainWindow(SettingsManager(root / "source_settings.json"))
+            source.vm.create_manual_session()
+            self.assertTrue(source.vm.save_session(session_path).ok)
+
+            manager = SettingsManager(root / "target_settings.json")
+            manager.set("general_ui", "startup_behaviour", "last_session")
+            manager.set("recent", "recent_sessions", [str(session_path)])
+            window = MainWindow(manager)
+            QApplication.processEvents()
+
+            self.assertTrue(window.vm.state.has_data)
+            self.assertIs(window.content_stack.currentWidget(), window.workspace_manager.widget)
+
+    def test_new_user_starts_in_basic_mode_with_advanced_tools_hidden(self) -> None:
+        directory = tempfile.mkdtemp()
+        manager = SettingsManager(os.path.join(directory, "settings.json"))
+        window = MainWindow(manager)
+
+        self.assertEqual(window._experience_mode.value, "basic")
+        self.assertEqual(window.workspace_manager.visibility_mask, BASIC_HIDDEN_PANEL_IDS)
+        for command_id in BASIC_HIDDEN_COMMAND_IDS:
+            with self.subTest(command_id=command_id):
+                action = window.command_manager.action(command_id)
+                self.assertFalse(action.isVisible())
+                self.assertFalse(action.isEnabled())
+        self.assertEqual(window.command_manager.search("maths channels"), [])
+        self.assertTrue(window.ribbon_manager.button_for("analysis.maths.show").isHidden())
+        requirement_group = next(
+            frame
+            for frame in window.ribbon.findChildren(QFrame, "RibbonGroup")
+            if frame.findChild(QLabel, "RibbonGroupLabel").text() == "Requirements"
+        )
+        self.assertTrue(requirement_group.isHidden())
+
+    def test_switching_modes_restores_workspace_and_preserves_analysis_state(self) -> None:
+        window = self._window()
+        window.show()
+        window.workspace_manager.apply_preset(WorkspacePreset.REPORTING)
+        QApplication.processEvents()
+        notes_dock = window.workspace_manager.backend.dock_widget("notes.engineering")
+        self.assertFalse(notes_dock.isClosed())
+        calculated_channels = window.vm.state.calculated_channels
+
+        window.command_manager.action("view.mode.basic").trigger()
+        self.assertTrue(notes_dock.isClosed())
+        self.assertIs(window.vm.state.calculated_channels, calculated_channels)
+        self.assertEqual(
+            window.settings_manager.get("general_ui", "user_experience_mode"),
+            "basic",
+        )
+
+        window.command_manager.action("view.mode.advanced").trigger()
+        QApplication.processEvents()
+        self.assertFalse(notes_dock.isClosed())
+        self.assertEqual(window.workspace_manager.visibility_mask, frozenset())
+        self.assertTrue(window.command_manager.action("reporting.notes.show").isVisible())
+        self.assertTrue(window.command_manager.action("view.mode.advanced").isChecked())
 
     def test_header_logo_builds(self) -> None:
         window = self._window()
@@ -2495,6 +3425,36 @@ class MainWindowLayoutTests(unittest.TestCase):
         self.assertIsNotNone(logo)
         assert logo is not None  # narrow for the type checker
         self.assertFalse(logo.pixmap().isNull())
+
+    def test_workspace_panel_instances_are_unique_children_of_one_window(self) -> None:
+        window = self._window()
+        panels = {
+            "data": window.data_panel,
+            "axes": window.axis_panel,
+            "plot": window.plot_workspace,
+            "statistics": window.statistics_panel,
+            "raw_data": window.raw_data_panel,
+            "maths": window.maths_panel,
+            "best_fit_formulas": window.best_fit_formulas_panel,
+            "limits": window.limits_panel,
+            "notes": window.notes_panel,
+            "runs": window.runs_panel,
+            "cursor": window.cursor_panel,
+        }
+
+        self.assertEqual(len({id(panel) for panel in panels.values()}), len(panels))
+        for name, panel in panels.items():
+            with self.subTest(panel=name):
+                self.assertIsNotNone(panel.parentWidget())
+
+        self.assertIs(window.plot_workspace.parentWidget(), window.plot_area)
+        self.assertIs(window.workspace_registry.widget("plot.workspace"), window.plot_area)
+        self.assertIs(window.workspace_registry.widget("plot.controls"), window.plot_navigator)
+        self.assertIs(window.workspace_registry.widget("analysis.statistics"), window.statistics_panel)
+        self.assertIs(window.workspace_registry.widget("data.raw"), window.raw_data_panel)
+        navigator_layout = window.plot_navigator.widget().layout()
+        self.assertIs(navigator_layout.itemAt(0).widget(), window.data_panel)
+        self.assertIs(navigator_layout.itemAt(1).widget(), window.axis_panel)
 
     def test_header_subtitle_uses_workspace_name(self) -> None:
         window = self._window()
@@ -2505,6 +3465,25 @@ class MainWindowLayoutTests(unittest.TestCase):
 
     def test_application_icon_asset_exists(self) -> None:
         self.assertTrue(_app_icon_path().exists())
+
+    def test_high_dpi_rounding_policy_preserves_fractional_scaling(self) -> None:
+        self.assertEqual(
+            _high_dpi_rounding_policy(),
+            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough,
+        )
+
+    def test_dashboard_and_ribbon_controls_have_keyboard_focus_metadata(self) -> None:
+        directory = tempfile.mkdtemp()
+        window = MainWindow(SettingsManager(os.path.join(directory, "settings.json")))
+
+        self.assertIs(
+            window.dashboard.focusProxy(),
+            window.dashboard.command_button("session.create"),
+        )
+        self.assertEqual(window.hide_ribbon_button.focusPolicy(), Qt.FocusPolicy.StrongFocus)
+        self.assertEqual(window.show_ribbon_button.focusPolicy(), Qt.FocusPolicy.StrongFocus)
+        self.assertEqual(window.dashboard.recent_files.accessibleName(), "Recent data files")
+        self.assertEqual(window.dashboard.recover_button.accessibleName(), "Recover auto-save")
 
     def test_data_panel_load_path_loads_csv_without_dialog(self) -> None:
         window = self._window()
@@ -2520,25 +3499,43 @@ class MainWindowLayoutTests(unittest.TestCase):
         self.assertEqual(list(window.vm.state.df.columns), ["Time", "A"])
         self.assertEqual(window.data_panel.current_path(), csv_path)
 
+    def test_raw_data_command_selects_dock_tab_and_displays_current_selection(self) -> None:
+        window = self._window()
+        window.vm.state.df = pd.DataFrame(
+            {"Time": [0.0, 1.0, 2.0], "A": [1.0, 2.0, 3.0]}
+        )
+        window._on_file_loaded(window.vm.state.column_names())
+        window.axis_panel.apply_selection(window.vm.state.column_names(), "Time", ["A"], [])
+        window.show()
+        QApplication.processEvents()
+
+        window.command_manager.action("data.raw.show").trigger()
+        QApplication.processEvents()
+
+        raw_dock = window.workspace_manager.backend.dock_widget("data.raw")
+        self.assertTrue(raw_dock.isCurrentTab())
+        self.assertTrue(window.raw_data_panel.isVisible())
+        self.assertEqual(window.raw_data_panel.model.rowCount(), 3)
+        self.assertEqual(window.raw_data_panel.model.columnCount(), 2)
+
+    def test_plot_canvas_uses_high_resolution_display_dpi(self) -> None:
+        window = self._window()
+        self.assertEqual(window.plot_workspace.canvas.figure.dpi, 150)
+
     def test_ribbon_menu_button_repopulates_on_show(self) -> None:
         window = self._window()
-        calls: list[object] = []
-
-        def populator(menu: QMenu) -> None:
-            calls.append(menu)
-            menu.addAction("Example")
-
-        button = window._build_ribbon_button("FILE", "Recent", None, populator)
+        window.vm.register_recent_file(os.path.join(tempfile.mkdtemp(), "missing.csv"))
+        button = window.ribbon_buttons["FILE:Recent"]
         self.assertIsNotNone(button.menu())
         assert button.menu() is not None
 
         button.menu().aboutToShow.emit()
+        first_labels = [action.text() for action in button.menu().actions()]
         button.menu().aboutToShow.emit()
 
-        # The menu is cleared and rebuilt on every show, so it never duplicates.
-        self.assertEqual(len(calls), 2)
         labels = [action.text() for action in button.menu().actions()]
-        self.assertEqual(labels, ["Example"])
+        self.assertEqual(labels, first_labels)
+        self.assertEqual(labels.count("Data Files"), 1)
 
     def test_recent_files_menu_populates_from_viewmodel(self) -> None:
         window = self._window()
@@ -2737,7 +3734,9 @@ class MainWindowLayoutTests(unittest.TestCase):
 
     def test_direct_help_action_opens_help_dialog(self) -> None:
         window = self._window()
-        help_action = window.menuBar().actions()[1]
+        help_action = next(
+            action for action in window.menuBar().actions() if action.text() == "&Help"
+        )
 
         self.assertEqual(help_action.text(), "&Help")
         self.assertIsNone(help_action.menu())
@@ -2752,14 +3751,16 @@ class MainWindowLayoutTests(unittest.TestCase):
         menu_actions = window.menuBar().actions()
         labels = [action.text() for action in menu_actions]
 
-        self.assertEqual(labels, ["&Settings", "&Help"])
+        self.assertEqual(labels, ["&Settings", "&Workspace", "&Mode", "&Help"])
         self.assertNotIn("&File", labels)
         self.assertNotIn("&Edit", labels)
         self.assertNotIn("&View", labels)
         settings_action = menu_actions[0]
         self.assertEqual(settings_action.text(), "&Settings")
         self.assertIsNone(settings_action.menu())
-        self.assertIsNone(menu_actions[1].menu())
+        self.assertIsNotNone(menu_actions[1].menu())
+        self.assertIsNotNone(menu_actions[2].menu())
+        self.assertIsNone(menu_actions[3].menu())
         self.assertEqual(window.show_ribbon_action.text(), "Show Ribbon")
         self.assertTrue(window.show_ribbon_action.isCheckable())
 
@@ -2793,33 +3794,19 @@ class MainWindowLayoutTests(unittest.TestCase):
         self.assertEqual(len(opened), 1)
         self.assertIs(opened[0][1], window)
 
-    def test_plot_and_lower_splitter_can_fully_collapse(self) -> None:
+    def test_plot_workspace_can_float_without_recreating_content(self) -> None:
         window = self._window()
         window.show()
         QApplication.processEvents()
-        self.assertTrue(window.right_splitter.childrenCollapsible())
-        self.assertTrue(window.right_splitter.isCollapsible(0))
-        self.assertTrue(window.right_splitter.isCollapsible(1))
         self.assertGreaterEqual(window.plot_workspace.minimumHeight(), 260)
-        self.assertGreaterEqual(window.lower_stack.minimumHeight(), 150)
-
-        total_height = sum(window.right_splitter.sizes())
-        window.right_splitter.setSizes([100, total_height - 100])
+        plot_dock = window.workspace_manager.backend.dock_widget("plot.workspace")
+        window.workspace_manager.float_panel("plot.workspace")
         QApplication.processEvents()
-        self.assertGreaterEqual(window.right_splitter.sizes()[0], window.plot_workspace.minimumHeight())
+        self.assertTrue(plot_dock.isInFloatingContainer())
+        self.assertIs(plot_dock.widget(), window.plot_area)
+        self.assertIs(window.plot_workspace.parentWidget(), window.plot_area)
 
-        total_height = sum(window.right_splitter.sizes())
-        window.right_splitter.setSizes([total_height, 0])
-        QApplication.processEvents()
-        self.assertEqual(window.right_splitter.sizes()[1], 0)
-
-        total_height = sum(window.right_splitter.sizes())
-        window.right_splitter.setSizes([0, total_height])
-        QApplication.processEvents()
-        self.assertEqual(window.right_splitter.sizes()[0], 0)
-        self.assertEqual(window.plot_area.height(), 0)
-
-    def test_plot_layout_refreshes_when_splitter_shrinks(self) -> None:
+    def test_plot_layout_refreshes_when_dock_is_resized(self) -> None:
         window = self._window()
         window.vm.state.df = pd.DataFrame({"Time": [0.0, 1.0, 2.0], "A": [1.0, 3.0, 2.0]})
         window.axis_panel.apply_selection(["Time", "A"], "Time", ["A"], [])
@@ -2833,10 +3820,7 @@ class MainWindowLayoutTests(unittest.TestCase):
         assert result is not None
         self.assertTrue(result.ok, result.message)
 
-        total_height = sum(window.right_splitter.sizes())
-        window.right_splitter.setSizes(
-            [window.plot_workspace.minimumHeight(), total_height - window.plot_workspace.minimumHeight()]
-        )
+        window.plot_area.resize(640, window.plot_workspace.minimumHeight())
         QApplication.processEvents()
 
         plot_canvas = window.plot_workspace.canvas
@@ -2884,14 +3868,44 @@ class MainWindowLayoutTests(unittest.TestCase):
             "NOTES:Copy Notes",
         ]:
             self.assertIn(key, window.ribbon_buttons)
-        self.assertIsInstance(window.lower_stack, QStackedWidget)
-        self.assertEqual(window.lower_stack.count(), 4)
-        self.assertEqual(window.right_panel.layout().itemAt(0).widget(), window.right_splitter)
-        self.assertEqual(window.right_splitter.widget(0), window.plot_area)
+        self.assertEqual(len(window.workspace_registry), 11)
+        self.assertIs(window.centralWidget().layout().itemAt(3).widget(), window.content_stack)
+        self.assertIs(window.content_stack.widget(1), window.workspace_manager.widget)
+        self.assertIs(
+            window.workspace_manager.backend.dock_widget("plot.workspace").widget(),
+            window.plot_area,
+        )
         self.assertIsInstance(window.plot_tab_bar, QTabBar)
         self.assertEqual(window.plot_tab_bar.count(), 2)
         self.assertEqual(window.plot_tab_bar.tabText(1), "+")
         self.assertNotIn("PLOT:New Plot", window.ribbon_buttons)
+        group_labels = [
+            label.text() for label in window.ribbon.findChildren(QLabel, "RibbonGroupLabel")
+        ]
+        self.assertEqual(
+            group_labels,
+            ["Home", "Data", "Plot", "Analysis", "Requirements", "Reporting", "Settings"],
+        )
+        self.assertIs(
+            window.command_manager.action("plot.generate"),
+            window.command_manager.definition("plot.generate").action,
+        )
+        self.assertEqual(
+            window.command_manager.action("palette.open").shortcut().toString(),
+            "Ctrl+Shift+P",
+        )
+
+    def test_visible_ribbon_keeps_generate_plot_and_advanced_groups_visible(self) -> None:
+        window = self._window()
+        window.show()
+        QApplication.processEvents()
+
+        group_labels = window.ribbon.findChildren(QLabel, "RibbonGroupLabel")
+        self.assertTrue(group_labels)
+        self.assertTrue(all(not label.parentWidget().isHidden() for label in group_labels))
+        generate_button = window.ribbon_manager.button_for("plot.generate")
+        self.assertFalse(generate_button.isHidden())
+        self.assertTrue(generate_button.isVisible())
 
     def test_ribbon_can_be_collapsed_and_restored(self) -> None:
         window = self._window()
@@ -2916,12 +3930,72 @@ class MainWindowLayoutTests(unittest.TestCase):
         window.show_ribbon_action.setChecked(True)
         self.assertFalse(window.ribbon.isHidden())
 
-    def test_ribbon_navigation_switches_lower_stack(self) -> None:
+    def test_ribbon_navigation_shows_workspace_panels(self) -> None:
         window = self._window()
         window.ribbon_buttons["ANALYSIS:Statistics"].click()
-        self.assertIs(window.lower_stack.currentWidget(), window.analysis_stack)
+        QApplication.processEvents()
+        self.assertFalse(
+            window.workspace_manager.backend.dock_widget("analysis.statistics").isClosed()
+        )
         window.ribbon_buttons["NOTES:Engineering Notes"].click()
-        self.assertIs(window.lower_stack.currentWidget(), window.notes_panel)
+        QApplication.processEvents()
+        self.assertFalse(
+            window.workspace_manager.backend.dock_widget("notes.engineering").isClosed()
+        )
+
+    def test_command_palette_opens_from_shared_action_and_executes_panel_command(self) -> None:
+        window = self._window()
+        action = window.command_manager.action("palette.open")
+        action.trigger()
+        QApplication.processEvents()
+
+        self.assertIsNotNone(window._command_palette)
+        palette = window._command_palette
+        assert palette is not None
+        self.assertTrue(palette.isVisible())
+        palette.search_edit.setText("panel.show.data.raw")
+        self.assertEqual(palette.current_command_id(), "panel.show.data.raw")
+        self.assertTrue(palette.execute_current())
+        QApplication.processEvents()
+        self.assertFalse(window.workspace_manager.backend.dock_widget("data.raw").isClosed())
+
+    def test_plot_status_transitions_from_no_plot_to_current_and_stale(self) -> None:
+        window = self._window()
+        window.vm.state.df = pd.DataFrame(
+            {"Time": [0.0, 1.0, 2.0], "A": [1.0, 2.0, 3.0], "B": [3.0, 2.0, 1.0]}
+        )
+        window._on_file_loaded(window.vm.state.column_names())
+        self.assertEqual(window.app_status.plot_label.text(), "Plot: No plot")
+
+        window.axis_panel.apply_selection(window.vm.state.column_names(), "Time", ["A"], [])
+        window._on_generate_plot()
+        self.assertEqual(window.app_status.plot_label.text(), "Plot: Up to date")
+
+        for row in range(window.axis_panel.y_list.count()):
+            item = window.axis_panel.y_list.item(row)
+            if item.text() == "B":
+                item.setCheckState(Qt.CheckState.Checked)
+                break
+        self.assertEqual(window.app_status.plot_label.text(), "Plot: Needs regeneration")
+
+    def test_autosave_status_does_not_clear_unsaved_indicator(self) -> None:
+        window = self._window()
+        directory = tempfile.mkdtemp()
+        window.settings_manager.set("general_ui", "auto_save_enabled", True)
+        window.vm.state.df = pd.DataFrame({"Time": [0.0], "A": [1.0]})
+        window.vm.state.root_file_directory = directory
+        window.vm.state.is_dirty = True
+        window._on_autosave_tick()
+
+        self.assertEqual(window.app_status.session_label.text(), "Session: Unsaved")
+        self.assertTrue(window.app_status.autosave_label.text().startswith("Recovery saved"))
+
+    def test_workspace_command_updates_durable_workspace_indicator(self) -> None:
+        window = self._window()
+        window.command_manager.action("workspace.apply.comparison").trigger()
+
+        self.assertEqual(window.workspace_manager.active_preset, WorkspacePreset.COMPARISON)
+        self.assertEqual(window.app_status.workspace_label.text(), "Comparison")
 
     def test_notes_ribbon_actions_refresh_and_clear_panel(self) -> None:
         from test_data_analyser.qt_app.widgets import engineering_notes_panel as panel_module
@@ -2929,7 +4003,10 @@ class MainWindowLayoutTests(unittest.TestCase):
         window = self._window()
         window.notes_panel._editors["objective"].setPlainText("Summarise this run.")
         window.ribbon_buttons["NOTES:Refresh Report Text"].click()
-        self.assertIs(window.lower_stack.currentWidget(), window.notes_panel)
+        QApplication.processEvents()
+        self.assertFalse(
+            window.workspace_manager.backend.dock_widget("notes.engineering").isClosed()
+        )
         self.assertIn("Summarise this run.", window.notes_panel.report_text.toPlainText())
 
         original_confirm = panel_module.qt_message_service.confirm
@@ -2943,13 +4020,14 @@ class MainWindowLayoutTests(unittest.TestCase):
 
     def test_plot_actions_moved_to_ribbon(self) -> None:
         window = self._window()
-        self.assertEqual(window.lower_stack.currentIndex(), 0)
-        self.assertIs(window.lower_stack.currentWidget(), window.plot_group)
+        self.assertFalse(
+            window.workspace_manager.backend.dock_widget("plot.workspace").isClosed()
+        )
         self.assertIsInstance(window.ribbon_buttons["PLOT:Generate Plot"], QPushButton)
         self.assertIsInstance(window.ribbon_buttons["PLOT:Save Plot"], QPushButton)
         self.assertTrue(window.ribbon_buttons["PLOT:Clear Plot"].isEnabled())
-        self.assertEqual(window.plot_group.count(), 2)
-        self.assertIs(window.plot_group.currentWidget(), window.runs_panel)
+        self.assertIs(window.workspace_registry.widget("runs.comparison"), window.runs_panel)
+        self.assertIs(window.workspace_registry.widget("compare.points"), window.cursor_panel)
         self.assertFalse(hasattr(window, "new_plot_button"))
         self.assertEqual(window.plot_tab_bar.tabText(window.plot_tab_bar.count() - 1), "+")
 
@@ -3127,14 +4205,18 @@ class MainWindowLayoutTests(unittest.TestCase):
     def test_analysis_group_reaches_maths_panel(self) -> None:
         window = self._window()
         window.ribbon_buttons["ANALYSIS:Maths Channels"].click()
-        self.assertIs(window.lower_stack.currentWidget(), window.analysis_stack)
-        self.assertIs(window.analysis_stack.currentWidget(), window.maths_panel)
+        QApplication.processEvents()
+        dock = window.workspace_manager.backend.dock_widget("maths.channels")
+        self.assertFalse(dock.isClosed())
+        self.assertIs(dock.widget(), window.maths_panel)
 
     def test_analysis_group_reaches_best_fit_formulas_panel(self) -> None:
         window = self._window()
         window.ribbon_buttons["ANALYSIS:Best Fit Formulas"].click()
-        self.assertIs(window.lower_stack.currentWidget(), window.analysis_stack)
-        self.assertIs(window.analysis_stack.currentWidget(), window.best_fit_formulas_panel)
+        QApplication.processEvents()
+        dock = window.workspace_manager.backend.dock_widget("analysis.best_fit_formulas")
+        self.assertFalse(dock.isClosed())
+        self.assertIs(dock.widget(), window.best_fit_formulas_panel)
 
     def test_best_fit_formulas_panel_updates_after_plot_generation(self) -> None:
         window = self._window()
@@ -3194,21 +4276,25 @@ class MainWindowLayoutTests(unittest.TestCase):
     def test_ribbon_reaches_raw_data_and_cursor_panels(self) -> None:
         window = self._window()
         window.ribbon_buttons["ANALYSIS:Raw Data"].click()
-        self.assertIs(window.lower_stack.currentWidget(), window.analysis_stack)
-        self.assertIs(window.analysis_stack.currentWidget(), window.raw_data_panel)
+        QApplication.processEvents()
+        self.assertFalse(window.workspace_manager.backend.dock_widget("data.raw").isClosed())
         window.ribbon_buttons["ANALYSIS:Cursor"].click()
-        self.assertIs(window.lower_stack.currentWidget(), window.plot_group)
-        self.assertIs(window.plot_group.currentWidget(), window.cursor_panel)
+        QApplication.processEvents()
+        self.assertFalse(
+            window.workspace_manager.backend.dock_widget("compare.points").isClosed()
+        )
         window.ribbon_buttons["PLOT:Runs / Comparison"].click()
-        self.assertIs(window.plot_group.currentWidget(), window.runs_panel)
+        QApplication.processEvents()
+        self.assertFalse(
+            window.workspace_manager.backend.dock_widget("runs.comparison").isClosed()
+        )
 
     def test_requirements_group_has_margin_sub_tab(self) -> None:
         window = self._window()
         window.ribbon_buttons["REQUIREMENTS:Margins"].click()
-        self.assertIs(window.lower_stack.currentWidget(), window.requirements_stack)
-        self.assertIs(window.requirements_stack.currentWidget(), window.limits_panel.summary_panel)
+        self.assertIs(window.requirements_panel.currentWidget(), window.limits_panel.summary_panel)
         window.ribbon_buttons["REQUIREMENTS:Limits"].click()
-        self.assertIs(window.requirements_stack.currentWidget(), window.limits_panel)
+        self.assertIs(window.requirements_panel.currentWidget(), window.limits_panel)
 
     def test_ribbon_styling_present(self) -> None:
         stylesheet = theme.build_stylesheet("light")
@@ -3320,52 +4406,44 @@ class MainWindowLayoutTests(unittest.TestCase):
 
     def test_left_controls_are_scrollable(self) -> None:
         window = self._window()
-        self.assertIsInstance(window.left_scroll, QScrollArea)
-        self.assertTrue(window.left_scroll.widgetResizable())
-        self.assertEqual(window.left_scroll.horizontalScrollBarPolicy(), Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.assertIsInstance(window.plot_navigator, QScrollArea)
+        self.assertTrue(window.plot_navigator.widgetResizable())
+        self.assertEqual(
+            window.plot_navigator.horizontalScrollBarPolicy(),
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
+        )
         self.assertEqual(window.axis_panel.sizePolicy().verticalPolicy(), QSizePolicy.Policy.Expanding)
 
-    def test_left_rail_opens_wide_but_can_shrink(self) -> None:
+    def test_plot_navigator_has_bounded_width_and_can_auto_hide(self) -> None:
         window = self._window()
         window.show()
         QApplication.processEvents()
-        self.assertIsInstance(window.body_splitter, QSplitter)
-        self.assertFalse(window.body_splitter.childrenCollapsible())
-        self.assertTrue(window.body_splitter.isCollapsible(0))
-        self.assertFalse(window.body_splitter.isCollapsible(1))
-        self.assertEqual(window.left_scroll.minimumWidth(), MainWindow.LEFT_RAIL_MINIMUM_WIDTH)
-        self.assertEqual(window.left_scroll.maximumWidth(), MainWindow.LEFT_RAIL_MAXIMUM_WIDTH)
-        self.assertLess(window.left_scroll.minimumWidth(), MainWindow.LEFT_RAIL_INITIAL_WIDTH)
+        self.assertEqual(
+            window.plot_navigator.minimumWidth(), MainWindow.LEFT_RAIL_MINIMUM_WIDTH
+        )
+        self.assertEqual(
+            window.plot_navigator.maximumWidth(), MainWindow.LEFT_RAIL_MAXIMUM_WIDTH
+        )
         self.assertGreater(MainWindow.LEFT_RAIL_MAXIMUM_WIDTH, 500)
-        self.assertGreaterEqual(window.body_splitter.sizes()[0], MainWindow.LEFT_RAIL_INITIAL_WIDTH - 5)
-        self.assertEqual(window.lower_stack.sizePolicy().horizontalPolicy(), QSizePolicy.Policy.Ignored)
-
-        window.body_splitter.setSizes([520, 800])
-        QApplication.processEvents()
-        self.assertGreaterEqual(window.body_splitter.sizes()[0], 500)
 
         window.data_panel.sheet_combo.addItems(
             ["Temperatures", "Thermal Fuses and Windings Temp", "Thermal Fuses and Windings  (2)"]
         )
         window.data_panel.sheet_row.setVisible(True)
-        window.body_splitter.setSizes([MainWindow.LEFT_RAIL_MAXIMUM_WIDTH, 680])
         QApplication.processEvents()
-        window.body_splitter.setSizes([MainWindow.LEFT_RAIL_MINIMUM_WIDTH, 1080])
+        self.assertLessEqual(
+            window.data_panel.sheet_combo.width(), window.plot_navigator.viewport().width()
+        )
+        self.assertLessEqual(
+            window.axis_panel.x_combo.width(), window.plot_navigator.viewport().width()
+        )
+        window.workspace_manager.set_auto_hide(
+            "plot.controls", True, SideBarLocation.LEFT
+        )
         QApplication.processEvents()
-        self.assertLessEqual(window.data_panel.sheet_combo.width(), window.left_scroll.viewport().width())
-        self.assertLessEqual(window.axis_panel.x_combo.width(), window.left_scroll.viewport().width())
-
-        total_width = sum(window.body_splitter.sizes())
-        window.body_splitter.setSizes([total_width, 0])
-        QApplication.processEvents()
-        self.assertLessEqual(window.body_splitter.sizes()[0], MainWindow.LEFT_RAIL_MAXIMUM_WIDTH)
-        self.assertGreater(window.body_splitter.sizes()[1], 0)
-
-        total_width = sum(window.body_splitter.sizes())
-        window.body_splitter.setSizes([0, total_width])
-        QApplication.processEvents()
-        self.assertEqual(window.body_splitter.sizes()[0], 0)
-        self.assertGreater(window.body_splitter.sizes()[1], 0)
+        self.assertTrue(
+            window.workspace_manager.backend.dock_widget("plot.controls").isAutoHide()
+        )
 
     def test_load_session_uses_remembered_session_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
