@@ -338,6 +338,88 @@ def persistent_channel_colour_map(
     return {key: colours[index % len(colours)] for index, key in enumerate(repeated)}
 
 
+def series_colour_assignment(
+    series_items: list[dict[str, Any]],
+    channel_colours: dict[str, str] | None,
+    primary_colours: list[str],
+    secondary_colours: list[str],
+) -> list[str | None]:
+    """Assign a colour to each series item.
+
+    Manual per-item colours and persistent per-channel colours win; the
+    remaining items take the next distinct colour from the primary/secondary
+    cycles, skipping colours already used or reserved. Returns ``None`` for every
+    item when neither a manual nor a repeated-channel colour applies, so the
+    caller can let Matplotlib cycle colours itself.
+    """
+    persistent_colours = _normalised_channel_colours(channel_colours or {})
+    manual_colours = [_manual_series_colour(item) for item in series_items]
+    has_manual_colour = any(manual_colours)
+    has_repeated_channel = any(series_channel_key(item) in persistent_colours for item in series_items)
+    if not has_manual_colour and not has_repeated_channel:
+        return [None for _item in series_items]
+
+    reserved = {
+        _colour_key(colour)
+        for item, manual_colour in zip(series_items, manual_colours)
+        for colour in (manual_colour or persistent_colours.get(series_channel_key(item)),)
+        if colour
+    }
+    assignments: list[str | None] = []
+    used: set[str] = set()
+    primary_index = 0
+    secondary_index = 0
+    for item, manual_colour in zip(series_items, manual_colours):
+        is_secondary = bool(item.get("secondary"))
+        channel_colour = manual_colour or persistent_colours.get(series_channel_key(item))
+        if not channel_colour:
+            cycle = secondary_colours if is_secondary else primary_colours
+            cycle_index = secondary_index if is_secondary else primary_index
+            channel_colour = _next_distinct_colour(cycle, cycle_index, used | reserved)
+        assignments.append(channel_colour)
+        if channel_colour:
+            used.add(_colour_key(channel_colour))
+        if is_secondary:
+            secondary_index += 1
+        else:
+            primary_index += 1
+    return assignments
+
+
+def _normalised_channel_colours(channel_colours: dict[str, str]) -> dict[str, str]:
+    normalised: dict[str, str] = {}
+    for channel, colour in channel_colours.items():
+        key = normalise_channel_name(channel)
+        colour_text = str(colour).strip()
+        if key and colour_text:
+            normalised[key] = colour_text
+    return normalised
+
+
+def _manual_series_colour(item: dict[str, Any]) -> str:
+    colour = item.get("colour", item.get("color"))
+    return "" if colour is None else str(colour).strip()
+
+
+def _next_distinct_colour(colours: list[str], start_index: int, blocked: set[str]) -> str | None:
+    if not colours:
+        return None
+    for offset in range(len(colours)):
+        colour = colours[(start_index + offset) % len(colours)]
+        if _colour_key(colour) not in blocked:
+            return colour
+    return colours[start_index % len(colours)]
+
+
+def _colour_key(colour: str) -> str:
+    from matplotlib.colors import to_hex
+
+    try:
+        return to_hex(colour).lower()
+    except Exception:
+        return str(colour).strip().lower()
+
+
 def _eaton_colour_cycle() -> list[str]:
     return list(EATON_PLOT_COLORS)
 

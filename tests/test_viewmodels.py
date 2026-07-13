@@ -25,6 +25,7 @@ import pandas as pd
 from test_data_analyser.core.settings_manager import SettingsManager
 from test_data_analyser.domain import PlotData
 from test_data_analyser.services import dataset_service, plot_render_service, session_service
+from test_data_analyser.services.results import OperationResult
 import test_data_analyser.viewmodels.data_loading_vm as data_loading_module
 import test_data_analyser.viewmodels.runs_comparison_vm as runs_comparison_module
 from test_data_analyser.viewmodels import (
@@ -1348,6 +1349,15 @@ class MainWindowViewModelTests(unittest.TestCase):
             self.assertTrue(result.warnings)
             self.assertFalse(result.payload["main_data_loaded"])
             self.assertIsNone(target.state.df)
+
+    def test_needs_main_data_relink_detects_missing_main_data(self) -> None:
+        missing = OperationResult.success("x", payload={"main_data_warning": "gone", "main_data_loaded": False})
+        self.assertTrue(MainWindowViewModel.needs_main_data_relink(missing))
+        loaded = OperationResult.success("x", payload={"main_data_warning": "", "main_data_loaded": True})
+        self.assertFalse(MainWindowViewModel.needs_main_data_relink(loaded))
+        relinked = OperationResult.success("x", payload={"main_data_warning": "gone", "main_data_loaded": True})
+        self.assertFalse(MainWindowViewModel.needs_main_data_relink(relinked))
+        self.assertFalse(MainWindowViewModel.needs_main_data_relink(OperationResult.failure("bad")))
 
     def test_restore_session_uses_data_file_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

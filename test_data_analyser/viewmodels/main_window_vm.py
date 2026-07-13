@@ -731,6 +731,17 @@ class MainWindowViewModel:
         return OperationResult.success(message, payload=selection, warnings=warnings)
 
     @staticmethod
+    def needs_main_data_relink(result: OperationResult) -> bool:
+        """Return whether a restored session failed to load its main data file.
+
+        Reads the restore payload produced by :meth:`restore_session`; ``True``
+        means the saved source file could not be loaded, so the UI may offer to
+        relink a moved file.
+        """
+        payload = result.payload if isinstance(result.payload, dict) else {}
+        return bool(payload.get("main_data_warning")) and not bool(payload.get("main_data_loaded"))
+
+    @staticmethod
     def _dataframe_cache_key(path: str | Path, sheet_name: str | None) -> tuple[str, str]:
         try:
             resolved_path = str(Path(path).expanduser().resolve())

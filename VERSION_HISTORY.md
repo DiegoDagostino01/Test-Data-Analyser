@@ -19,7 +19,7 @@ current release format.
 When releasing an update, change `__version__` and add a new entry at the top of
 this file.
 
-## 1.02.02 - Unreleased
+## 1.02.02 - 2026-07-13
 
 Large-file performance update: faster loading, plotting, and axis auto-fit for
 multi-million-row CSV captures, plus a plot-tab axis-limit persistence fix,

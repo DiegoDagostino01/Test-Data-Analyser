@@ -27,6 +27,9 @@ from test_data_analyser.core import data_io
 from test_data_analyser.core.config import EATON_PLOT_COLORS
 from test_data_analyser.domain import SOURCE_MANUAL, PlotData, SessionState
 from test_data_analyser.services import (
+    annotation_geometry_service,
+    axis_limits_computer,
+    legend_metadata_service,
     column_reference_service,
     batch_import_service,
     clipboard_service,
@@ -48,6 +51,192 @@ from test_data_analyser.services import (
 )
 from test_data_analyser.services.maths_channel_service import MathsChannelEvaluator
 from test_data_analyser.services.results import OperationResult, payload_dict
+
+
+class AnnotationGeometryServiceTests(unittest.TestCase):
+    def test_point_distance(self) -> None:
+        self.assertAlmostEqual(annotation_geometry_service.point_distance((0.0, 0.0), (3.0, 4.0)), 5.0)
+
+    def test_distance_to_segment_projects_within(self) -> None:
+        distance = annotation_geometry_service.distance_to_segment((5.0, 5.0), (0.0, 0.0), (10.0, 0.0))
+        self.assertAlmostEqual(distance, 5.0)
+
+    def test_distance_to_segment_clamps_beyond_endpoint(self) -> None:
+        distance = annotation_geometry_service.distance_to_segment((-3.0, 4.0), (0.0, 0.0), (10.0, 0.0))
+        self.assertAlmostEqual(distance, 5.0)
+
+    def test_distance_to_segment_degenerate_segment(self) -> None:
+        distance = annotation_geometry_service.distance_to_segment((3.0, 4.0), (2.0, 2.0), (2.0, 2.0))
+        self.assertAlmostEqual(distance, 5.0 ** 0.5)
+
+    def test_annotation_handle_points_arrow(self) -> None:
+        points = annotation_geometry_service.annotation_handle_points(
+            {"type": "arrow", "start_x": 1, "start_y": 2, "end_x": 3, "end_y": 4}
+        )
+        self.assertEqual(points, {"start": (1.0, 2.0), "end": (3.0, 4.0)})
+
+    def test_annotation_handle_points_box_corners(self) -> None:
+        points = annotation_geometry_service.annotation_handle_points(
+            {"type": "box", "x_min": 0, "x_max": 2, "y_min": 0, "y_max": 4}
+        )
+        self.assertEqual(points["bottom_left"], (0.0, 0.0))
+        self.assertEqual(points["bottom_right"], (2.0, 0.0))
+        self.assertEqual(points["top_left"], (0.0, 4.0))
+        self.assertEqual(points["top_right"], (2.0, 4.0))
+
+    def test_annotation_handle_points_text_has_none(self) -> None:
+        self.assertEqual(annotation_geometry_service.annotation_handle_points({"type": "text"}), {})
+
+    def test_annotation_float_invalid_returns_default(self) -> None:
+        self.assertEqual(annotation_geometry_service.annotation_float({"x": "bad"}, "x", 1.5), 1.5)
+
+
+class AnnotationDragTests(unittest.TestCase):
+    def test_move_text(self) -> None:
+        ann = {"type": "text", "x": 1.0, "y": 2.0}
+        annotation_geometry_service.move_annotation(ann, dict(ann), 0.5, -0.5)
+        self.assertEqual((ann["x"], ann["y"]), (1.5, 1.5))
+
+    def test_move_box_shifts_all_bounds(self) -> None:
+        ann = {"type": "box", "x_min": 0.0, "x_max": 2.0, "y_min": 0.0, "y_max": 2.0}
+        annotation_geometry_service.move_annotation(ann, dict(ann), 1.0, 1.0)
+        self.assertEqual((ann["x_min"], ann["x_max"], ann["y_min"], ann["y_max"]), (1.0, 3.0, 1.0, 3.0))
+
+    def test_resize_box_top_right(self) -> None:
+        ann = {"type": "box", "x_min": 0.0, "x_max": 2.0, "y_min": 0.0, "y_max": 2.0}
+        annotation_geometry_service.resize_box_annotation(ann, dict(ann), "top_right", (3.0, 4.0))
+        self.assertEqual((ann["x_max"], ann["y_max"]), (3.0, 4.0))
+
+    def test_resize_box_normalises_when_edge_crosses(self) -> None:
+        ann = {"type": "box", "x_min": 0.0, "x_max": 2.0, "y_min": 0.0, "y_max": 2.0}
+        annotation_geometry_service.resize_box_annotation(ann, dict(ann), "left", (5.0, 0.0))
+        self.assertEqual((ann["x_min"], ann["x_max"]), (2.0, 5.0))
+
+    def test_apply_drag_arrow_endpoint(self) -> None:
+        ann = {"type": "arrow", "start_x": 0.0, "start_y": 0.0, "end_x": 1.0, "end_y": 1.0}
+        annotation_geometry_service.apply_annotation_drag(ann, dict(ann), "end", 0.0, 0.0, (0.8, 0.9))
+        self.assertEqual((ann["end_x"], ann["end_y"]), (0.8, 0.9))
+
+    def test_apply_drag_move_dispatches(self) -> None:
+        ann = {"type": "text", "x": 0.0, "y": 0.0}
+        annotation_geometry_service.apply_annotation_drag(ann, dict(ann), "move", 1.0, 2.0, (0.0, 0.0))
+        self.assertEqual((ann["x"], ann["y"]), (1.0, 2.0))
+
+
+class SeriesColourAssignmentTests(unittest.TestCase):
+    def test_no_manual_or_repeated_returns_all_none(self) -> None:
+        items = [{"channel": "A"}, {"channel": "B"}]
+        result = plot_render_service.series_colour_assignment(items, {}, ["#111111", "#222222"], ["#333333"])
+        self.assertEqual(result, [None, None])
+
+    def test_manual_colour_preserved_and_others_distinct(self) -> None:
+        items = [{"channel": "A", "colour": "#ff0000"}, {"channel": "B"}]
+        result = plot_render_service.series_colour_assignment(items, {}, ["#ff0000", "#00ff00"], ["#0000ff"])
+        self.assertEqual(result[0], "#ff0000")
+        self.assertEqual(result[1], "#00ff00")
+
+    def test_persistent_channel_colour_applied(self) -> None:
+        items = [{"channel": "A"}, {"channel": "B"}]
+        result = plot_render_service.series_colour_assignment(items, {"A": "#123456"}, ["#111111", "#222222"], ["#333333"])
+        self.assertEqual(result[0], "#123456")
+
+    def test_secondary_uses_secondary_cycle(self) -> None:
+        items = [{"channel": "A", "colour": "#ff0000"}, {"channel": "B", "secondary": True}]
+        result = plot_render_service.series_colour_assignment(items, {}, ["#ff0000"], ["#abcdef"])
+        self.assertEqual(result[0], "#ff0000")
+        self.assertEqual(result[1], "#abcdef")
+
+
+class AxisLimitsComputerTests(unittest.TestCase):
+    def test_positive_float_valid(self) -> None:
+        self.assertEqual(axis_limits_computer.positive_float("2.5"), 2.5)
+
+    def test_positive_float_rejects_non_positive_and_blank(self) -> None:
+        self.assertIsNone(axis_limits_computer.positive_float("0"))
+        self.assertIsNone(axis_limits_computer.positive_float("-3"))
+        self.assertIsNone(axis_limits_computer.positive_float(""))
+        self.assertIsNone(axis_limits_computer.positive_float("abc"))
+
+    def test_safe_major_tick_keeps_reasonable_step(self) -> None:
+        self.assertEqual(axis_limits_computer.safe_major_tick(10.0, (0.0, 100.0)), 10.0)
+
+    def test_safe_major_tick_drops_step_that_exceeds_max_ticks(self) -> None:
+        self.assertIsNone(axis_limits_computer.safe_major_tick(2.0, (0.0, 90000.0)))
+
+    def test_safe_major_tick_none_step(self) -> None:
+        self.assertIsNone(axis_limits_computer.safe_major_tick(None, (0.0, 100.0)))
+
+    def test_mapped_secondary_ticks_linear(self) -> None:
+        ticks = axis_limits_computer.mapped_secondary_ticks([0.0, 5.0, 10.0], 0.0, 10.0, 0.0, 100.0)
+        self.assertEqual(ticks, [0.0, 50.0, 100.0])
+
+    def test_mapped_secondary_ticks_degenerate_primary(self) -> None:
+        self.assertEqual(axis_limits_computer.mapped_secondary_ticks([1.0], 5.0, 5.0, 0.0, 100.0), [])
+
+
+class LegendMetadataServiceTests(unittest.TestCase):
+    class _FakeLine:
+        _tda_channel = "TC1"
+
+        @staticmethod
+        def get_visible() -> bool:
+            return True
+
+        @staticmethod
+        def get_linestyle() -> str:
+            return "--"
+
+        @staticmethod
+        def get_drawstyle() -> str:
+            return "steps"
+
+        @staticmethod
+        def get_linewidth() -> float:
+            return 2.0
+
+        @staticmethod
+        def get_marker() -> str:
+            return "o"
+
+        @staticmethod
+        def get_markersize() -> float:
+            return 4.0
+
+        @staticmethod
+        def get_markerfacecolor() -> str:
+            return "#abcdef"
+
+        @staticmethod
+        def get_markeredgecolor() -> str:
+            return "#654321"
+
+        @staticmethod
+        def get_color() -> str:
+            return "#123456"
+
+    def test_channel_metadata_reads_handle(self) -> None:
+        meta = legend_metadata_service.channel_metadata(self._FakeLine(), "Flow [Right Y]")
+        self.assertEqual(meta["channel"], "TC1")
+        self.assertEqual(meta["label"], "Flow")
+        self.assertEqual(str(meta["colour"]).lower(), "#123456")
+        self.assertEqual(meta["line_style"], "--")
+        self.assertEqual(meta["marker_style"], "o")
+
+    def test_channel_metadata_empty_without_channel(self) -> None:
+        class _NoChannel(self._FakeLine):
+            _tda_channel = ""
+
+        self.assertEqual(legend_metadata_service.channel_metadata(_NoChannel(), "x"), {})
+
+    def test_normalise_marker_style(self) -> None:
+        self.assertEqual(legend_metadata_service.normalise_marker_style("None"), "none")
+        self.assertEqual(legend_metadata_service.normalise_marker_style("s"), "s")
+
+    def test_colour_to_hex_invalid_returns_blank(self) -> None:
+        self.assertEqual(legend_metadata_service.colour_to_hex(object()), "")
+
+    def test_first_colour_to_hex_empty(self) -> None:
+        self.assertEqual(legend_metadata_service.first_colour_to_hex([]), "")
 
 
 class StatisticsServiceTests(unittest.TestCase):

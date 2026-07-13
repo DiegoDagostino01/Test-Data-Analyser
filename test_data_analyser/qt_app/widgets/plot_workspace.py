@@ -14,8 +14,6 @@ from contextlib import contextmanager
 from typing import Any, Optional, cast
 
 from cycler import cycler
-from matplotlib.colors import to_hex
-from matplotlib.patches import FancyArrowPatch, Rectangle
 from matplotlib.ticker import MultipleLocator
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QCursor
@@ -45,14 +43,15 @@ from PySide6.QtWidgets import (
 from ...core.config import EATON_DARK_BLUE
 from ...core.naming import natural_sort_key
 from ...domain.annotations import normalise_annotations
-from ...services import plot_render_service
+from ...services import annotation_geometry_service, axis_limits_computer, legend_metadata_service, plot_render_service
 from ...services.results import OperationResult
 from ...viewmodels.cursor_compare_vm import CursorCompareViewModel
 from ...viewmodels.plot_workspace_vm import PlotWorkspaceViewModel
 from ...viewmodels.settings_vm import SettingsViewModel
 from ..adapters.matplotlib_qt_adapter import LEGEND_DISPLAY_GRAPH, LEGEND_DISPLAY_PANEL, MatplotlibCanvas
-from ..adapters import qt_message_service
+from ..adapters import annotation_renderer, best_fit_renderer, qt_message_service
 from .axis_selection_panel import PLOT_KINDS
+from .legend_channel_style_dialog import LegendChannelStyleDialog
 from .no_wheel_combo_box import NoWheelComboBox
 
 CURVE_STYLE_KEYS = plot_render_service.CURVE_STYLE_KEYS
@@ -67,194 +66,7 @@ ANNOTATION_TOOL_LABELS = {
     ANNOTATION_ARROW: "Arrow",
     ANNOTATION_BOX: "Box",
 }
-ANNOTATION_HANDLE_SIZE = 42
 ANNOTATION_PICK_TOLERANCE = 8
-
-
-def _line_style_choices() -> tuple[tuple[object, str], ...]:
-    from matplotlib.backends.qt_editor import figureoptions
-
-    return tuple(figureoptions.LINESTYLES.items())
-
-
-def _draw_style_choices() -> tuple[tuple[object, str], ...]:
-    from matplotlib.backends.qt_editor import figureoptions
-
-    return tuple(figureoptions.DRAWSTYLES.items())
-
-
-def _marker_style_choices() -> tuple[tuple[object, str], ...]:
-    from matplotlib.backends.qt_editor import figureoptions
-
-    return (("none", "None"), *tuple(figureoptions.MARKERS.items()))
-
-
-class LegendChannelStyleDialog(QDialog):
-    def __init__(self, channel: str, style: dict[str, Any], parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._channel = channel.strip()
-        self._original_label = str(style.get("label", self._channel)).strip() or self._channel
-        self._label_overridden = bool(style.get("label_overridden", False))
-        self._original_plot_kind = PlotWorkspace._normalise_plot_kind(style.get("plot_kind")) or "Line"
-        self._plot_kind_overridden = bool(style.get("plot_kind_overridden", False))
-        self._current_colours = {
-            "colour": self._normalise_colour(style.get("colour")) or EATON_DARK_BLUE,
-            "marker_face_colour": self._normalise_colour(style.get("marker_face_colour"))
-            or self._normalise_colour(style.get("colour"))
-            or EATON_DARK_BLUE,
-            "marker_edge_colour": self._normalise_colour(style.get("marker_edge_colour"))
-            or self._normalise_colour(style.get("colour"))
-            or EATON_DARK_BLUE,
-        }
-        self._colour_edits: dict[str, QLineEdit] = {}
-        self._colour_swatches: dict[str, QFrame] = {}
-        self.setWindowTitle("Edit Legend Channel")
-
-        layout = QVBoxLayout(self)
-        form = QFormLayout()
-        self.name_edit = QLineEdit(self._original_label)
-        form.addRow("Name:", self.name_edit)
-
-        form.addRow("Colour:", self._build_colour_row("colour"))
-
-        self.plot_kind_combo = NoWheelComboBox()
-        self.plot_kind_combo.addItems(PLOT_KINDS)
-        self.plot_kind_combo.setCurrentText(self._original_plot_kind)
-        form.addRow("Plot Type:", self.plot_kind_combo)
-
-        self.line_style_combo = self._style_combo(_line_style_choices(), str(style.get("line_style", "-")))
-        form.addRow("Line style:", self.line_style_combo)
-        self.draw_style_combo = self._style_combo(_draw_style_choices(), str(style.get("draw_style", "default")))
-        form.addRow("Draw style:", self.draw_style_combo)
-        self.line_width_spin = self._number_spin(style.get("line_width", 1.5), default=1.5)
-        form.addRow("Line width:", self.line_width_spin)
-
-        marker_default = self._default_marker_for_plot_kind(self._original_plot_kind)
-        self.marker_style_combo = self._style_combo(_marker_style_choices(), str(style.get("marker_style", marker_default)))
-        form.addRow("Marker style:", self.marker_style_combo)
-        self.marker_size_spin = self._number_spin(style.get("marker_size", 3.0), default=3.0)
-        form.addRow("Marker size:", self.marker_size_spin)
-        form.addRow("Marker face:", self._build_colour_row("marker_face_colour"))
-        form.addRow("Marker edge:", self._build_colour_row("marker_edge_colour"))
-        layout.addLayout(form)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-    def values(self) -> dict[str, str]:
-        label = self.name_edit.text().strip() or self._channel
-        plot_kind = self.plot_kind_combo.currentText()
-        values = {
-            "channel": self._channel,
-            "colour": self._current_colours["colour"],
-            "line_style": self._combo_value(self.line_style_combo),
-            "draw_style": self._combo_value(self.draw_style_combo),
-            "line_width": f"{self.line_width_spin.value():g}",
-            "marker_style": self._combo_value(self.marker_style_combo),
-            "marker_size": f"{self.marker_size_spin.value():g}",
-            "marker_face_colour": self._current_colours["marker_face_colour"],
-            "marker_edge_colour": self._current_colours["marker_edge_colour"],
-        }
-        if self._label_overridden or label != self._original_label:
-            values["label"] = label
-        if self._plot_kind_overridden or plot_kind != self._original_plot_kind:
-            values["plot_kind"] = plot_kind
-        return values
-
-    def accept(self) -> None:
-        for key in self._current_colours:
-            self._sync_colour_from_text(key)
-        if not self.name_edit.text().strip():
-            self.name_edit.setText(self._channel)
-        super().accept()
-
-    def _build_colour_row(self, key: str) -> QWidget:
-        row = QWidget()
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        edit = QLineEdit(self._current_colours[key])
-        edit.setFixedWidth(92)
-        edit.editingFinished.connect(lambda key=key: self._sync_colour_from_text(key))
-        swatch = QFrame()
-        swatch.setFrameShape(QFrame.Shape.Box)
-        swatch.setFixedWidth(28)
-        pick_button = QPushButton("Choose...")
-        pick_button.clicked.connect(lambda _checked=False, key=key: self._pick_colour(key))
-        layout.addWidget(edit)
-        layout.addWidget(swatch)
-        layout.addWidget(pick_button)
-        layout.addStretch(1)
-        self._colour_edits[key] = edit
-        self._colour_swatches[key] = swatch
-        if key == "colour":
-            self.colour_edit = edit
-            self.colour_swatch = swatch
-        self._update_swatch(key)
-        return row
-
-    def _pick_colour(self, key: str) -> None:
-        chosen = QColorDialog.getColor(QColor(self._current_colours[key]), self, "Select Channel Colour")
-        if chosen.isValid():
-            self._set_colour(key, chosen.name())
-
-    def _sync_colour_from_text(self, key: str) -> None:
-        self._set_colour(key, self._colour_edits[key].text())
-
-    def _set_colour(self, key: str, colour: str) -> None:
-        normalised = self._normalise_colour(colour)
-        if normalised:
-            self._current_colours[key] = normalised
-        self._colour_edits[key].setText(self._current_colours[key])
-        self._update_swatch(key)
-
-    def _update_swatch(self, key: str) -> None:
-        self._colour_swatches[key].setStyleSheet(
-            f"background-color: {self._current_colours[key]}; border: 1px solid #888888; border-radius: 2px;"
-        )
-
-    @staticmethod
-    def _style_combo(choices: Iterable[tuple[object, object]], current: str) -> NoWheelComboBox:
-        combo = NoWheelComboBox()
-        seen: set[str] = set()
-        for value, label in choices:
-            value_text = str(value)
-            if value_text in seen:
-                continue
-            seen.add(value_text)
-            combo.addItem(str(label), value_text)
-        index = combo.findData(current)
-        if index < 0 and current in {"None", "none", ""}:
-            index = combo.findData("none")
-        combo.setCurrentIndex(max(0, index))
-        return combo
-
-    @staticmethod
-    def _combo_value(combo: NoWheelComboBox) -> str:
-        data = combo.currentData()
-        return str(data if data is not None else combo.currentText())
-
-    @staticmethod
-    def _number_spin(value: object, *, default: float) -> QDoubleSpinBox:
-        spin = QDoubleSpinBox()
-        spin.setDecimals(3)
-        spin.setRange(0.0, 1000.0)
-        spin.setSingleStep(0.5)
-        try:
-            spin.setValue(float(str(value)))
-        except (TypeError, ValueError):
-            spin.setValue(default)
-        return spin
-
-    @staticmethod
-    def _default_marker_for_plot_kind(plot_kind: str) -> str:
-        return "o" if plot_kind in {"Scatter", "Line + Markers"} else "none"
-
-    @staticmethod
-    def _normalise_colour(colour: object) -> str:
-        qt_colour = QColor(str(colour or "").strip())
-        return qt_colour.name() if qt_colour.isValid() else ""
 
 
 class PlotWorkspace(QWidget):
@@ -658,42 +470,15 @@ class PlotWorkspace(QWidget):
         dy: float,
         current: tuple[float, float],
     ) -> None:
-        annotation_type = str(annotation.get("type", ""))
-        if mode == "move":
-            self._move_annotation(annotation, original, dx, dy)
-        elif annotation_type == ANNOTATION_ARROW and mode in {"start", "end"}:
-            annotation[f"{mode}_x"] = float(current[0])
-            annotation[f"{mode}_y"] = float(current[1])
-        elif annotation_type == ANNOTATION_BOX:
-            self._resize_box_annotation(annotation, original, mode, current)
+        annotation_geometry_service.apply_annotation_drag(annotation, original, mode, dx, dy, current)
 
     @staticmethod
     def _annotation_float(annotation: dict[str, object], key: str, default: float = 0.0) -> float:
-        try:
-            return float(cast(Any, annotation.get(key, default)))
-        except (TypeError, ValueError):
-            return default
-
-    @staticmethod
-    def _annotation_style(annotation: dict[str, object]) -> dict[str, object]:
-        style = annotation.get("style", {})
-        return cast(dict[str, object], style) if isinstance(style, dict) else {}
+        return annotation_geometry_service.annotation_float(annotation, key, default)
 
     @staticmethod
     def _move_annotation(annotation: dict[str, object], original: dict[str, object], dx: float, dy: float) -> None:
-        annotation_type = str(annotation.get("type", ""))
-        if annotation_type == ANNOTATION_TEXT:
-            annotation["x"] = PlotWorkspace._annotation_float(original, "x") + dx
-            annotation["y"] = PlotWorkspace._annotation_float(original, "y") + dy
-        elif annotation_type == ANNOTATION_ARROW:
-            for point in ("start", "end"):
-                annotation[f"{point}_x"] = PlotWorkspace._annotation_float(original, f"{point}_x") + dx
-                annotation[f"{point}_y"] = PlotWorkspace._annotation_float(original, f"{point}_y") + dy
-        elif annotation_type == ANNOTATION_BOX:
-            annotation["x_min"] = PlotWorkspace._annotation_float(original, "x_min") + dx
-            annotation["x_max"] = PlotWorkspace._annotation_float(original, "x_max") + dx
-            annotation["y_min"] = PlotWorkspace._annotation_float(original, "y_min") + dy
-            annotation["y_max"] = PlotWorkspace._annotation_float(original, "y_max") + dy
+        annotation_geometry_service.move_annotation(annotation, original, dx, dy)
 
     @staticmethod
     def _resize_box_annotation(
@@ -702,23 +487,7 @@ class PlotWorkspace(QWidget):
         mode: str,
         current: tuple[float, float],
     ) -> None:
-        x_min = PlotWorkspace._annotation_float(original, "x_min")
-        x_max = PlotWorkspace._annotation_float(original, "x_max")
-        y_min = PlotWorkspace._annotation_float(original, "y_min")
-        y_max = PlotWorkspace._annotation_float(original, "y_max")
-        x_value, y_value = float(current[0]), float(current[1])
-        if "left" in mode:
-            x_min = x_value
-        if "right" in mode:
-            x_max = x_value
-        if "bottom" in mode:
-            y_min = y_value
-        if "top" in mode:
-            y_max = y_value
-        annotation["x_min"] = min(x_min, x_max)
-        annotation["x_max"] = max(x_min, x_max)
-        annotation["y_min"] = min(y_min, y_max)
-        annotation["y_max"] = max(y_min, y_max)
+        annotation_geometry_service.resize_box_annotation(annotation, original, mode, current)
 
     def _drag_distance_too_small(self, drag: dict[str, Any], event) -> bool:
         start = drag.get("pixel_start")
@@ -893,7 +662,7 @@ class PlotWorkspace(QWidget):
     @staticmethod
     def _pixel_distance(axes, data_point: tuple[float, float], pixel_point: tuple[float, float]) -> float:
         x_pixel, y_pixel = axes.transData.transform(data_point)
-        return math.hypot(float(x_pixel) - pixel_point[0], float(y_pixel) - pixel_point[1])
+        return annotation_geometry_service.point_distance((float(x_pixel), float(y_pixel)), pixel_point)
 
     @classmethod
     def _distance_to_segment_pixels(
@@ -905,14 +674,7 @@ class PlotWorkspace(QWidget):
     ) -> float:
         sx, sy = axes.transData.transform(start)
         ex, ey = axes.transData.transform(end)
-        px, py = point
-        dx = float(ex) - float(sx)
-        dy = float(ey) - float(sy)
-        if dx == 0 and dy == 0:
-            return math.hypot(px - float(sx), py - float(sy))
-        t = max(0.0, min(1.0, ((px - float(sx)) * dx + (py - float(sy)) * dy) / (dx * dx + dy * dy)))
-        closest = (float(sx) + t * dx, float(sy) + t * dy)
-        return math.hypot(px - closest[0], py - closest[1])
+        return annotation_geometry_service.distance_to_segment(point, (float(sx), float(sy)), (float(ex), float(ey)))
 
     def _box_contains_event(self, annotation: dict[str, object], axes, event_point: tuple[float, float]) -> bool:
         corners = self._annotation_handle_points(annotation)
@@ -937,24 +699,7 @@ class PlotWorkspace(QWidget):
 
     @staticmethod
     def _annotation_handle_points(annotation: dict[str, object]) -> dict[str, tuple[float, float]]:
-        annotation_type = str(annotation.get("type", ""))
-        if annotation_type == ANNOTATION_ARROW:
-            return {
-                "start": (PlotWorkspace._annotation_float(annotation, "start_x"), PlotWorkspace._annotation_float(annotation, "start_y")),
-                "end": (PlotWorkspace._annotation_float(annotation, "end_x"), PlotWorkspace._annotation_float(annotation, "end_y")),
-            }
-        if annotation_type == ANNOTATION_BOX:
-            x_min = PlotWorkspace._annotation_float(annotation, "x_min")
-            x_max = PlotWorkspace._annotation_float(annotation, "x_max")
-            y_min = PlotWorkspace._annotation_float(annotation, "y_min")
-            y_max = PlotWorkspace._annotation_float(annotation, "y_max")
-            return {
-                "bottom_left": (x_min, y_min),
-                "bottom_right": (x_max, y_min),
-                "top_left": (x_min, y_max),
-                "top_right": (x_max, y_max),
-            }
-        return {}
+        return annotation_geometry_service.annotation_handle_points(annotation)
 
     def _redraw_annotations(self) -> None:
         if not hasattr(self, "canvas") or self.canvas.axes not in self.canvas.figure.axes:
@@ -979,99 +724,10 @@ class PlotWorkspace(QWidget):
             self._selected_annotation_id = ""
         for annotation in self._annotations:
             target = secondary_axes if annotation.get("axis") == "secondary" and secondary_axes is not None else axes
-            artists = self._draw_annotation(target, annotation)
+            artists = annotation_renderer.draw_annotation(target, annotation)
             if self._selected_annotation_id == annotation.get("id"):
-                artists.extend(self._draw_annotation_handles(target, annotation))
+                artists.extend(annotation_renderer.draw_annotation_handles(target, annotation))
             self._annotation_artists[str(annotation.get("id", ""))] = artists
-
-    def _draw_annotation(self, axes, annotation: dict[str, object]) -> list[Any]:
-        annotation_type = str(annotation.get("type", ""))
-        if annotation_type == ANNOTATION_TEXT:
-            return [self._draw_text_annotation(axes, annotation)]
-        if annotation_type == ANNOTATION_ARROW:
-            return [self._draw_arrow_annotation(axes, annotation)]
-        if annotation_type == ANNOTATION_BOX:
-            return [self._draw_box_annotation(axes, annotation)]
-        return []
-
-    @staticmethod
-    def _draw_text_annotation(axes, annotation: dict[str, object]):
-        style = PlotWorkspace._annotation_style(annotation)
-        artist = axes.annotate(
-            str(annotation.get("text", "")),
-            xy=(PlotWorkspace._annotation_float(annotation, "x"), PlotWorkspace._annotation_float(annotation, "y")),
-            xytext=(
-                PlotWorkspace._annotation_float(annotation, "offset_x"),
-                PlotWorkspace._annotation_float(annotation, "offset_y"),
-            ),
-            textcoords="offset points",
-            color=str(style.get("text_color", "black")),
-            fontsize=9,
-            bbox={
-                "boxstyle": "round,pad=0.25",
-                "facecolor": str(style.get("background_color", "white")),
-                "edgecolor": str(style.get("border_color", "black")),
-                "linewidth": 1.0,
-            },
-            zorder=14,
-            annotation_clip=False,
-        )
-        artist.set_gid(f"annotation:{annotation.get('id', '')}")
-        return artist
-
-    @staticmethod
-    def _draw_arrow_annotation(axes, annotation: dict[str, object]):
-        style = PlotWorkspace._annotation_style(annotation)
-        artist = FancyArrowPatch(
-            (PlotWorkspace._annotation_float(annotation, "start_x"), PlotWorkspace._annotation_float(annotation, "start_y")),
-            (PlotWorkspace._annotation_float(annotation, "end_x"), PlotWorkspace._annotation_float(annotation, "end_y")),
-            arrowstyle="->",
-            mutation_scale=13,
-            linewidth=PlotWorkspace._style_float(style.get("line_width"), 1.5),
-            color=str(style.get("color", "red")),
-            zorder=13,
-        )
-        artist.set_gid(f"annotation:{annotation.get('id', '')}")
-        axes.add_patch(artist)
-        return artist
-
-    @staticmethod
-    def _draw_box_annotation(axes, annotation: dict[str, object]):
-        style = PlotWorkspace._annotation_style(annotation)
-        fill_color = str(style.get("fill_color", "transparent"))
-        transparent = fill_color.strip().casefold() in {"", "none", "transparent"}
-        artist = Rectangle(
-            (PlotWorkspace._annotation_float(annotation, "x_min"), PlotWorkspace._annotation_float(annotation, "y_min")),
-            PlotWorkspace._annotation_float(annotation, "x_max") - PlotWorkspace._annotation_float(annotation, "x_min"),
-            PlotWorkspace._annotation_float(annotation, "y_max") - PlotWorkspace._annotation_float(annotation, "y_min"),
-            fill=not transparent,
-            facecolor="none" if transparent else fill_color,
-            edgecolor=str(style.get("edge_color", "orange")),
-            linewidth=PlotWorkspace._style_float(style.get("line_width"), 1.5),
-            alpha=1.0 if transparent else 0.18,
-            zorder=12,
-        )
-        artist.set_gid(f"annotation:{annotation.get('id', '')}")
-        axes.add_patch(artist)
-        return artist
-
-    def _draw_annotation_handles(self, axes, annotation: dict[str, object]) -> list[Any]:
-        handles: list[Any] = []
-        for point in self._annotation_handle_points(annotation).values():
-            handle = axes.scatter(
-                [point[0]],
-                [point[1]],
-                s=ANNOTATION_HANDLE_SIZE,
-                marker="s",
-                facecolors="white",
-                edgecolors=EATON_DARK_BLUE,
-                linewidths=1.2,
-                label="_annotation_handle",
-                zorder=20,
-            )
-            setattr(handle, "_tda_annotation_handle", True)
-            handles.append(handle)
-        return handles
 
     def _build_legend_panel(self) -> QWidget:
         panel = QFrame()
@@ -1580,10 +1236,7 @@ class PlotWorkspace(QWidget):
 
     @staticmethod
     def _normalise_marker_style(value: object) -> str:
-        text = str(value or "").strip()
-        if text in {"", "None", "none"}:
-            return "none"
-        return text
+        return legend_metadata_service.normalise_marker_style(value)
 
     def _series_colours(
         self,
@@ -1592,183 +1245,30 @@ class PlotWorkspace(QWidget):
         primary_colours: list[str],
         secondary_colours: list[str],
     ) -> list[str | None]:
-        persistent_colours = self._normalised_channel_colours(channel_colours or {})
-        manual_colours = [self._manual_series_colour(item) for item in series_items]
-        has_manual_colour = any(manual_colours)
-        has_repeated_channel = any(self._series_channel_key(item) in persistent_colours for item in series_items)
-        if not has_manual_colour and not has_repeated_channel:
-            return [None for _item in series_items]
-
-        reserved = {
-            self._colour_key(colour)
-            for item, manual_colour in zip(series_items, manual_colours)
-            for colour in (manual_colour or persistent_colours.get(self._series_channel_key(item)),)
-            if colour
-        }
-        assignments: list[str | None] = []
-        used: set[str] = set()
-        primary_index = 0
-        secondary_index = 0
-        for item, manual_colour in zip(series_items, manual_colours):
-            is_secondary = bool(item.get("secondary"))
-            channel_colour = manual_colour or persistent_colours.get(self._series_channel_key(item))
-            if not channel_colour:
-                cycle = secondary_colours if is_secondary else primary_colours
-                cycle_index = secondary_index if is_secondary else primary_index
-                channel_colour = self._next_distinct_colour(cycle, cycle_index, used | reserved)
-            assignments.append(channel_colour)
-            if channel_colour:
-                used.add(self._colour_key(channel_colour))
-            if is_secondary:
-                secondary_index += 1
-            else:
-                primary_index += 1
-        return assignments
-
-    @staticmethod
-    def _normalised_channel_colours(channel_colours: dict[str, str]) -> dict[str, str]:
-        normalised: dict[str, str] = {}
-        for channel, colour in channel_colours.items():
-            key = plot_render_service.normalise_channel_name(channel)
-            colour_text = str(colour).strip()
-            if key and colour_text:
-                normalised[key] = colour_text
-        return normalised
+        return plot_render_service.series_colour_assignment(
+            series_items, channel_colours, primary_colours, secondary_colours
+        )
 
     @staticmethod
     def _series_channel_key(item: dict[str, Any]) -> str:
         return plot_render_service.series_channel_key(item)
 
     def _draw_best_fit_lines(self, source_series: list[dict[str, Any]]) -> None:
-        settings = plot_render_service.normalise_best_fit_settings(self._best_fit_settings)
-        if not settings:
-            return
-        source_by_channel = {
-            plot_render_service.normalise_channel_name(source.get("channel")): source
-            for source in source_series
-            if plot_render_service.normalise_channel_name(source.get("channel"))
-        }
-        for setting in settings:
-            channel = str(setting.get("channel", ""))
-            source = source_by_channel.get(plot_render_service.normalise_channel_name(channel))
-            if source is None:
-                continue
-            try:
-                order = int(cast(Any, setting.get("order", 1)))
-            except (TypeError, ValueError):
-                order = 1
-            fit = plot_render_service.polynomial_best_fit(source.get("x"), source.get("y"), order)
-            if fit is None:
-                continue
-            fit_type = str(setting.get("fit_type", "Linear"))
-            source_label = str(source.get("label") or channel)
-            label = self._best_fit_label(source_label, fit_type)
-            axes = source.get("axes") or self.canvas.axes
-            line = axes.plot(
-                fit["x"],
-                fit["y"],
-                linestyle="--",
-                linewidth=max(1.0, self._line_width() * 1.15),
-                color=source.get("colour") or EATON_DARK_BLUE,
-                label=label,
-            )[0]
-            setattr(line, "_tda_best_fit", True)
-            try:
-                line.set_gid(f"best-fit:{channel}")
-            except AttributeError:
-                pass
-            self._best_fit_formula_rows.append(
-                {
-                    "Channel": self._without_right_y_suffix(source_label),
-                    "Fit": fit_type,
-                    "Order": order,
-                    "Formula": fit.get("formula", ""),
-                }
+        self._best_fit_formula_rows.extend(
+            best_fit_renderer.draw_best_fit_lines(
+                self._best_fit_settings,
+                source_series,
+                self.canvas.axes,
+                line_width=self._line_width(),
+                default_colour=EATON_DARK_BLUE,
             )
-
-    @staticmethod
-    def _best_fit_label(source_label: str, fit_type: str) -> str:
-        label = PlotWorkspace._without_right_y_suffix(source_label)
-        return f"{label} {fit_type.lower()} fit"
+        )
 
     def _remove_best_fit_artists(self) -> None:
-        for axes in list(self.canvas.figure.axes):
-            for line in list(axes.get_lines()):
-                if bool(getattr(line, "_tda_best_fit", False)):
-                    line.remove()
+        best_fit_renderer.remove_best_fit_artists(list(self.canvas.figure.axes))
 
     def _best_fit_source_series(self) -> list[dict[str, Any]]:
-        sources: list[dict[str, Any]] = []
-        for axes in list(self.canvas.figure.axes):
-            for line in axes.get_lines():
-                if bool(getattr(line, "_tda_best_fit", False)):
-                    continue
-                if bool(getattr(line, "_tda_hidden", False)):
-                    continue
-                channel = str(getattr(line, "_tda_channel", "")).strip()
-                if not channel:
-                    continue
-                sources.append(
-                    {
-                        "axes": axes,
-                        "channel": channel,
-                        "label": line.get_label(),
-                        "x": line.get_xdata(orig=False),
-                        "y": line.get_ydata(orig=False),
-                        "colour": self._legend_colour(line),
-                    }
-                )
-            for collection in axes.collections:
-                if bool(getattr(collection, "_tda_hidden", False)):
-                    continue
-                channel = str(getattr(collection, "_tda_channel", "")).strip()
-                if not channel:
-                    continue
-                offsets_getter = getattr(collection, "get_offsets", None)
-                if not callable(offsets_getter):
-                    continue
-                offsets = offsets_getter()
-                try:
-                    offset_values = list(cast(Any, offsets))
-                    if len(offset_values) == 0:
-                        continue
-                    x_values = [float(point[0]) for point in offset_values]
-                    y_values = [float(point[1]) for point in offset_values]
-                except (TypeError, ValueError, IndexError):
-                    continue
-                sources.append(
-                    {
-                        "axes": axes,
-                        "channel": channel,
-                        "label": collection.get_label(),
-                        "x": x_values,
-                        "y": y_values,
-                        "colour": self._legend_colour(collection),
-                    }
-                )
-        return sources
-
-    @staticmethod
-    def _manual_series_colour(item: dict[str, Any]) -> str:
-        colour = item.get("colour", item.get("color"))
-        return "" if colour is None else str(colour).strip()
-
-    @classmethod
-    def _next_distinct_colour(cls, colours: list[str], start_index: int, blocked: set[str]) -> str | None:
-        if not colours:
-            return None
-        for offset in range(len(colours)):
-            colour = colours[(start_index + offset) % len(colours)]
-            if cls._colour_key(colour) not in blocked:
-                return colour
-        return colours[start_index % len(colours)]
-
-    @staticmethod
-    def _colour_key(colour: str) -> str:
-        try:
-            return to_hex(colour).lower()
-        except Exception:
-            return str(colour).strip().lower()
+        return best_fit_renderer.source_series(list(self.canvas.figure.axes))
 
     @classmethod
     def _legend_handles_and_labels(cls, axes, secondary_axes, *, include_hidden: bool = True):
@@ -1847,43 +1347,7 @@ class PlotWorkspace(QWidget):
             pass
 
     def _legend_channel_metadata(self, handle, label: str) -> dict[str, object]:
-        channel = str(getattr(handle, "_tda_channel", "")).strip()
-        if not channel:
-            return {}
-        return {
-            "channel": channel,
-            "label": self._without_right_y_suffix(label),
-            "colour": self._legend_colour(handle),
-            "plot_kind": str(getattr(handle, "_tda_plot_kind", "Line")),
-            "label_overridden": bool(getattr(handle, "_tda_label_overridden", False)),
-            "plot_kind_overridden": bool(getattr(handle, "_tda_plot_kind_overridden", False)),
-            "hidden": bool(getattr(handle, "_tda_hidden", False)) or not bool(getattr(handle, "get_visible", lambda: True)()),
-            **self._legend_curve_metadata(handle),
-        }
-
-    def _legend_curve_metadata(self, handle) -> dict[str, str]:
-        metadata = {key: str(getattr(handle, f"_tda_{key}", "")).strip() for key in CURVE_STYLE_KEYS}
-        try:
-            metadata["line_style"] = metadata["line_style"] or str(handle.get_linestyle())
-            metadata["draw_style"] = metadata["draw_style"] or str(handle.get_drawstyle())
-            metadata["line_width"] = metadata["line_width"] or f"{float(handle.get_linewidth()):g}"
-            metadata["marker_style"] = metadata["marker_style"] or self._normalise_marker_style(handle.get_marker())
-            metadata["marker_size"] = metadata["marker_size"] or f"{float(handle.get_markersize()):g}"
-            metadata["marker_face_colour"] = metadata["marker_face_colour"] or self._colour_to_hex(handle.get_markerfacecolor())
-            metadata["marker_edge_colour"] = metadata["marker_edge_colour"] or self._colour_to_hex(handle.get_markeredgecolor())
-        except AttributeError:
-            sizes = getattr(handle, "get_sizes", lambda: [])()
-            face_colours = getattr(handle, "get_facecolors", lambda: [])()
-            edge_colours = getattr(handle, "get_edgecolors", lambda: [])()
-            metadata["line_style"] = metadata["line_style"] or "None"
-            metadata["draw_style"] = metadata["draw_style"] or "default"
-            metadata["line_width"] = metadata["line_width"] or "0"
-            metadata["marker_style"] = metadata["marker_style"] or str(getattr(handle, "_tda_marker_style", "o"))
-            if len(sizes):
-                metadata["marker_size"] = metadata["marker_size"] or f"{math.sqrt(float(sizes[0])):g}"
-            metadata["marker_face_colour"] = metadata["marker_face_colour"] or self._first_colour_to_hex(face_colours)
-            metadata["marker_edge_colour"] = metadata["marker_edge_colour"] or self._first_colour_to_hex(edge_colours)
-        return metadata
+        return legend_metadata_service.channel_metadata(handle, label)
 
     def _legend_visibility_cell(self, metadata: dict[str, object]) -> QWidget:
         channel = str(metadata.get("channel", ""))
@@ -1902,23 +1366,6 @@ class PlotWorkspace(QWidget):
         layout.addWidget(checkbox, 0, Qt.AlignmentFlag.AlignCenter)
         layout.addStretch(1)
         return cell
-
-    @staticmethod
-    def _colour_to_hex(colour: object) -> str:
-        try:
-            return to_hex(cast(Any, colour))
-        except Exception:
-            return ""
-
-    @classmethod
-    def _first_colour_to_hex(cls, colours: object) -> str:
-        try:
-            colour_values = list(cast(Any, colours))
-            if colour_values:
-                return cls._colour_to_hex(colour_values[0])
-        except Exception:
-            pass
-        return ""
 
     def _on_legend_cell_clicked(self, row: int, _column: int) -> None:
         if _column != 1:
@@ -1977,18 +1424,7 @@ class PlotWorkspace(QWidget):
 
     @staticmethod
     def _legend_colour(handle) -> str:
-        try:
-            colour = handle.get_color()
-            return to_hex(colour)
-        except Exception:
-            pass
-        try:
-            colours = handle.get_facecolors()
-            if len(colours):
-                return to_hex(colours[0])
-        except Exception:
-            pass
-        return EATON_DARK_BLUE
+        return legend_metadata_service.legend_colour(handle)
 
     def _apply_axis_padding(self, axes, secondary_axes, auto_fit_axes: bool) -> None:
         """Apply the user-configured X/Y autoscale padding (margins).
@@ -2060,28 +1496,11 @@ class PlotWorkspace(QWidget):
         axis (for example 2 on a 0-90000 flow-rate axis) would crash rendering, so
         the step is dropped and automatic ticks are kept instead.
         """
-        if step is None:
-            return None
-        try:
-            span = abs(float(limits[1]) - float(limits[0]))
-        except (TypeError, ValueError, IndexError):
-            return step
-        if span and span / step > cls.MAX_AXIS_MAJOR_TICKS:
-            return None
-        return step
+        return axis_limits_computer.safe_major_tick(step, limits, max_ticks=cls.MAX_AXIS_MAJOR_TICKS)
 
     @staticmethod
     def _positive_float(value: object) -> float | None:
-        text = str(value).strip()
-        if not text:
-            return None
-        try:
-            number = float(text)
-        except (TypeError, ValueError):
-            return None
-        if not math.isfinite(number) or number <= 0:
-            return None
-        return number
+        return axis_limits_computer.positive_float(value)
 
     @staticmethod
     def _align_secondary_y_ticks_to_primary(axes, secondary_axes) -> None:
@@ -2098,10 +1517,9 @@ class PlotWorkspace(QWidget):
         ]
         if len(primary_ticks) < 2:
             return
-        secondary_ticks = [
-            secondary_min + ((float(tick) - primary_min) / (primary_max - primary_min)) * (secondary_max - secondary_min)
-            for tick in primary_ticks
-        ]
+        secondary_ticks = axis_limits_computer.mapped_secondary_ticks(
+            primary_ticks, primary_min, primary_max, secondary_min, secondary_max
+        )
         secondary_axes.set_yticks(secondary_ticks)
 
     @staticmethod

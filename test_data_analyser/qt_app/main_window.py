@@ -1214,10 +1214,8 @@ class MainWindow(QMainWindow):
                 qt_widget_helpers.remember_data_directory(self.settings_manager, replacement)
         return result, main_data_warning_shown
 
-    @staticmethod
-    def _needs_main_data_relink(result) -> bool:
-        payload = result.payload if isinstance(result.payload, dict) else {}
-        return bool(payload.get("main_data_warning")) and not bool(payload.get("main_data_loaded"))
+    def _needs_main_data_relink(self, result) -> bool:
+        return self.vm.needs_main_data_relink(result)
 
     def _prompt_for_relocated_source_file(self, result) -> str | None:
         payload = result.payload if isinstance(result.payload, dict) else {}
